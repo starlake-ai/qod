@@ -533,6 +533,18 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
         case other => fail(s"a disabled superuser's session ran its next statement: $other")
     }
 
+  it should "be refused on its next statement once its row is deleted" in
+    withRootSession { (sup, fix, grants, _) =>
+      import cats.effect.unsafe.implicits.global
+      grants.current().map(_.user.tenant) shouldBe Right(None)
+      sup.deleteUser(rootId(fix)).unsafeRunSync().isRight shouldBe true
+      grants.current() match
+        case Left(ai.starlake.quack.edge.RouterFailure.AccessDenied(m)) =>
+          m should include(s"user '${SecurityFixtures.RootUsername}' is not registered in tenant")
+        case other => fail(s"a deleted superuser's session ran its next statement: $other")
+      grants.currentIO.unsafeRunSync().isLeft shouldBe true
+    }
+
   it should "keep running while its row is unchanged, across a generation move" in
     withRootSession { (sup, _, grants, _) =>
       sup.restore()

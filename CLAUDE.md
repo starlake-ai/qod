@@ -598,6 +598,9 @@ restores it without a reconnect, and a user disabled, deleted or without the poo
 statement inside a client transaction ends that transaction ("transaction aborted: <reason>; ROLLBACK
 to continue"), and only a lone ROLLBACK is admitted, under no grants. A native client transaction
 whose pinned node leaves the pool is fenced the same way (`FlightSqlRouter.PinLostAnswer`).
+Superuser sessions follow it too (only the system principal's grants stay fixed), and a tenant-less
+row whose kind is not `admin` is refused at the handshake (`PoolSupervisor.authorizeHandshakeDetailed`),
+so a superuser demoted, disabled or deleted is refused on its next statement.
 
 **Accepted over-refusals** (owner rulings, CONTRACT Addendum 4 items 13-21, 24, 30-32a: changing one
 needs the owner; never loosen a rule to fix one). For non-superusers: an unclassified name (a typo
@@ -994,7 +997,7 @@ The auth/ACL/session config types and the DuckLake catalog resolver live under [
 
 ### Grant matching (the node decider)
 
-Table grants are matched in one place, the node decision pipeline: `AuthzDecider` (`edge/authz/`, behind `DecideRoute`) judges the objects of the plan qod-node bound against the session's cached **EffectiveSet** (closure of roles · groups · `qodstate_role_permission` rows reachable through them) through `GrantMatch` (`edge/sql/`). Superusers (`qodstate_user.tenant IS NULL`) and the system principal are allowed by the node locally and never reach it; an OPA tenant's objects go to its OPA instead (below). There is no gateway validator and no switch to turn the check off: `PostgresAclValidator`, `OpaValidator`, `TenantRoutingValidator` and `StatementValidator.allowAll` were deleted in Phase D (decision 29).
+Table grants are matched in one place, the node decision pipeline: `AuthzDecider` (`edge/authz/`, behind `DecideRoute`) judges the objects of the plan qod-node bound against the session's cached **EffectiveSet** (closure of roles · groups · `qodstate_role_permission` rows reachable through them) through `GrantMatch` (`edge/sql/`). Superusers (`qodstate_user.tenant IS NULL` and kind `admin`) and the system principal are allowed by the node locally and never reach it; an OPA tenant's objects go to its OPA instead (below). There is no gateway validator and no switch to turn the check off: `PostgresAclValidator`, `OpaValidator`, `TenantRoutingValidator` and `StatementValidator.allowAll` were deleted in Phase D (decision 29).
 
 The `EffectiveSet` is cached in `PoolSupervisor` (`qod_effective_sets`, at most 10000 entries) with a 60s TTL keyed by `(userId, jwtRoles.hashCode, jwtGroups.hashCode)`; every RBAC mutator (`createRole`, `addUserRole`, `grantPoolPermission`, etc.) calls `invalidateEffectiveCache()` so a freshly-granted role takes effect on the next statement without waiting on the TTL: a new handshake resolves it, and an open session resolves it again on its first statement after the policy version moved ("Open sessions follow the policy version" above).
 

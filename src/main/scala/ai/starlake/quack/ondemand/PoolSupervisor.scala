@@ -5204,8 +5204,10 @@ final class PoolSupervisor(
                     Left(HandshakeDenial.Denied(s"user '$username' is disabled"))
                   case Some(user) =>
                     // 3. Effective set. Superusers get an empty set; the node allows their
-                    //    statements without a decision. Claims are copied in after the cache lookup (never part
-                    //    of the effective-set cache key).
+                    //    statements without a decision. `user.tenant.isEmpty` alone stands for a
+                    //    superuser here only because the kind arm above refused every tenant-less
+                    //    row whose kind is not admin. Claims are copied in after the cache lookup
+                    //    (never part of the effective-set cache key).
                     val eff =
                       if user.tenant.isEmpty then
                         ai.starlake.quack.ondemand.rbac.EffectiveSet(user, Nil, Nil, Nil, Nil)

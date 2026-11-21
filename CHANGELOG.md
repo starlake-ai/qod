@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Upgrading
+
+- A tenant-less account whose kind is not `admin` (one seeded with `QOD_ADMIN_KIND=user`, or a
+  superuser demoted earlier) loses data access with this release. Its refusal reads like an
+  unknown user, and the WARN line naming the reason is below the default ERROR log level. Find
+  such accounts before upgrading, on the control-plane database, with
+  `SELECT username, kind FROM qodstate_user WHERE tenant IS NULL AND lower(kind) <> 'admin'`,
+  and set the kind of each one that should stay a superuser back to `admin`.
+
 ### Security
 
 - **A tenant-less account that is not a superuser no longer reaches data.** A superuser demoted to
@@ -10,7 +19,8 @@
   access token on `/mcp`, bypassing grants, row and column policies. The handshake now binds a
   tenant-less row only when its kind is `admin` and refuses any other as an unknown user, logging
   the reason at WARN. A superuser's session already open when its row is demoted, disabled or
-  deleted is refused on its next statement.
+  deleted is refused on its next statement on the replica that made the change, and on another
+  replica once that one has seen the change, through its NOTIFY or its periodic snapshot refresh.
 
 ## 0.14.1
 

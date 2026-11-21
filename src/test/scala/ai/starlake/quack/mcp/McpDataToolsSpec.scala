@@ -124,14 +124,27 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
         )
       )
 
+  /** The default `executor` of [[fixture]] when `executorOf` builds the executor instead. It fails
+    * any statement, so a case that forgets both never reads as a pass.
+    */
+  private val NoExecutor: CatalogPreviewHandlers.PreviewExecutor =
+    (_, _, _) => IO.raiseError(new IllegalStateException("fixture: no executor given"))
+
+  /** `executorOf`, when set, builds the executor over the fixture's own supervisor and replaces
+    * `executor`, which must then be left at its default.
+    */
   private def fixture(
-      executor: CatalogPreviewHandlers.PreviewExecutor,
+      executor: CatalogPreviewHandlers.PreviewExecutor = NoExecutor,
       cfg: McpConfig = McpConfig(),
       sessionOf: String => Option[SessionTokenStore.Session] = _ => None,
       stmtHistory: StatementHistoryStore = new StatementHistoryStore(),
       store: InMemoryControlPlaneStore = new InMemoryControlPlaneStore(),
       executorOf: Option[PoolSupervisor => CatalogPreviewHandlers.PreviewExecutor] = None
   ): McpDataTools =
+    require(
+      executorOf.isEmpty || (executor eq NoExecutor),
+      "fixture: pass either executor or executorOf, not both"
+    )
     val backend = ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend.noop()
     val tracker = new ai.starlake.quack.edge.adapter.NodeLoadTracker
     val sup     = new PoolSupervisor(backend, tracker, store)
@@ -653,19 +666,17 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
     )
   }
 
-  it should "refuse a demoted superuser's PAT at the handshake gate and route nothing" in {
-    // The real routed executor over the fixture's supervisor: its handshake gate is what binds
-    // (or refuses) the owner row. The inner route stands for the node; it records every statement
-    // that reaches it. The owner row is a superuser that was demoted to kind `user`, tenant kept
-    // empty, while its PAT (resolved while the owner is enabled) stays valid.
+  /** `run_sql` as [[McpSuperuserPat]] through the real routed executor over the fixture's
+    * supervisor, whose handshake gate binds (or refuses) the owner row, stored with `ownerKind` and
+    * its tenant left empty; its PAT (resolved while the owner is enabled) stays valid. The inner
+    * route stands for the node and records every statement that reaches it. Returns the tool's
+    * answer and those statements.
+    */
+  private def runSqlThroughGate(ownerKind: String): (Either[String, Json], List[String]) =
     val store = new InMemoryControlPlaneStore()
-    store.upsertUserIdentity(McpSuperuserPat.Owner)
-    store.upsertUserIdentity(McpSuperuserPat.Owner.copy(kind = "user"))
+    store.upsertUserIdentity(McpSuperuserPat.Owner.copy(kind = ownerKind))
     val reached = ListBuffer.empty[String]
-    val history = new StatementHistoryStore()
     val tools   = fixture(
-      rangeExecutor(1),
-      stmtHistory = history,
       store = store,
       executorOf = Some(sup =>
         ai.starlake.quack.boot.RoutedExecutor(
@@ -687,9 +698,22 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
       "database" -> Json.fromString(TenantDb),
       "tenant"   -> Json.fromString(Tenant)
     )
+    (out, reached.toList)
+
+  it should "refuse a demoted superuser's PAT at the handshake gate and route nothing" in {
+    // The owner row is a superuser that was demoted to kind `user`.
+    val (out, reached) = runSqlThroughGate(ownerKind = "user")
     out.isLeft shouldBe true
     out.swap.toOption.get should include("is not registered in tenant")
-    reached.toList shouldBe Nil
+    reached shouldBe Nil
+  }
+
+  it should "route a superuser's PAT past the handshake gate while its owner's kind is admin" in {
+    // The positive control of the case above: the same setup with the owner left at kind `admin`
+    // reaches the node, so that refusal came from the kind and not from a row the gate missed.
+    val (out, reached) = runSqlThroughGate(ownerKind = "admin")
+    withClue(out)(out.swap.toOption.get should include("reached the node"))
+    reached shouldBe List("SELECT 1")
   }
 
   // ------------------------------------------------------------------
