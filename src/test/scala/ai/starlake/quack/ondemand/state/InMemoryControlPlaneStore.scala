@@ -493,26 +493,33 @@ class InMemoryControlPlaneStore extends ControlPlaneStore:
       name: String,
       description: Option[String],
       permissions: Set[String]
-  ): PlatformRole =
-    require(findPlatformRoleByName(name).isEmpty, s"duplicate platform role name: $name")
+  ): PlatformRole = synchronized {
+    refuseTakenPlatformRoleName(name, None)
     val r = PlatformRole(java.util.UUID.randomUUID().toString, name, description, permissions)
     platformRoles(r.id) = r
     r
+  }
+
+  /** Mirrors Postgres' unique index on `lower(name)`, raising the same SQLState. */
+  private def refuseTakenPlatformRoleName(name: String, exceptId: Option[String]): Unit =
+    if platformRoles.values.exists(o =>
+        !exceptId.contains(o.id) &&
+          o.name.toLowerCase(java.util.Locale.ROOT) == name.toLowerCase(java.util.Locale.ROOT)
+      )
+    then throw new java.sql.SQLException(s"duplicate platform role name: $name", "23505")
   def updatePlatformRole(
       id: String,
       name: String,
       description: Option[String],
       permissions: Set[String]
-  ): Option[PlatformRole] =
+  ): Option[PlatformRole] = synchronized {
     platformRoles.get(id).map { _ =>
-      require(
-        !platformRoles.values.exists(o => o.id != id && o.name == name),
-        s"duplicate platform role name: $name"
-      )
+      refuseTakenPlatformRoleName(name, Some(id))
       val r = PlatformRole(id, name, description, permissions)
       platformRoles(id) = r
       r
     }
+  }
   def deletePlatformRole(id: String): Boolean =
     userPlatformRoles.keys.filter(_._2 == id).foreach(userPlatformRoles.remove)
     platformRoles.remove(id).isDefined

@@ -4,12 +4,19 @@ import ai.starlake.quack.edge.adapter.NodeLoadTracker
 import ai.starlake.quack.model.Tenant
 import ai.starlake.quack.ondemand.rbac.{DeclaredPermission, PlatformPermissions, UserMemberships}
 import ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend
-import ai.starlake.quack.ondemand.state.{LiquibaseRunner, PostgresControlPlaneStore, UserStore}
+import ai.starlake.quack.ondemand.state.{
+  ControlPlaneStore,
+  LiquibaseRunner,
+  PlatformRole,
+  PostgresControlPlaneStore,
+  UserStore
+}
 import ai.starlake.quack.ondemand.state.testkit.TestPostgres
 import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
+import java.util.concurrent.{CountDownLatch, TimeUnit}
 import scala.util.Try
 
 /** Platform roles and staff users through the supervisor (issue #274). On Postgres, as `createUser`
@@ -21,8 +28,38 @@ class PlatformRoleSupervisorSpec extends AnyFlatSpec with Matchers:
 
   private val Tenant1 = "acme"
 
+  /** Once armed, holds the next read of the method named (`find` or `perms`) after it read its
+    * value: it signals `loaded`, then waits for `release`, so a test can change the state while a
+    * load is in flight.
+    */
+  private final class GatedStore(inner: PostgresControlPlaneStore) extends ControlPlaneStore:
+    export inner.{findUser as _, platformPermissionsOfUser as _, *}
+    @volatile var gate: Option[(String, CountDownLatch, CountDownLatch)] = None
+    private def held[A](method: String)(a: A): A                         =
+      gate.filter(_._1 == method).foreach { (_, loaded, release) =>
+        gate = None
+        loaded.countDown()
+        release.await(10, TimeUnit.SECONDS)
+      }
+      a
+    def platformPermissionsOfUser(userId: String): Set[String] =
+      held("perms")(inner.platformPermissionsOfUser(userId))
+    def findUser(tenant: Option[String], username: String) =
+      held("find")(inner.findUser(tenant, username))
+
+  /** Hides every platform role from the supervisor's own name check, so the database's unique index
+    * answers a duplicate.
+    */
+  private final class BlindStore(inner: PostgresControlPlaneStore) extends ControlPlaneStore:
+    export inner.{listPlatformRoles as _, *}
+    def listPlatformRoles(): List[PlatformRole] = Nil
+
   private def withPostgres(
       test: (PoolSupervisor, PostgresControlPlaneStore, UserStore) => Unit
+  ): Unit = withStores(identity)((s, _, st, us) => test(s, st, us))
+
+  private def withStores[S <: ControlPlaneStore](wrap: PostgresControlPlaneStore => S)(
+      test: (PoolSupervisor, S, PostgresControlPlaneStore, UserStore) => Unit
   ): Unit =
     TestPostgres.ensureReachable()
     val dbName                                   = s"qodprs_test_${System.nanoTime()}"
@@ -36,7 +73,8 @@ class PlatformRoleSupervisorSpec extends AnyFlatSpec with Matchers:
       store = Some(st)
       val us = new UserStore(url, TestPostgres.pgUser, TestPostgres.pgPass)
       users = Some(us)
-      val sup = new PoolSupervisor(StubQuackBackend.noop(), new NodeLoadTracker, st)
+      val wrapped = wrap(st)
+      val sup     = new PoolSupervisor(StubQuackBackend.noop(), new NodeLoadTracker, wrapped)
       sup.restore()
       sup.createTenant(Tenant(id = Tenant1)).unsafeRunSync()
       sup.setDeclaredPermissions(
@@ -45,7 +83,7 @@ class PlatformRoleSupervisorSpec extends AnyFlatSpec with Matchers:
           DeclaredPermission("hosted.quota.extra", "hosted", "extra")
         )
       )
-      test(sup, st, us)
+      test(sup, wrapped, st, us)
     finally
       users.foreach(u => Try(u.close()))
       store.foreach(s => Try(s.close()))
@@ -71,6 +109,7 @@ class PlatformRoleSupervisorSpec extends AnyFlatSpec with Matchers:
     PlatformPermissions.nameRefusal("hosted", "hosted.Tenant") shouldBe defined
     PlatformPermissions.nameRefusal("hosted", "hosted.tenant.") shouldBe defined
     PlatformPermissions.nameRefusal("hosted", "hosted..x") shouldBe defined
+    PlatformPermissions.nameRefusal("hosted", "hosted.a..b") shouldBe defined
   }
 
   "createPlatformRole" should "refuse an undeclared permission" in withPostgres { (s, _, _) =>
@@ -147,6 +186,78 @@ class PlatformRoleSupervisorSpec extends AnyFlatSpec with Matchers:
     ]
     s.deletePlatformRole("nope").left.toOption.get shouldBe a[SupervisorError.NotFound]
   }
+
+  /** Runs `staffPrincipal(name)` on another thread, holds its load at the store, runs `change`
+    * while it is held, then lets it finish and returns what it loaded.
+    */
+  private def racedLoad(
+      s: PoolSupervisor,
+      gated: GatedStore,
+      name: String,
+      at: String = "perms"
+  )(change: => Unit): Option[ai.starlake.quack.ondemand.rbac.StaffPrincipal] =
+    val loaded  = new CountDownLatch(1)
+    val release = new CountDownLatch(1)
+    gated.gate = Some((at, loaded, release))
+    @volatile var out: Option[ai.starlake.quack.ondemand.rbac.StaffPrincipal] = None
+    val t = new Thread(() => out = s.staffPrincipal(name))
+    t.start()
+    loaded.await(10, TimeUnit.SECONDS) shouldBe true
+    change
+    release.countDown()
+    t.join(10000)
+    out
+
+  "staffPrincipal" should "not serve a load that raced a role change" in withStores(
+    new GatedStore(_)
+  ) { (s, gated, _, us) =>
+    val role = s.createPlatformRole("support", None, Set("hosted.tenant.read")).toOption.get
+    staff(s, us, "sam", List("support")).isRight shouldBe true
+    val raced = racedLoad(s, gated, "sam") {
+      s.updatePlatformRole(
+        role.id,
+        None,
+        None,
+        Some(Set("hosted.tenant.read", "hosted.quota.extra"))
+      ).isRight shouldBe true
+    }
+    raced.map(_.permissions) shouldBe Some(Set("hosted.tenant.read"))
+    s.staffPrincipal("sam").map(_.permissions) shouldBe Some(
+      Set("hosted.tenant.read", "hosted.quota.extra")
+    )
+  }
+
+  it should "not serve a load that raced a disable" in withStores(new GatedStore(_)) {
+    (s, gated, _, us) =>
+      s.createPlatformRole("support", None, Set("hosted.tenant.read"))
+      val u = staff(s, us, "sam", List("support")).toOption.get
+      racedLoad(s, gated, "sam") {
+        s.updateUserPassword(u.id, None, None, us, enabled = Some(false))
+          .unsafeRunSync()
+          .isRight shouldBe true
+      } shouldBe defined
+      s.staffPrincipal("sam") shouldBe None
+  }
+
+  it should "not serve a miss that raced a staff create" in withStores(new GatedStore(_)) {
+    (s, gated, _, us) =>
+      racedLoad(s, gated, "late", at = "find") {
+        staff(s, us, "late", Nil).isRight shouldBe true
+      } shouldBe None
+      s.staffPrincipal("late") shouldBe defined
+  }
+
+  "the database's unique index" should "answer a duplicate the check missed as NameTaken" in
+    withStores(new BlindStore(_)) { (s, _, _, _) =>
+      s.createPlatformRole("support", None, Set.empty).isRight shouldBe true
+      s.createPlatformRole("SUPPORT", None, Set.empty).left.toOption.get shouldBe a[
+        SupervisorError.NameTaken
+      ]
+      val b = s.createPlatformRole("billing", None, Set.empty).toOption.get
+      s.updatePlatformRole(b.id, Some("Support"), None, None).left.toOption.get shouldBe a[
+        SupervisorError.NameTaken
+      ]
+    }
 
   "staffPrincipal" should "follow role edits at once" in withPostgres { (s, _, us) =>
     val role = s.createPlatformRole("support", None, Set("hosted.tenant.read")).toOption.get
@@ -298,4 +409,50 @@ class PlatformRoleSupervisorSpec extends AnyFlatSpec with Matchers:
       s.updateUserPassword(u.id, None, Some("user"), us).unsafeRunSync().isRight shouldBe true
       s.platformRoleNamesOf(u.id) shouldBe Nil
       s.staffPrincipal("sam") shouldBe None
+  }
+
+  "a move to staff" should "not bring back edges left on a row that was not staff" in
+    withPostgres { (s, store, us) =>
+      val r    = s.createPlatformRole("support", None, Set("hosted.tenant.read")).toOption.get
+      val root = s
+        .createUser(None, "root", "pw-123456", "admin", us, noMemberships)
+        .unsafeRunSync()
+        .toOption
+        .get
+      // An edge a racing setUserPlatformRoles could leave on a row that is no longer staff.
+      store.setUserPlatformRoles(root.id, Set(r.id))
+      s.updateUserPassword(root.id, None, Some("staff"), us).unsafeRunSync().isRight shouldBe true
+      s.platformRoleNamesOf(root.id) shouldBe Nil
+      s.staffPrincipal("root").map(_.permissions) shouldBe Some(Set.empty)
+      val op = s
+        .createUser(None, "op", "pw-123456", "admin", us, noMemberships)
+        .unsafeRunSync()
+        .toOption
+        .get
+      store.setUserPlatformRoles(op.id, Set(r.id))
+      s.createUser(None, "op", "pw-123456", "staff", us, noMemberships)
+        .unsafeRunSync()
+        .isRight shouldBe true
+      s.platformRoleNamesOf(op.id) shouldBe Nil
+      s.staffPrincipal("op").map(_.permissions) shouldBe Some(Set.empty)
+    }
+
+  "an upsert over a staff row to another kind" should "drop its platform roles" in withPostgres {
+    (s, _, us) =>
+      s.createPlatformRole("support", None, Set("hosted.tenant.read"))
+      val u = staff(s, us, "sam", List("support")).toOption.get
+      s.staffPrincipal("sam") shouldBe defined
+      s.createUser(None, "sam", "pw-123456", "admin", us, noMemberships)
+        .unsafeRunSync()
+        .isRight shouldBe true
+      s.platformRoleNamesOf(u.id) shouldBe Nil
+      s.staffPrincipal("sam") shouldBe None
+  }
+
+  "an upsert over a staff row naming no roles" should "keep its roles" in withPostgres {
+    (s, _, us) =>
+      s.createPlatformRole("support", None, Set("hosted.tenant.read"))
+      val u = staff(s, us, "sam", List("support")).toOption.get
+      staff(s, us, "sam", Nil).isRight shouldBe true
+      s.platformRoleNamesOf(u.id) shouldBe List("support")
   }

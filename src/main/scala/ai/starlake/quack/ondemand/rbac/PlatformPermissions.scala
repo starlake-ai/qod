@@ -15,7 +15,8 @@ object PlatformPermissions:
   /** Superusers hold every permission implicitly; no stored role may take the name. */
   val ReservedRoleName: String = "superuser"
 
-  private val Rest = "[a-z0-9._]+".r
+  /** Dot-separated segments of a-z, 0-9 and '_', none empty. */
+  private val Rest = "[a-z0-9_]+(\\.[a-z0-9_]+)*".r
 
   /** Some(reason) when `name` is not a valid permission name for `module`. */
   def nameRefusal(module: String, name: String): Option[String] =
@@ -26,6 +27,9 @@ object PlatformPermissions:
       Some(s"permission '$name' must start with the module name: '$prefix'")
     else
       val rest = name.stripPrefix(prefix)
-      if rest.isEmpty || !Rest.matches(rest) || rest.startsWith(".") || rest.endsWith(".") then
-        Some(s"permission '$name': after '$prefix' only a-z, 0-9, '.' and '_' are allowed")
+      if !Rest.matches(rest) then
+        Some(
+          s"permission '$name': after '$prefix' only a-z, 0-9 and '_' segments joined by '.' " +
+            "are allowed"
+        )
       else None

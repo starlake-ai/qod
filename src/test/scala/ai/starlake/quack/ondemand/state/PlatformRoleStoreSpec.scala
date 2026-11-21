@@ -83,6 +83,21 @@ class PlatformRoleStoreSpec extends AnyFlatSpec with Matchers:
       s.getPlatformRole(b.id).map(_.name) shouldBe Some("b")
     }
 
+    it should "refuse a name another role holds in another case, as a unique violation" in run {
+      s =>
+        s.insertPlatformRole("Support", None, Set.empty)
+        val onInsert =
+          the[java.sql.SQLException] thrownBy s.insertPlatformRole("support", None, Set.empty)
+        onInsert.getSQLState shouldBe "23505"
+        val b        = s.insertPlatformRole("billing", None, Set.empty)
+        val onUpdate =
+          the[java.sql.SQLException] thrownBy s.updatePlatformRole(b.id, "SUPPORT", None, Set.empty)
+        onUpdate.getSQLState shouldBe "23505"
+        // A role's own name in another case is no clash.
+        s.updatePlatformRole(b.id, "Billing", None, Set.empty).map(_.name) shouldBe Some("Billing")
+        s.listPlatformRoles().map(_.name).toSet shouldBe Set("Support", "Billing")
+    }
+
     it should "refuse an unknown user or role id when setting a user's roles" in run { s =>
       val uid = staff(s, "sam")
       val a   = s.insertPlatformRole("a", None, Set.empty)
