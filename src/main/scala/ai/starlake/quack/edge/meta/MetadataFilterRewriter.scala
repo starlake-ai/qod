@@ -5,7 +5,7 @@ import ai.starlake.quack.edge.cls.SchemaContext
 import ai.starlake.quack.edge.policy.TableClauses
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.state.RolePermission
-import ai.starlake.sql.TooDeep
+import ai.starlake.sql.{IdentifierFold, TooDeep}
 import net.sf.jsqlparser.expression.operators.relational.{
   ExistsExpression,
   InExpression,
@@ -107,7 +107,7 @@ final class MetadataFilterRewriter(
     */
   def narrows(eff: EffectiveSet, ctx: SchemaContext): Boolean =
     enabled && eff.user.tenant.nonEmpty && !hasWildcardAll(eff) &&
-      !readGrants(eff, ctx).exists(_.schemaName.equalsIgnoreCase(InformationSchema))
+      !readGrants(eff, ctx).exists(g => IdentifierFold.same(g.schemaName, InformationSchema))
 
   def rewrite(sql: String, eff: EffectiveSet, ctx: SchemaContext): MetadataFilterOutcome =
     if !enabled then Passthrough
@@ -117,7 +117,7 @@ final class MetadataFilterRewriter(
     else TooDeep.orElse(Denied(TooDeep.Reason))(filtered(sql, eff, ctx))
 
   private def filtered(sql: String, eff: EffectiveSet, ctx: SchemaContext): MetadataFilterOutcome =
-    if readGrants(eff, ctx).exists(_.schemaName.equalsIgnoreCase(InformationSchema)) then
+    if readGrants(eff, ctx).exists(g => IdentifierFold.same(g.schemaName, InformationSchema)) then
       // Operator escape hatch: an EXPLICIT (schema named literally) information_schema
       // grant keeps today's unfiltered read.
       Passthrough
@@ -276,7 +276,7 @@ final class MetadataFilterRewriter(
     val sessionCat = ctx.defaultDatabase.getOrElse("")
     eff.permissions.filter { p =>
       ReadCoveringVerbs.contains(p.verb.toUpperCase(Locale.ROOT)) &&
-      (p.catalogName == RolePermission.Wildcard || p.catalogName.equalsIgnoreCase(sessionCat))
+      (p.catalogName == RolePermission.Wildcard || IdentifierFold.same(p.catalogName, sessionCat))
     }
 
   /** The Read-covering grants a filtered listing shows rows of: the wildcard catalog's and every
@@ -512,10 +512,10 @@ object MetadataFilterRewriter:
     val schema = Option(t.getSchemaName).getOrElse("")
     val cat    = Option(t.getDatabase).flatMap(d => Option(d.getDatabaseName)).getOrElse("")
     val name   = Option(t.getName).getOrElse("")
-    val catOk  = cat.isEmpty || cat.equalsIgnoreCase(sessionCat)
-    if catOk && schema.equalsIgnoreCase(InformationSchema) &&
-      FilterableTables.contains(name.toLowerCase(Locale.ROOT))
-    then Some(name.toLowerCase(Locale.ROOT))
+    val catOk  = cat.isEmpty || IdentifierFold.same(cat, sessionCat)
+    if catOk && IdentifierFold.same(schema, InformationSchema) &&
+      FilterableTables.contains(IdentifierFold.fold(name))
+    then Some(IdentifierFold.fold(name))
     else None
 
   /** Some(fn) when `tf` is exactly the unqualified, argument-free call `fn()` of a filterable
@@ -588,10 +588,9 @@ object MetadataFilterRewriter:
     val schema = Option(t.getSchemaName).getOrElse("")
     val cat    = Option(t.getDatabase).flatMap(d => Option(d.getDatabaseName)).getOrElse("")
     val name   = Option(t.getName).getOrElse("")
-    cat.nonEmpty && !cat.equalsIgnoreCase(sessionCat) &&
-    schema.equalsIgnoreCase(InformationSchema) && FilterableTables.contains(
-      name.toLowerCase(Locale.ROOT)
-    )
+    cat.nonEmpty && !IdentifierFold.same(cat, sessionCat) &&
+    IdentifierFold.same(schema, InformationSchema) &&
+    FilterableTables.contains(IdentifierFold.fold(name))
 
   private final case class RefCounts(nodes: Int, crossCatalog: Int)
 

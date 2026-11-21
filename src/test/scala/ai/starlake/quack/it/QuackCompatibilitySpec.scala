@@ -107,6 +107,7 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
            |CREATE SCHEMA acme_db.tpch1;
            |CREATE TABLE acme_db.tpch1.customer AS SELECT range AS c_custkey, 'name' || range AS c_name FROM range(2000);
            |CREATE TABLE acme_db.tpch1.secret AS SELECT 1 AS x;
+           |CREATE TABLE acme_db.tpch1."Clés" AS SELECT 1 AS id, 'raw-secret' AS secret;
            |CREATE TABLE acme_db.tpch1.ids AS SELECT range AS id FROM range(60000);
            |CREATE SCHEMA acme_db.other;
            |CREATE TABLE acme_db.other.ids AS SELECT range AS id FROM range(7);
@@ -169,7 +170,8 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
       Map(
         ("acme_db", "tpch1", "customer") -> List("c_custkey", "c_name"),
         ("acme_db", "tpch1", "ids")      -> List("id"),
-        ("acme_db", "tpch1", "secret")   -> List("x")
+        ("acme_db", "tpch1", "secret")   -> List("x"),
+        ("acme_db", "tpch1", "Clés")     -> List("id", "secret")
       )
     )
     router = new FlightSqlRouter(
@@ -184,7 +186,8 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
     val user   = RbacUser("u-1", Some("t-1"), "alice", kind = "user")
     val grants = List(
       RolePermission("rp-1", "r-1", "acme_db", "tpch1", "customer", "RW"),
-      RolePermission("rp-2", "r-1", "acme_db", "tpch1", "ids", "RO")
+      RolePermission("rp-2", "r-1", "acme_db", "tpch1", "ids", "RO"),
+      RolePermission("rp-3", "r-1", "acme_db", "tpch1", "Clés", "RO")
     )
     val masks = List(
       RoleColumnPolicy(
@@ -196,7 +199,8 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
         "c_name",
         "mask",
         Some("'***'")
-      )
+      ),
+      RoleColumnPolicy("cp-2", "r-1", "acme_db", "tpch1", "Clés", "secret", "mask", Some("'***'"))
     )
     val rowPolicies = List(RoleRowPolicy("rlp-1", "r-1", "acme_db", "tpch1", "secret", "x = 1"))
     val eff         = EffectiveSet(user, Nil, Nil, grants, Nil, masks, rowPolicies)
@@ -282,7 +286,8 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
           case "insert" | "update" | "delete" => "Write"
           case _                              => "Ddl"
         val granted = catalog != "acme_db" ||
-          (schema == "tpch1" && (name == "customer" || (name == "ids" && verb == "Read")))
+          (schema == "tpch1" && (name == "customer" ||
+            ((name == "ids" || name == "Clés") && verb == "Read")))
         Option.unless(granted)(s"user:alice lacks grants on acme_db.$schema.$name:$verb")
       }
       .nextOption()
@@ -386,6 +391,31 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
         if rc == 0 then out should include("***") else err should include("access denied")
       }
     }
+
+  // DuckDB folds identifier case for ASCII letters only, so a CTE named "clÉs" does not shadow the
+  // table "Clés": the node reads the table. The gateway must read it so too and mask its column
+  // (security review C1), here against a real node.
+  it should "mask a table whose name differs from a CTE's only in a non-ASCII letter's case" in:
+    assume(liveReady, "DuckDB 2.0 CLI or a qod-node build not available")
+    List(
+      """WITH "clÉs" AS (SELECT 0 AS id, ''cte'' AS secret) SELECT c.secret FROM "Clés" c""",
+      """WITH "clÉs" AS (SELECT 0 AS id, ''cte'' AS secret) SELECT secret FROM "Clés"""",
+      """WITH "clÉs" AS (SELECT 0 AS id, ''cte'' AS secret) SELECT secret FROM "clÉs" """ +
+        """UNION ALL SELECT secret FROM "Clés""""
+    ).foreach { sql =>
+      val (rc, out, err) =
+        cli(s"SELECT * FROM quack_query('$endpoint', '$sql', token := '$Token');")
+      withClue(s"$sql: rc=$rc out=$out err=$err") {
+        out should not include "raw-secret"
+        if rc == 0 then out should include("***") else err should include("access denied")
+      }
+    }
+    // A CTE spelled with ASCII case changes only still shadows the table, as DuckDB binds it.
+    val shadow = """WITH "CLéS" AS (SELECT 0 AS id, ''cte'' AS secret) SELECT secret FROM "Clés""""
+    val (rc, out, err) =
+      cli(s"SELECT * FROM quack_query('$endpoint', '$shadow', token := '$Token');")
+    withClue(err)(rc shouldBe 0)
+    out shouldBe "cte"
 
   it should "sync only the tables the principal is granted (issue #114)" in:
     assume(liveReady, "DuckDB 2.0 CLI or a qod-node build not available")

@@ -67,7 +67,8 @@ object FunctionClasses:
     if lower(cat) != "system" then None
     else all.get(Key(lower(sch), lower(name), lower(tpe)))
 
-  private def lower(s: String): String = s.toLowerCase(Locale.ROOT)
+  // As DuckDB folds a name it looks up (ASCII letters only): the Kelvin sign is no `k` here.
+  private def lower(s: String): String = ai.starlake.sql.IdentifierFold.fold(s)
 
   /** The rows (`name`, `schema`, `type`, `class`) of `text`. Throws IllegalArgumentException naming
     * the line of an unknown type or class, a File class on anything but a table function, or a

@@ -1000,6 +1000,15 @@ The `EffectiveSet` is cached in `PoolSupervisor` (`qod_effective_sets`, at most 
 
 **DML / DDL grants are enforced per-table.** The node describes every object a plan reads or writes with its access; `GrantMatch.verbCovers` maps the canonical grant verbs (`RO`/`RW`/`DDL`/`ALL`, see `RolePermission.ValidVerbs`) onto the collapsed `Read | Write | Ddl`. A role permission of `verb=ALL` covers anything; `verb=RW` covers `Read` and `Write` but not `Ddl`; `verb=RO` covers only `Read`. A wildcard catalog grant covers only the session's own catalogs (`GrantMatch.catalogMatch`), never a sibling tenant's. Trigger DDL is superuser-only (tenant admins included).
 
+**Names compare as DuckDB binds them** (security review C1): DuckDB folds identifier case for ASCII
+letters only, so `"Clés"` and `"clÉs"` are two tables of one schema and a CTE `"clÉs"` does not
+shadow the table `"Clés"`. Every comparison of a name against what DuckDB resolves (grants in
+`GrantMatch` and `AuthzDecider`, CTE scoping in `TableExtractor`, the column rewriter's bindings,
+`TableRef`, the metadata filter's schema checks) goes through `ai.starlake.sql.IdentifierFold`,
+never `toLowerCase` / `equalsIgnoreCase`, which fold every cased letter and made a policy step read
+the table as the CTE and pass its masked columns raw. Matching a column or row policy to a table or
+column stays `equalsIgnoreCase` on purpose (broader, so it masks or filters more, never less).
+
 ### OPA authorization (per tenant)
 
 `qodstate_tenant.acl_mode` (Liquibase `0044`, null = `QOD_ACL_MODE`, default `qod`) hands a tenant's data-access decisions to its own OPA server: pool access at handshake (gate 4 through `OpaPoolAccess`) and table and file access per statement, asked by the node decider (`AuthzDecider`, `OpaAuthorizer.decide`) on the objects DuckDB resolved, after the rules QoD always enforces: each access carries `kind`, `columns` and `via` (the outermost secure view it is read through), and `locations` lists the files already admitted, with the scope that admitted each (`OpaInput.decide`, `client.edge` `node`, never `statement.text`). The gateway sends OPA nothing per statement. QoD grant tables are ignored for that tenant; memberships are still sent as identity. Any mode other than exactly `qod` is OPA.

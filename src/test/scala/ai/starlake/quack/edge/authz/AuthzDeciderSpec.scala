@@ -385,6 +385,25 @@ class AuthzDeciderSpec extends AnyFlatSpec with Matchers:
     )
   }
 
+  // DuckDB folds ASCII letters only (security review C1 audit): a catalog named with the long s is
+  // not the system catalog, and a table whose name differs from a granted one in a non-ASCII
+  // letter's case is another table. Java's equalsIgnoreCase read both as the same name.
+  "names the decider compares" should "fold ASCII letters only, as DuckDB binds them" in {
+    refused(
+      plan(objects = List(obj("x", catalog = "ſystem"))),
+      "user:alice lacks grants on ſystem.main.x:read"
+    )
+    allow(plan(objects = List(obj("duckdb_tables", kind = "view", catalog = "SYSTEM"))))
+    allow(plan(objects = List(obj("scratch", "create", catalog = "TEMP"))))
+    val cles = eff(List(perm("p-1", "acme_lake", "main", "Clés", "RO")))
+    allow(plan(objects = List(obj("CLéS"))), principal(cles))
+    refused(
+      plan(objects = List(obj("clÉs"))),
+      "user:alice lacks grants on acme_lake.main.clÉs:read",
+      principal(cles)
+    )
+  }
+
   // qod-node describes a DuckLake read at any snapshot under the table's current name and columns
   // (review M1), `renamed` when the statement named it, or a column, otherwise. The manager's column
   // and row policies match the names the statement wrote, so they cannot follow such a read.

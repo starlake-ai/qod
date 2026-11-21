@@ -1,6 +1,7 @@
 package ai.starlake.quack.edge.cls
 
 import ai.starlake.quack.ondemand.state.RoleColumnPolicy
+import ai.starlake.sql.IdentifierFold.same
 import ai.starlake.transpiler.JSQLColumResolver
 import ai.starlake.transpiler.schema.JdbcMetaData
 import net.sf.jsqlparser.expression.Expression
@@ -71,9 +72,7 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
     // A table the statement names outside the defaults (a federated source, another schema) is
     // registered where it is named too, so `pgfed.public.users` resolves to its own columns.
     homes.foreach { case (tableKey, (homeCatalog, homeSchema)) =>
-      if !(homeCatalog.equalsIgnoreCase(currentCatalog) && homeSchema.equalsIgnoreCase(
-          currentSchema
-        ))
+      if !(same(homeCatalog, currentCatalog) && same(homeSchema, currentSchema))
       then
         schema.get(tableKey).toList.flatten.foreach { col =>
           metaData.addTable(
@@ -265,26 +264,26 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
     // unknown table lands in the schema map with Nil, which the resolver also refuses
     // to register), or the name is a seeded system-schema table.
     def knownUserTable(name: String): Boolean =
-      schema.exists((k, cols) => k.equalsIgnoreCase(name) && cols.nonEmpty)
+      schema.exists((k, cols) => same(k, name) && cols.nonEmpty)
     def known(raw: String): Boolean =
       raw.split('.').toList.map(unquote).reverse match
         case Nil                => true
         case name :: Nil        => knownUserTable(name)
         case name :: q1 :: rest =>
           val sysKnown = SystemSchemaColumns.all.keys.exists { case (s, t) =>
-            s.equalsIgnoreCase(q1) && t.equalsIgnoreCase(name)
+            same(s, q1) && same(t, name)
           }
           val qualifierOk = rest match
             case Nil      => true
-            case c :: Nil => c.equalsIgnoreCase(currentCatalog)
+            case c :: Nil => same(c, currentCatalog)
             case _        => false
-          val userKnown = q1.equalsIgnoreCase(currentSchema) && knownUserTable(name) && qualifierOk
+          val userKnown = same(q1, currentSchema) && knownUserTable(name) && qualifierOk
           // Or the table is named where the caller located it (its home, beside the defaults).
           val homeKnown = knownUserTable(name) &&
             homes.exists { case (k, (hc, hs)) =>
-              k.equalsIgnoreCase(name) && hs.equalsIgnoreCase(q1) && (rest match
-                case Nil      => hc.equalsIgnoreCase(currentCatalog)
-                case c :: Nil => c.equalsIgnoreCase(hc)
+              same(k, name) && same(hs, q1) && (rest match
+                case Nil      => same(hc, currentCatalog)
+                case c :: Nil => same(c, hc)
                 case _        => false)
             }
           sysKnown || userKnown || homeKnown
@@ -516,7 +515,7 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
                   case col: net.sf.jsqlparser.schema.Column =>
                     val baseTable = Option(col.getTable).map(t => unquoteName(t.getName)) match
                       case Some(key) =>
-                        innerFromTables.find(_._1.equalsIgnoreCase(key)).map(_._2).getOrElse(key)
+                        innerFromTables.find(e => same(e._1, key)).map(_._2).getOrElse(key)
                       case None =>
                         if innerFromTables.size == 1 then innerFromTables.head._2 else ""
                     val baseCol     = unquoteName(col.getColumnName)
@@ -548,7 +547,7 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
           // Alias or table-name qualifier - local FROM items first, then the outer scope
           // (a correlated subquery referencing the outer query's alias).
           (fromTables ::: outerTables)
-            .find(_._1.equalsIgnoreCase(key))
+            .find(e => same(e._1, key))
             .map(_._2)
             .getOrElse(key)
         case None =>
@@ -935,7 +934,9 @@ private[cls] object ResidualColumns:
 
   private def unquote(s: String): String = ai.starlake.sql.QuotedIdentifier.unquote(s)
 
-  private def lower(s: String): String = s.toLowerCase(java.util.Locale.ROOT)
+  // DuckDB's identifier fold (ASCII letters only, ai.starlake.sql.IdentifierFold): every CTE,
+  // alias and column name of the scan is compared as DuckDB binds it (security review C1).
+  private def lower(s: String): String = ai.starlake.sql.IdentifierFold.fold(s)
 
   /** The output column names of a query, lowercased, when every one can be read: a column projects
     * its name, an aliased item its alias; an unaliased expression projects its own text, which no
@@ -1176,7 +1177,7 @@ private[cls] object ResidualColumns:
       Option(t.getAlias).map(a => lower(unquote(a.getName)) -> unquote(t.getName))
     }
     def columnsOf(table: String): Option[List[String]] =
-      schema.find(_._1.equalsIgnoreCase(table)).map(_._2).filter(_.nonEmpty)
+      schema.find(e => same(e._1, table)).map(_._2).filter(_.nonEmpty)
     def isPolicyTable(table: String, byName: List[RoleColumnPolicy] = policies): Boolean =
       byName.exists(p =>
         p.tableName == RoleColumnPolicy.Wildcard || p.tableName.equalsIgnoreCase(table)
@@ -1185,7 +1186,7 @@ private[cls] object ResidualColumns:
     /** Whether `src` has the column: Some(true / false) when known, None when it cannot be told. */
     def has(src: Source, name: String): Option[Boolean] =
       src.table match
-        case Some(t) => columnsOf(t).map(_.exists(_.equalsIgnoreCase(name)))
+        case Some(t) => columnsOf(t).map(_.exists(same(_, name)))
         case None    => src.outputs.map(_.contains(lower(name)))
 
     /** Innermost-first binding of an unqualified `name`. */

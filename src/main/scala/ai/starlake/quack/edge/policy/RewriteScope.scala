@@ -4,9 +4,7 @@ import ai.starlake.acl.model.{Config, DenyReason}
 import ai.starlake.acl.parser.{SqlParser, StatementResult, TableAccess, TableExtractor, Verb}
 import ai.starlake.quack.edge.authz.{FunctionClass, FunctionClasses}
 import ai.starlake.quack.edge.meta.MetadataFilterRewriter
-import ai.starlake.sql.QuotedIdentifier
-
-import java.util.Locale
+import ai.starlake.sql.{IdentifierFold, QuotedIdentifier}
 
 /** Whether a statement an edge rewriter printed reaches anything the caller's statement did not
   * (spec decision 29). The column policy, row policy and metadata filter rewriters each print a NEW
@@ -82,7 +80,7 @@ object RewriteScope:
   private[policy] def callName(call: String): String =
     val head = call.takeWhile(_ != '(').trim
     val last = if head.contains('.') then head.substring(head.lastIndexOf('.') + 1) else head
-    QuotedIdentifier.unquote(last).toLowerCase(Locale.ROOT)
+    IdentifierFold.fold(QuotedIdentifier.unquote(last))
 
   private def parsed(
       statement: String,
@@ -146,6 +144,6 @@ object RewriteScope:
     */
   private def filterableMetadataRead(a: TableAccess, sessionCatalog: String): Boolean =
     a.verb == Verb.Read &&
-      a.table.schema.equalsIgnoreCase("information_schema") &&
-      MetadataFilterRewriter.FilterableTables.contains(a.table.table.toLowerCase(Locale.ROOT)) &&
-      a.table.database.equalsIgnoreCase(sessionCatalog)
+      IdentifierFold.same(a.table.schema, "information_schema") &&
+      MetadataFilterRewriter.FilterableTables.contains(IdentifierFold.fold(a.table.table)) &&
+      IdentifierFold.same(a.table.database, sessionCatalog)

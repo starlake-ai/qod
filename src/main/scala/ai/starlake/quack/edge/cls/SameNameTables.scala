@@ -5,7 +5,6 @@ import net.sf.jsqlparser.expression.Alias
 import net.sf.jsqlparser.schema.{Column, Table}
 import net.sf.jsqlparser.statement.select.{AllTableColumns, FromItem, ParenthesedFromItem, Select}
 
-import java.util.Locale
 import scala.jdk.CollectionConverters._
 import scala.util.Try
 
@@ -123,9 +122,12 @@ private[cls] object SameNameTables:
       s"not by its schema or catalog ($name.col or a.col)"
 
   private def unquote(s: String): String = ai.starlake.sql.QuotedIdentifier.unquote(s)
-  private def lower(s: String): String   = s.toLowerCase(Locale.ROOT)
+  // DuckDB's identifier fold (ASCII letters only), as it binds the names compared here.
+  private def lower(s: String): String = ai.starlake.sql.IdentifierFold.fold(s)
 
-  /** The bare names (lowercased) the statement reads in more than one catalog or schema. */
+  /** The bare names (folded as DuckDB folds them, [[ai.starlake.sql.IdentifierFold]]) the statement
+    * reads in more than one catalog or schema.
+    */
   def clashing(tables: List[(Table, (String, String, String))]): Set[String] =
     tables
       .groupBy { case (_, (_, _, tab)) => lower(tab) }
