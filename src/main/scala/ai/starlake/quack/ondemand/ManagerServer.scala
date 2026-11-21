@@ -117,7 +117,11 @@ final class ManagerServer(
     tenantLocations: Option[TenantLocationHandlers] = None,
     // Users' own S3 credentials (profile/s3/*, self-scoped, on the profile allowlist; user/s3/*,
     // TenantScopeCheck inside the handler). None leaves the routes unmounted; Main always wires it.
-    s3Credentials: Option[UserS3CredentialHandlers] = None
+    s3Credentials: Option[UserS3CredentialHandlers] = None,
+    // The live staff row of a name and its platform permissions (issue #274,
+    // PoolSupervisor.staffPrincipal). The default answers nothing, so every staff session
+    // resolves to no session at all: closed.
+    staffPrincipal: String => Option[ai.starlake.quack.ondemand.rbac.StaffPrincipal] = _ => None
 ) extends LazyLogging:
 
   // The bearer-credential lookups, composed session-first: the JWT verify is a
@@ -129,12 +133,14 @@ final class ManagerServer(
   // stopped resolving between the guard and the handler, is `SessionScope.NoAccess` (see
   // SessionScope.resolver). The guard itself does not use it; it resolves once through
   // `sessionOfToken`.
+  //
+  // Both come from the one resolver, CredentialScopes, which also checks a staff session against
+  // its live row (issue #274).
+  private val credentials =
+    new ai.starlake.quack.ondemand.auth.CredentialScopes(sessions, patAuth, staffPrincipal)
   private val scopeOfToken: ai.starlake.quack.ondemand.auth.SessionScope.Resolver =
-    ai.starlake.quack.ondemand.auth.SessionScope.resolver(t =>
-      sessions.scopeOf(t).orElse(patAuth.flatMap(_.scopeOf(t)))
-    )
-  private val sessionOfToken: String => Option[SessionTokenStore.Session] =
-    t => sessions.get(t).orElse(patAuth.flatMap(_.sessionOf(t)))
+    credentials.scopeOf
+  private val sessionOfToken: String => Option[SessionTokenStore.Session] = credentials.sessionOf
 
   extension [I, E, O](e: sttp.tapir.PublicEndpoint[I, E, O, Any])
     /** Binds `e` to a handler of the common shape `handler(inputs...)(scopeOf)`: the endpoint's
@@ -306,15 +312,22 @@ final class ManagerServer(
     )
 
   /** The session behind `token`. A session JWT needs only an HMAC, so it stays on the compute
-    * thread; a PAT costs database lookups, so it does not.
+    * thread; a PAT costs database lookups, so it does not, nor does a staff session's check of its
+    * live row (cached, but a miss reads the control plane).
     */
   private def resolveCredential(
       token: Option[String]
   ): IO[Option[SessionTokenStore.Session]] =
     token match
       case Some(t) if t.startsWith(PatStore.TokenPrefix) => IO.blocking(sessionOfToken(t))
-      case Some(t)                                       => IO(sessionOfToken(t))
-      case None                                          => IO.pure(None)
+      case Some(t)                                       =>
+        // The HMAC check runs here; only a staff JWT goes through sessionOfToken again, off the
+        // compute thread. Either way the answer is sessionOfToken's.
+        IO(sessions.get(t)).flatMap {
+          case Some(s) if credentials.readsRow(s) => IO.blocking(sessionOfToken(t))
+          case other                              => IO.pure(other)
+        }
+      case None => IO.pure(None)
 
   /** Writes a denial's audit row, at most one per `key` and interval. The write blocks on the
     * database, so it runs off the compute threads; a refused one costs no thread hop.

@@ -802,6 +802,7 @@ object ManagerServerHarness:
       dataEdgeRoutes = dataEdgeRoutes,
       tenantLocations = Some(tenantLocationHandlers),
       s3Credentials = Some(s3CredentialHandlers),
+      staffPrincipal = sup.staffPrincipal,
       icebergCatalog = icebergSourcesOf.map { sourcesOf =>
         new IcebergCatalogHandlers(
           sup,

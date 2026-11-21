@@ -41,7 +41,8 @@ class PatAuthenticatorSpec extends AnyFlatSpec with Matchers:
     new PatAuthenticator(
       pats,
       id => users.userById(id),
-      u => List(UserGrant(u.tenant, u.kind)), tenantDisabled = _ => false
+      u => List(UserGrant(u.tenant, u.kind)),
+      tenantDisabled = _ => false
     )
 
   private def seed(
@@ -167,7 +168,8 @@ class PatAuthenticatorSpec extends AnyFlatSpec with Matchers:
       val auth       = new PatAuthenticator(
         pats,
         id => { lookups.incrementAndGet(); users.userById(id) },
-        u => List(UserGrant(u.tenant, u.kind)), tenantDisabled = _ => false
+        u => List(UserGrant(u.tenant, u.kind)),
+        tenantDisabled = _ => false
       )
       // What is pinned is the end-to-end property: a non-PAT value costs no user lookup (the
       // counter stays at zero) and no connection (the pool is closed, so any query would throw --
@@ -206,3 +208,62 @@ class PatAuthenticatorSpec extends AnyFlatSpec with Matchers:
       userSession.profile.authMethod shouldBe "pat"
       userSession.scope.manageableTenants shouldBe empty
   }
+
+  "a staff PAT" should "carry its owner's live platform permissions and the staff role" in
+    withFreshDb { (_, users, pats) =>
+      val (uid, token) = seed(users, pats, None, "sam", "staff")
+      var perms        = Set("m.read")
+      val auth         = new PatAuthenticator(
+        pats,
+        id => users.userById(id),
+        u => List(UserGrant(u.tenant, u.kind)),
+        tenantDisabled = _ => false,
+        staffPrincipal = n =>
+          if n == "sam" then
+            users
+              .userById(uid)
+              .map(u => ai.starlake.quack.ondemand.rbac.StaffPrincipal(u, perms))
+          else None
+      )
+      val principal = auth.resolve(token).getOrElse(fail("staff PAT did not resolve"))
+      principal.scope.superuser shouldBe false
+      principal.scope.manageableTenants shouldBe empty
+      principal.scope.platformPermissions shouldBe Set("m.read")
+      principal.isAdmin shouldBe false
+      perms = Set("m.read", "m.write")
+      auth.scopeOf(token).map(_.platformPermissions) shouldBe Some(Set("m.read", "m.write"))
+      auth.sessionOf(token).map(_.profile.role) shouldBe Some("staff")
+    }
+
+  it should "get no permissions from the default lookup, another row of the name, or dropAdmin" in
+    withFreshDb { (_, users, pats) =>
+      val (uid, token) = seed(users, pats, None, "sam", "staff")
+      // The default wiring grants nothing.
+      authOf(users, pats).scopeOf(token).map(_.platformPermissions) shouldBe Some(Set.empty)
+      // A lookup answering for a different row of the same name is ignored.
+      val stranger = ai.starlake.quack.ondemand.rbac.StaffPrincipal(
+        ai.starlake.quack.ondemand.state.RbacUser("u-other", None, "sam", "staff"),
+        Set("m.read")
+      )
+      val auth = new PatAuthenticator(
+        pats,
+        id => users.userById(id),
+        u => List(UserGrant(u.tenant, u.kind)),
+        tenantDisabled = _ => false,
+        staffPrincipal = _ => Some(stranger)
+      )
+      auth.scopeOf(token).map(_.platformPermissions) shouldBe Some(Set.empty)
+      // A dropAdmin token is a data-only credential: no platform permission either.
+      val (_, dropped) =
+        pats.mint(uid, "agent", TokenRestriction.Unrestricted.copy(dropAdmin = true), None, 0)
+      val own = new PatAuthenticator(
+        pats,
+        id => users.userById(id),
+        u => List(UserGrant(u.tenant, u.kind)),
+        tenantDisabled = _ => false,
+        staffPrincipal = _ =>
+          users.userById(uid).map(ai.starlake.quack.ondemand.rbac.StaffPrincipal(_, Set("m.read")))
+      )
+      own.scopeOf(dropped).map(_.platformPermissions) shouldBe Some(Set.empty)
+      own.scopeOf(token).map(_.platformPermissions) shouldBe Some(Set("m.read"))
+    }
