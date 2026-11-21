@@ -113,7 +113,7 @@
     },
     {
       "version": "0.14.2",
-      "changesets": [],
+      "changesets": ["0061-platform-roles"],
       "min_from_version": "0.10.0",
       "rollback_without_restore": true,
       "rollback_blocked_by": [],

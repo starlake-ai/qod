@@ -341,6 +341,7 @@ class InMemoryControlPlaneStore extends ControlPlaneStore:
       mustChangePassword: Boolean = false,
       email: Option[String] = None
   ): String =
+    require(!(kind == "staff" && tenant.isDefined), "a staff user has no tenant")
     val now                         = Instant.now()
     val existing                    = findUser(tenant, username)
     val (id, createdAt, externalId) = existing match
@@ -389,6 +390,7 @@ class InMemoryControlPlaneStore extends ControlPlaneStore:
     passwordHashes.remove(id)
     userGroups.filterInPlace((u, _) => u != id)
     userRoles.filterInPlace((u, _) => u != id)
+    userPlatformRoles.filterInPlace(_._1 != id)
     poolPermissions.values.filter(_.userId.contains(id)).foreach(p => poolPermissions.remove(p.id))
 
   // ---------------- RBAC: roles ----------------
@@ -479,6 +481,44 @@ class InMemoryControlPlaneStore extends ControlPlaneStore:
   def addUserMemberships(userId: String, roleIds: List[String], groupIds: List[String]): Unit =
     roleIds.foreach(addUserRole(userId, _))
     groupIds.foreach(addUserGroup(userId, _))
+  private val platformRoles     = scala.collection.mutable.LinkedHashMap.empty[String, PlatformRole]
+  private val userPlatformRoles = scala.collection.mutable.Set.empty[(String, String)]
+
+  def listPlatformRoles(): List[PlatformRole]           = platformRoles.values.toList.sortBy(_.name)
+  def getPlatformRole(id: String): Option[PlatformRole] = platformRoles.get(id)
+  def findPlatformRoleByName(name: String): Option[PlatformRole] =
+    platformRoles.values.find(_.name == name)
+  def insertPlatformRole(
+      name: String,
+      description: Option[String],
+      permissions: Set[String]
+  ): PlatformRole =
+    require(findPlatformRoleByName(name).isEmpty, s"duplicate platform role name: $name")
+    val r = PlatformRole(java.util.UUID.randomUUID().toString, name, description, permissions)
+    platformRoles(r.id) = r
+    r
+  def updatePlatformRole(
+      id: String,
+      name: String,
+      description: Option[String],
+      permissions: Set[String]
+  ): Option[PlatformRole] =
+    platformRoles.get(id).map { _ =>
+      val r = PlatformRole(id, name, description, permissions)
+      platformRoles(id) = r
+      r
+    }
+  def deletePlatformRole(id: String): Boolean =
+    userPlatformRoles.filterInPlace(_._2 != id)
+    platformRoles.remove(id).isDefined
+  def listUserPlatformRoleIds(userId: String): List[String] =
+    userPlatformRoles.collect { case (u, r) if u == userId => r }.toList.sorted
+  def setUserPlatformRoles(userId: String, roleIds: Set[String]): Unit =
+    userPlatformRoles.filterInPlace(_._1 != userId)
+    roleIds.foreach(r => userPlatformRoles += ((userId, r)))
+  def platformPermissionsOfUser(userId: String): Set[String] =
+    listUserPlatformRoleIds(userId).flatMap(platformRoles.get).flatMap(_.permissions).toSet
+
   def listDirectRolesForUser(userId: String): List[String] =
     userRoles.collect { case (u, r) if u == userId => r }.toList.sorted
 

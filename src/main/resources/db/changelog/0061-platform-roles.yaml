@@ -1,0 +1,55 @@
+databaseChangeLog:
+  - changeSet:
+      id: 0061-platform-roles
+      author: qod
+      changes:
+        # Issue #274: platform staff roles. A staff user is a tenant-less qodstate_user row of kind
+        # 'staff'; its platform roles bundle permission names that manager modules declare. Not a
+        # policy table: staff never reach the node decider, so no policy-version trigger (spec
+        # 2026-11-21-platform-staff-roles-console-pages-design.md, section 3).
+        - createTable:
+            tableName: qodstate_platform_role
+            columns:
+              - column: { name: id, type: text, constraints: { primaryKey: true, nullable: false } }
+              - column: { name: name, type: text, constraints: { nullable: false, unique: true } }
+              - column: { name: description, type: text }
+              - column: { name: created_at, type: timestamptz, defaultValueComputed: "now()", constraints: { nullable: false } }
+        - createTable:
+            tableName: qodstate_platform_role_permission
+            columns:
+              - column:
+                  name: role_id
+                  type: text
+                  constraints:
+                    nullable: false
+                    foreignKeyName: fk_platform_role_permission_role
+                    references: qodstate_platform_role(id)
+                    deleteCascade: true
+              - column: { name: permission, type: text, constraints: { nullable: false } }
+        - addPrimaryKey:
+            tableName: qodstate_platform_role_permission
+            columnNames: role_id, permission
+        - createTable:
+            tableName: qodstate_user_platform_role
+            columns:
+              - column:
+                  name: user_id
+                  type: text
+                  constraints:
+                    nullable: false
+                    foreignKeyName: fk_user_platform_role_user
+                    references: qodstate_user(id)
+                    deleteCascade: true
+              - column:
+                  name: role_id
+                  type: text
+                  constraints:
+                    nullable: false
+                    foreignKeyName: fk_user_platform_role_role
+                    references: qodstate_platform_role(id)
+                    deleteCascade: true
+        - addPrimaryKey:
+            tableName: qodstate_user_platform_role
+            columnNames: user_id, role_id
+        - sql:
+            sql: ALTER TABLE qodstate_user ADD CONSTRAINT ck_qodstate_user_staff_tenantless CHECK (kind <> 'staff' OR tenant IS NULL)
