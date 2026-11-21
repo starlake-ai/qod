@@ -459,3 +459,102 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
     result.toOption.get.isSuperuser shouldBe true
     result.toOption.get.effectiveSet.roles shouldBe empty
   }
+
+  // ==========================================================================
+  // E. An open superuser session follows its row
+  // ==========================================================================
+
+  /** A data-plane session opened by the root superuser through the real gate, as the FlightSQL and
+    * native front door handshakes open one, and a UserStore the kind-only and enabled-only updates
+    * never read (they rewrite the row through the control-plane store).
+    */
+  private def withRootSession(
+      body: (
+          PoolSupervisor,
+          SecurityFixtures.Fixture,
+          ai.starlake.quack.edge.SessionGrants,
+          ai.starlake.quack.ondemand.state.UserStore
+      ) => Unit
+  ): Unit =
+    val fix     = SecurityFixtures.freshStore()
+    val sup     = buildSupervisor(fix.store)
+    val request = ai.starlake.quack.ondemand.rbac.AuthzRequest(
+      SecurityFixtures.TenantName,
+      SecurityFixtures.PoolName,
+      SecurityFixtures.RootUsername,
+      superuserAdmissible = true,
+      edge = "test"
+    )
+    val grants =
+      ai.starlake.quack.edge.SessionGrants
+        .authorize(request, sup.authorizeHandshakeDetailed, sup.policyVersions) match
+        case Right((auth, g)) =>
+          auth.isSuperuser shouldBe true
+          g
+        case Left(d) => fail(s"the root handshake was refused: $d")
+    val users = new ai.starlake.quack.ondemand.state.UserStore(
+      ai.starlake.quack.ondemand.InProcessDuckDb.url(),
+      "",
+      ""
+    )
+    try body(sup, fix, grants, users)
+    finally users.close()
+
+  private def rootId(fix: SecurityFixtures.Fixture): String =
+    fix.store.listSuperusers().find(_.username == SecurityFixtures.RootUsername).get.id
+
+  "an open superuser session" should
+    "be refused on its next statement once its row is demoted to kind user" in
+    withRootSession { (sup, fix, grants, users) =>
+      import cats.effect.unsafe.implicits.global
+      grants.current().map(_.user.tenant) shouldBe Right(None)
+      sup
+        .updateUserPassword(rootId(fix), None, Some("user"), users)
+        .unsafeRunSync()
+        .isRight shouldBe true
+      grants.current() match
+        case Left(ai.starlake.quack.edge.RouterFailure.AccessDenied(m)) =>
+          m should include(s"user '${SecurityFixtures.RootUsername}' is not registered in tenant")
+        case other => fail(s"a demoted superuser's session ran its next statement: $other")
+      grants.currentIO.unsafeRunSync().isLeft shouldBe true
+    }
+
+  it should "be refused on its next statement once its row is disabled" in
+    withRootSession { (sup, fix, grants, users) =>
+      import cats.effect.unsafe.implicits.global
+      grants.current().map(_.user.tenant) shouldBe Right(None)
+      sup
+        .updateUserPassword(rootId(fix), None, None, users, enabled = Some(false))
+        .unsafeRunSync()
+        .isRight shouldBe true
+      grants.current() match
+        case Left(ai.starlake.quack.edge.RouterFailure.AccessDenied(m)) =>
+          m should include(s"user '${SecurityFixtures.RootUsername}' is disabled")
+        case other => fail(s"a disabled superuser's session ran its next statement: $other")
+    }
+
+  it should "keep running while its row is unchanged, across a generation move" in
+    withRootSession { (sup, _, grants, _) =>
+      sup.restore()
+      grants.current().map(_.user.tenant) shouldBe Right(None)
+      grants.current().map(_.roles) shouldBe Right(Nil)
+    }
+
+  "AuthorizedHandshake.isSuperuser" should "follow the kind of a tenant-less row" in {
+    import ai.starlake.quack.model.PoolKey
+    import ai.starlake.quack.ondemand.rbac.{AuthorizedHandshake, EffectiveSet}
+    import ai.starlake.quack.ondemand.state.RbacUser
+    def of(tenant: Option[String], kind: String): Boolean =
+      val u = RbacUser("u-0", tenant, "root", kind = kind)
+      AuthorizedHandshake(
+        PoolKey("acme", "acme_db", "bi"),
+        "acme",
+        "p-1",
+        u,
+        EffectiveSet(u, Nil, Nil, Nil, Nil)
+      ).isSuperuser
+    of(None, "admin") shouldBe true
+    of(None, "ADMIN") shouldBe true
+    of(None, "user") shouldBe false
+    of(Some("acme"), "admin") shouldBe false
+  }

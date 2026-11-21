@@ -338,7 +338,13 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
       // hold's readiness probe would never see them answer: a respawned node is ready at once.
       nodeAnswers = Some(_ => IO.pure(true))
     )
-    val user      = RbacUser("u-1", if superuser then None else Some("t-1"), "alice", kind = "user")
+    // A tenant-less row binds as a superuser only when its kind is admin (the gate refuses any other).
+    val user = RbacUser(
+      "u-1",
+      if superuser then None else Some("t-1"),
+      "alice",
+      kind = if superuser then "admin" else "user"
+    )
     val eff       = EffectiveSet(user, Nil, Nil, Nil, Nil)
     val handshake = new EdgeHandshake(
       auth,
