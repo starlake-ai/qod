@@ -66,3 +66,17 @@ class CredentialScopesSpec extends AnyFlatSpec with Matchers:
     creds.scopeOf(None) shouldBe SessionScope.NoAccess
     creds.scopeOf(Some("not-a-token")) shouldBe SessionScope.NoAccess
   }
+
+  it should "build a staff session's scope from the row alone, whatever its JWT says" in {
+    val sessions = new SessionTokenStore()
+    val creds    = new CredentialScopes(sessions, None, _ => Some(StaffPrincipal(sam, Set("m.x"))))
+    Seq(SessionScope.Superuser, SessionScope(superuser = true, manageableTenants = Set("acme")))
+      .foreach { minted =>
+        val token = sessions.mintWithScope(profile("staff"), minted)
+        val scope = creds.scopeOf(Some(token))
+        scope.superuser shouldBe false
+        scope.manageableTenants shouldBe empty
+        scope.platformPermissions shouldBe Set("m.x")
+        creds.enrich(sessions.get(token).get).map(_.scope) shouldBe Some(scope)
+      }
+  }

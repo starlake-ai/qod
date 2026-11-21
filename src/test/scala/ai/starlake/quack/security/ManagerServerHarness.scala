@@ -442,7 +442,13 @@ object ManagerServerHarness:
       oidc = oidcOf.map(build => build(sup)),
       audit = audit,
       events = events,
-      patSessionOf = t => patAuth.flatMap(_.sessionOf(t))
+      patSessionOf = t => patAuth.flatMap(_.sessionOf(t)),
+      // Mirror Main: whoami checks a staff session against its live row.
+      enrichSession = new ai.starlake.quack.ondemand.auth.CredentialScopes(
+        sessions,
+        patAuth,
+        sup.staffPrincipal
+      ).enrich
     )
 
     // Public password-recovery handler over the harness's DuckDB UserStore. The

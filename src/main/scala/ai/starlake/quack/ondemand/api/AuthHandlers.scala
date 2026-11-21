@@ -149,7 +149,13 @@ final class AuthHandlers(
       * its identity provider ([[login]]). Each is keyed on something the manager knows (one fixed
       * key, a tenant id), never on text the sender chooses.
       */
-    publicDenialAudit: AuditRateLimiter = new AuditRateLimiter()
+    publicDenialAudit: AuditRateLimiter = new AuditRateLimiter(),
+    /** The live check of a session [[whoami]] answers for (`CredentialScopes.enrich`, issue #274):
+      * a staff session with its row's current platform permissions, None when that row no longer
+      * qualifies (answered as a revoked session); any other session unchanged. No default, so no
+      * wiring can skip the live staff check.
+      */
+    enrichSession: SessionTokenStore.Session => Option[SessionTokenStore.Session]
 ) extends LazyLogging:
 
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
@@ -811,6 +817,11 @@ final class AuthHandlers(
     }.toSet
 
     val isAdminPrincipal = superuser || manageableTenants.nonEmpty
+    // Issue #274: a tenant-less staff row signs in through the system login only. An identity that
+    // also holds an admin grant signs in as that admin.
+    val staff = !isAdminPrincipal && grants.exists(g =>
+      g.tenant.isEmpty && g.kind.equalsIgnoreCase(ai.starlake.quack.ondemand.state.UserKind.Staff)
+    )
     // Tenants where this principal exists at all (any role) -- what a
     // regular user may log into for the profile-only view.
     val selfTenants: Set[String] = grants.collect { case UserGrant(Some(t), _) => t }.toSet
@@ -823,7 +834,7 @@ final class AuthHandlers(
     // it (profile-only session), and nothing else: a tenant login's grants are that tenant's rows,
     // so a superuser grant never opens a tenant (it fails closed if a profile ever carried one).
     val scopeOk = required match
-      case RequiredScope.System       => isAdminPrincipal
+      case RequiredScope.System       => isAdminPrincipal || staff
       case RequiredScope.SystemStrict => superuser
       case RequiredScope.Tenant(t)    =>
         manageableTenants.contains(t) ||
@@ -833,7 +844,7 @@ final class AuthHandlers(
         // never an IdP claim. The OIDC callback keeps its admin-only gate.
         (mode == ManagementAuthMode.Db && selfTenants.contains(t))
 
-    val realm = if superuser then "system" else "tenant"
+    val realm = if superuser || staff then "system" else "tenant"
     if grants.isEmpty then
       audit.restAs(
         profile.username,
@@ -929,7 +940,8 @@ final class AuthHandlers(
       // IdP's claim may be admin for a user row, or "user" (RoleExtractor's
       // default when the IdP emits no known role) for an admin row.
       val mintProfile =
-        if isAdminPrincipal then profile.copy(role = "admin")
+        if staff then profile.copy(role = ai.starlake.quack.ondemand.state.UserKind.Staff)
+        else if isAdminPrincipal then profile.copy(role = "admin")
         else if profile.role.equalsIgnoreCase("admin") then profile.copy(role = "user")
         else profile
       val token = tokens.mintWithScope(mintProfile, sessionScope)
@@ -957,7 +969,8 @@ final class AuthHandlers(
         tenant = None,
         superuser = superuser,
         manageableTenants = manageableTenants.toList.sorted,
-        admin = isAdminPrincipal
+        admin = isAdminPrincipal,
+        staff = staff
       )
       Right((sessionCookie(token, forwardedProto), resp))
 
@@ -1002,29 +1015,42 @@ final class AuthHandlers(
     IO.blocking {
       val token = apiKey.orElse(cookie).getOrElse("")
       tokens.lookupResult(token) match
-        case SessionTokenStore.LookupResult.Ok(s) => Right(whoamiOf(s))
+        case SessionTokenStore.LookupResult.Ok(s) => whoamiOf(s)
         // No PAT is ever a JWT: a value without the PAT prefix costs no store call.
         case failure =>
           patSessionOf(token) match
-            case Some(s) => Right(whoamiOf(s))
+            case Some(s) => whoamiOf(s)
             case None    => whoamiAnswer(failure)
     }
 
-  private def whoamiOf(s: SessionTokenStore.Session): WhoamiResponse =
-    WhoamiResponse(
-      username = s.profile.username,
-      role = s.profile.role,
-      tenant = s.profile.tenant,
-      superuser = s.scope.superuser,
-      manageableTenants = s.scope.manageableTenants.toList.sorted
-    )
+  /** Whoami's answer for a session, through [[enrichSession]]: a staff session whose row no longer
+    * qualifies gets the 401 a revoked session gets.
+    */
+  private def whoamiOf(
+      raw: SessionTokenStore.Session
+  ): Either[(StatusCode, ErrorResponse), WhoamiResponse] =
+    enrichSession(raw) match
+      case Some(s) =>
+        Right(
+          WhoamiResponse(
+            username = s.profile.username,
+            role = s.profile.role,
+            tenant = s.profile.tenant,
+            superuser = s.scope.superuser,
+            manageableTenants = s.scope.manageableTenants.toList.sorted,
+            staff =
+              s.profile.role.equalsIgnoreCase(ai.starlake.quack.ondemand.state.UserKind.Staff),
+            permissions = s.scope.platformPermissions.toList.sorted
+          )
+        )
+      case None => whoamiAnswer(SessionTokenStore.LookupResult.Revoked)
 
   /** Whoami's answer for a session lookup: the identity, or why there is none. */
   private def whoamiAnswer(
       lookup: SessionTokenStore.LookupResult
   ): Either[(StatusCode, ErrorResponse), WhoamiResponse] =
     lookup match
-      case SessionTokenStore.LookupResult.Ok(s)     => Right(whoamiOf(s))
+      case SessionTokenStore.LookupResult.Ok(s)     => whoamiOf(s)
       case SessionTokenStore.LookupResult.NoSession =>
         Left(
           (StatusCode.Unauthorized, ErrorResponse("no_session", "no session token presented"))

@@ -1088,7 +1088,8 @@ object Main extends IOApp with LazyLogging:
       changePasswordStore = Some(userStore),
       ssoTickets = ssoTicketStore,
       starlakeNotifier = starlakeNotifier,
-      patSessionOf = patAuthenticator.sessionOf
+      patSessionOf = patAuthenticator.sessionOf,
+      enrichSession = credentialScopes.enrich
     )
 
     // Public password-recovery handler. The reset token reuses the SESSION JWT

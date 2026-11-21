@@ -857,14 +857,21 @@ final case class LoginResponse(
     manageableTenants: List[String] = Nil,
     // False for a tenant-scoped regular-user session: the SPA routes it to the
     // profile-only view and the API guard demotes it to the profile allowlist.
-    admin: Boolean = true
+    admin: Boolean = true,
+    // True for a platform staff session (issue #274): a tenant-less staff row signed in through the
+    // system login. Neither admin nor superuser; its rights are its platform permissions.
+    staff: Boolean = false
 )
 final case class WhoamiResponse(
     username: String,
     role: String,
     tenant: Option[String] = None,
     superuser: Boolean = false,
-    manageableTenants: List[String] = Nil
+    manageableTenants: List[String] = Nil,
+    // A platform staff session (issue #274) and its live platform permissions, sorted; empty for
+    // any other session.
+    staff: Boolean = false,
+    permissions: List[String] = Nil
 )
 
 /** Resolved admin-UI login mode for a scope, returned by the unauthenticated `GET /api/auth/mode`.

@@ -254,7 +254,8 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
       audit = audit,
       events = events,
       starlakeNotifier = starlakeNotifier,
-      patSessionOf = _ => None
+      patSessionOf = _ => None,
+      enrichSession = s => Some(s)
     )
 
   // ---- helper: run a real startAuth + callback round-trip ----
@@ -408,7 +409,8 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
       authModeResolver =
         new ManagementAuthModeResolver(Map(acmeOidc.id -> acmeOidc).get, ManagementAuthMode.Db),
       oidc = Some(buildSvc("s4b")),
-      patSessionOf = _ => None
+      patSessionOf = _ => None,
+      enrichSession = s => Some(s)
     )
     handlers.authMode(None).unsafeRunSync().map(_.mode) shouldBe Right("db")
     handlers.authMode(Some("acme")).unsafeRunSync().map(_.mode) shouldBe Right("oidc")
@@ -1088,7 +1090,8 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
       grantsForIdentity = (_, _, _) => Nil,
       authModeResolver = new ManagementAuthModeResolver(_ => None, ManagementAuthMode.Db),
       sqlToken = svc,
-      patSessionOf = _ => None
+      patSessionOf = _ => None,
+      enrichSession = s => Some(s)
     )
 
   private val sqlTokenDiscovery = new OidcDiscovery(httpGet =
@@ -1167,7 +1170,8 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
       authModeResolver = new ManagementAuthModeResolver(loadTenant, ManagementAuthMode.Db),
       oidc = oidcSvc,
       sqlToken = sqlSvc,
-      patSessionOf = _ => None
+      patSessionOf = _ => None,
+      enrichSession = s => Some(s)
     )
 
   /** An SSO service whose stub IdP echoes `nonce`, and answers `idToken` at the token endpoint. */

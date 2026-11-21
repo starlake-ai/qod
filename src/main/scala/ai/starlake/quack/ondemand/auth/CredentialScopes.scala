@@ -31,14 +31,22 @@ final class CredentialScopes(
   def readsRow(s: SessionTokenStore.Session): Boolean = isStaff(s)
 
   /** A staff session JWT with its live permissions, None when its row no longer qualifies (or the
-    * session names a tenant, which no staff row has); any other session unchanged.
+    * session names a tenant, which no staff row has); any other session unchanged. A staff
+    * session's scope is built from the row alone: never superuser, no manageable tenant, the row's
+    * permissions. Nothing of the JWT's own scope is kept, so the rule holds whatever a mint wrote.
     */
   private def live(s: SessionTokenStore.Session): Option[SessionTokenStore.Session] =
     if !isStaff(s) then Some(s)
     else if s.profile.tenant.isDefined then None
     else
       staffPrincipal(s.profile.username).map(sp =>
-        s.copy(scope = s.scope.copy(platformPermissions = sp.permissions))
+        s.copy(scope =
+          SessionScope(
+            superuser = false,
+            manageableTenants = Set.empty,
+            platformPermissions = sp.permissions
+          )
+        )
       )
 
   /** A staff session with its live permissions, None when its row no longer qualifies; any other
