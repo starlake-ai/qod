@@ -205,18 +205,31 @@ final class ManagerServer(
       // ahead of the route ever being wired.
       (cfg.auth.management.slIntegrationOn && path == "/api/auth/sso/ticket")
 
-  /** A path at or under a prefix a module declared for staff, on whole segments. */
-  private def underStaffPrefix(path: String): Boolean =
-    moduleStaffPrefixes.exists(p => path == p || path.startsWith(p + "/"))
-
-  /** What a staff session or PAT may reach (issue #274): its profile allowlist without the
-    * data-plane routes (`ManagerServer.StaffExcludedProfilePaths`), the console page list and the
-    * paths modules declare for staff. Everything else is `403 admin_required`, so a module route
-    * written for superusers stays closed to staff, and so do the branch routes: staff hold no pool.
+  /** The staff prefixes modules declared, each split into segments once. An empty one (`""` or
+    * `"/"`) is dropped: it would cover every path.
     */
-  private def isStaffApi(path: String): Boolean =
-    (isProfileApi(path) && !ManagerServer.StaffExcludedProfilePaths.contains(path)) ||
-      path == ManagerServer.ConsolePagesPath || underStaffPrefix(path)
+  private val staffPrefixSegments: Set[Vector[String]] =
+    moduleStaffPrefixes
+      .map(_.split('/').toVector.filter(_.nonEmpty))
+      .filter(_.nonEmpty)
+
+  /** Whether the request's decoded segments lie at or under a staff prefix. Segments, as the router
+    * reads them (see [[isBranchApi]]), never the joined path: `%2F` inside a segment decodes to
+    * `/`, so `staff%2Fx` would read as `staff/x` in the joined path while the router sees one
+    * segment that is not the prefix's.
+    */
+  private def underStaffPrefix(segments: Vector[String]): Boolean =
+    staffPrefixSegments.exists(segments.startsWith(_))
+
+  /** What a staff session or PAT may reach (issue #274): `ManagerServer.StaffProfilePaths`, the
+    * console page list and the paths modules declare for staff. Everything else is
+    * `403 admin_required`, so a module route written for superusers stays closed to staff, and so
+    * do the branch routes: staff hold no pool. An explicit list: a profile path added later stays
+    * closed to staff until someone adds it there.
+    */
+  private def isStaffApi(method: Method, path: String, segments: Vector[String]): Boolean =
+    ManagerServer.StaffProfilePaths.contains(path) ||
+      ManagerServer.isConsolePages(method, path) || underStaffPrefix(segments)
 
   /** The branch routes a NON-ADMIN session may reach, and the only paths whose tenant the guard
     * leaves to the handler: any principal who may connect may branch, in its own tenant, which
@@ -362,8 +375,9 @@ final class ManagerServer(
     * tenant-scoped login for a `role=user` principal, which are demoted here to the
     * [[isProfileApi]] and [[isBranchApi]] allowlists and get `403 admin_required` everywhere else.
     * A staff session or PAT (role `staff`, issue #274) gets [[isStaffApi]] instead: no data-plane
-    * profile route, no branch route, only the module paths declared for staff. The 403 (rather than
-    * the anonymous 401) is what tells a client its session is valid but under-privileged.
+    * profile route, no branch route, only the module paths declared for staff, where the URL tenant
+    * check is left to the module. The 403 (rather than the anonymous 401) is what tells a client
+    * its session is valid but under-privileged.
     *
     * Always-open paths: `/api/auth/login`, `/api/auth/change-password` (the current password is the
     * credential, and a user blocked by must_change_password has no session to present),
@@ -456,9 +470,10 @@ final class ManagerServer(
           // A tenant user reads the console page list too, and gets no page.
           val admitted =
             sessionAdmin ||
-              (staffSession && isStaffApi(path)) ||
+              (staffSession && isStaffApi(req.method, path, segments)) ||
               (nonAdminSession &&
-                (isProfileApi(path) || branchApi || path == ManagerServer.ConsolePagesPath))
+                (isProfileApi(path) || branchApi ||
+                  ManagerServer.isConsolePages(req.method, path)))
           // A session of a disabled tenant's user (every tenant it holds disabled) is refused
           // everything but signing out, until a superuser enables the tenant. A PAT of one already
           // resolves to nothing (PatAuthenticator).
@@ -583,9 +598,15 @@ final class ManagerServer(
             // Body-tenant endpoints do their own check via TenantScopeCheck.reject, and the branch
             // routes through their one gate: a plain member reaches their own tenant there, which
             // holds no admin grant for this check to find.
-            val queryTenant = req.uri.query.params.get("tenant")
-            val pathTenant  =
-              if branchApi then None
+            //
+            // A staff caller on a module's staff prefix is left to the module too: staff hold no
+            // tenant, and their platform permissions cross tenants by design (issue #274), so the
+            // module's own permission check decides which tenant a `?tenant=` may name. Only that
+            // caller on that path: an admin there, and staff anywhere else, keep the check.
+            val staffOnStaffPrefix = staffSession && underStaffPrefix(segments)
+            val queryTenant        = req.uri.query.params.get("tenant")
+            val pathTenant         =
+              if branchApi || staffOnStaffPrefix then None
               else
                 TenantScopeGuard
                   .extractTenant(path, queryTenant)
@@ -1291,24 +1312,27 @@ object ManagerServer extends com.typesafe.scalalogging.LazyLogging:
     "/api/auth/pat/tools"
   )
 
-  /** Profile routes a staff caller does not get (issue #274): staff have no data plane, so no S3
-    * credentials, pools, usage, statements or undrop of their own, and no Starlake grant, so no
-    * Starlake SSO ticket. Every other profile path (whoami, logout, the caller's own PATs) stays.
+  /** The profile routes a staff caller reaches (issue #274): who it is, signing out and its own
+    * personal access tokens. Staff have no data plane, so none of the S3, pool, usage, statement or
+    * undrop routes, and no Starlake grant, so no Starlake SSO ticket. An explicit list, never
+    * `ProfileApiPaths` minus some: a profile path added later stays closed to staff.
     */
-  val StaffExcludedProfilePaths: Set[String] = Set(
-    "/api/profile/s3/list",
-    "/api/profile/s3/add",
-    "/api/profile/s3/remove",
-    "/api/profile/pools",
-    "/api/profile/usage",
-    "/api/profile/statements",
-    "/api/profile/recoverable",
-    "/api/profile/undrop",
-    "/api/auth/sso/ticket"
+  val StaffProfilePaths: Set[String] = Set(
+    "/api/auth/whoami",
+    "/api/auth/logout",
+    "/api/auth/pat/create",
+    "/api/auth/pat/list",
+    "/api/auth/pat/revoke",
+    "/api/auth/pat/delete",
+    "/api/auth/pat/tools"
   )
 
   /** The console's module page list, which every signed-in caller may read (issue #274). */
   val ConsolePagesPath: String = "/api/console/pages"
+
+  /** A read of the console page list: `GET` only. */
+  private[ondemand] def isConsolePages(method: Method, path: String): Boolean =
+    method == Method.GET && path == ConsolePagesPath
 
   /** The branch routes a NON-ADMIN session may reach (see `isBranchApi`), as a method and a path
     * template split into segments. A `{name}` segment matches any non-empty segment; every other

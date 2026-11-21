@@ -16,10 +16,10 @@ import sttp.tapir.server.ServerEndpoint
 
 import java.net.http.HttpResponse
 
-/** The REST guard's staff allowlist (issue #274). A staff session reaches its profile allowlist
-  * without the data-plane routes (`ManagerServer.StaffExcludedProfilePaths`), the console page list
-  * and the module paths declared for staff, and gets `403 admin_required` everywhere else. A staff
-  * PAT never reaches `/mcp`.
+/** The REST guard's staff allowlist (issue #274). A staff session reaches its own profile paths
+  * (`ManagerServer.StaffProfilePaths`), a read of the console page list and the module paths
+  * declared for staff (where the URL tenant check is left to the module), and gets
+  * `403 admin_required` everywhere else. A staff PAT never reaches `/mcp`.
   *
   * The walk over every core endpoint reuses `SuperuserPatCompletenessSpec`'s listing and request
   * builder, so a new core endpoint is walked here without touching this file. No Postgres: the
@@ -61,10 +61,8 @@ class StaffGuardSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers:
   "a staff session" should "get 403 admin_required on every core endpoint off its allowlist" in
     withHarness() { h =>
       val staff     = h.staffSession(StaffName, StaffPerms)
-      val allowlist =
-        (ManagerServer.ProfileApiPaths -- ManagerServer.StaffExcludedProfilePaths) +
-          ManagerServer.ConsolePagesPath
-      val guarded = allEndpoints.filter((_, ep) =>
+      val allowlist = ManagerServer.StaffProfilePaths + ManagerServer.ConsolePagesPath
+      val guarded   = allEndpoints.filter((_, ep) =>
         guardRefused(SuperuserPatCompletenessSpec.call(h, ep, None, RequestTimeout))
       )
       // Without these, a reflection or a probe that found nothing would pass vacuously.
@@ -121,6 +119,12 @@ class StaffGuardSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers:
       adminRequired(pages) shouldBe false
       pages.statusCode() should not be 401
     }
+    // The page list is a read: any other method is refused.
+    val pagesPost =
+      post(h.httpClient, s"${h.baseUrl}${ManagerServer.ConsolePagesPath}", "{}", Some(staff))
+    withClue(s"POST ${ManagerServer.ConsolePagesPath}: ${describe(pagesPost)}") {
+      adminRequired(pagesPost) shouldBe true
+    }
     val logout = post(h.httpClient, s"${h.baseUrl}/api/auth/logout", "", apiKey = Some(staff))
     withClue(s"POST /api/auth/logout: ${describe(logout)}") {
       logout.statusCode() shouldBe 200
@@ -129,13 +133,39 @@ class StaffGuardSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers:
 
   it should "be refused its S3 credentials, profile pools, usage, statements and undrop" in
     withHarness() { h =>
-      val staff = h.staffSession(StaffName, StaffPerms)
-      for path <- ManagerServer.StaffExcludedProfilePaths - "/api/auth/sso/ticket" do
+      val staff   = h.staffSession(StaffName, StaffPerms)
+      val refused = ManagerServer.ProfileApiPaths -- ManagerServer.StaffProfilePaths
+      refused should contain allOf (
+        "/api/profile/s3/list",
+        "/api/profile/s3/add",
+        "/api/profile/s3/remove",
+        "/api/profile/pools",
+        "/api/profile/usage",
+        "/api/profile/statements",
+        "/api/profile/recoverable",
+        "/api/profile/undrop"
+      )
+      for path <- refused do
         val r = call(h, path, Some(staff))
         withClue(s"$path: ${describe(r)}")(adminRequired(r) shouldBe true)
     }
 
-  it should "be refused the Starlake SSO ticket, which a tenant user still reaches" in
+  "ManagerServer.StaffProfilePaths" should
+    "be exactly whoami, logout and the caller's own PATs" in {
+      ManagerServer.StaffProfilePaths shouldBe Set(
+        "/api/auth/whoami",
+        "/api/auth/logout",
+        "/api/auth/pat/create",
+        "/api/auth/pat/list",
+        "/api/auth/pat/revoke",
+        "/api/auth/pat/delete",
+        "/api/auth/pat/tools"
+      )
+      ManagerServer.StaffProfilePaths.subsetOf(ManagerServer.ProfileApiPaths) shouldBe true
+    }
+
+  "a staff session" should
+    "be refused the Starlake SSO ticket, which a tenant user still reaches" in
     withHarness(slIntegration = true) { h =>
       val url   = s"${h.baseUrl}/api/auth/sso/ticket"
       val staff = h.staffSession(StaffName, StaffPerms)
@@ -204,6 +234,87 @@ class StaffGuardSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers:
     }
   }
 
+  it should "reach a declared staff prefix whatever tenant its query names" in withHarness(
+    moduleEndpoints = staffModuleEndpoints,
+    moduleStaffPrefixes = Set("/api/test-module/staff")
+  ) { h =>
+    // Staff permissions cross tenants by design: the module's own permission check decides, so
+    // the guard's URL tenant check does not apply to a staff caller on a staff prefix.
+    val staff = h.staffSession(StaffName, StaffPerms)
+    for t <- List(SecurityFixtures.TenantId, SecurityFixtures.GlobexTenantId) do
+      val r = get(
+        h.httpClient,
+        s"${h.baseUrl}/api/test-module/staff/ping?tenant=$t",
+        apiKey = Some(staff)
+      )
+      withClue(s"staff GET /api/test-module/staff/ping?tenant=$t: ${describe(r)}") {
+        r.statusCode() shouldBe 200
+        r.body() shouldBe "staff-pong"
+      }
+    // Controls: every other caller keeps the check. A tenant admin on the staff prefix naming
+    // another tenant, and a tenant user on a profile path naming another tenant.
+    val alice = h.mintToken(
+      SecurityFixtures.AliceUsername,
+      SecurityFixtures.AlicePassword,
+      tenant = Some(SecurityFixtures.TenantId)
+    )
+    val adminOther = get(
+      h.httpClient,
+      s"${h.baseUrl}/api/test-module/staff/ping?tenant=${SecurityFixtures.GlobexTenantId}",
+      apiKey = Some(alice)
+    )
+    withClue(s"tenant admin on the staff prefix, other tenant: ${describe(adminOther)}") {
+      adminOther.statusCode() shouldBe 403
+      errorCode(adminOther.body()) should contain("tenant_forbidden")
+    }
+    val bob = h.mintToken(
+      SecurityFixtures.BobUsername,
+      SecurityFixtures.BobPassword,
+      tenant = Some(SecurityFixtures.TenantId)
+    )
+    val userOther = get(
+      h.httpClient,
+      s"${h.baseUrl}/api/profile/pools?tenant=${SecurityFixtures.GlobexTenantId}",
+      apiKey = Some(bob)
+    )
+    withClue(s"tenant user on a profile path, other tenant: ${describe(userOther)}") {
+      userOther.statusCode() shouldBe 403
+      errorCode(userOther.body()) should contain("tenant_forbidden")
+    }
+  }
+
+  private val segmentModuleEndpoints: List[ServerEndpoint[Any, IO]] = List(
+    endpoint.get
+      .in("api" / "m" / "staff" / "ping")
+      .out(stringBody)
+      .serverLogicSuccess[IO](_ => IO.pure("m-pong")),
+    endpoint.get
+      .in("api" / "m" / path[String]("segment") / "secret")
+      .out(stringBody)
+      .serverLogicSuccess[IO](seg => IO.pure("crossed:" + seg)),
+    endpoint.get
+      .in("api" / "m" / "staffx")
+      .out(stringBody)
+      .serverLogicSuccess[IO](_ => IO.pure("sibling"))
+  )
+
+  it should "match a staff prefix on the segments the router reads" in withHarness(
+    moduleEndpoints = segmentModuleEndpoints,
+    moduleStaffPrefixes = Set("/api/m/staff")
+  ) { h =>
+    val staff = h.staffSession(StaffName, StaffPerms)
+    val ping  = get(h.httpClient, s"${h.baseUrl}/api/m/staff/ping", apiKey = Some(staff))
+    withClue(s"GET /api/m/staff/ping: ${describe(ping)}") {
+      ping.statusCode() shouldBe 200
+      ping.body() shouldBe "m-pong"
+    }
+    // An encoded slash keeps "staff/x" one segment: the router reads it under /api/m, not under
+    // the prefix, so the guard must not read it as /api/m/staff/x.
+    for target <- List("/api/m/staff%2Fx/secret", "/api/m/staff%2fx/secret", "/api/m/staffx") do
+      val r = get(h.httpClient, s"${h.baseUrl}$target", apiKey = Some(staff))
+      withClue(s"GET $target: ${describe(r)}")(adminRequired(r) shouldBe true)
+  }
+
   it should "be refused entirely once its row is disabled, with 401 at the guard" in withHarness(
     moduleEndpoints = staffModuleEndpoints,
     moduleStaffPrefixes = Set("/api/test-module/staff")
@@ -238,6 +349,10 @@ class StaffGuardSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers:
     withClue(s"GET ${ManagerServer.ConsolePagesPath}: ${describe(r)}") {
       adminRequired(r) shouldBe false
       r.statusCode() should not be 401
+    }
+    val p = post(h.httpClient, s"${h.baseUrl}${ManagerServer.ConsolePagesPath}", "{}", Some(bob))
+    withClue(s"POST ${ManagerServer.ConsolePagesPath}: ${describe(p)}") {
+      adminRequired(p) shouldBe true
     }
   }
 
@@ -305,9 +420,10 @@ class StaffGuardSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers:
     mcpPing("qod_pat_root") shouldBe Status.Ok
   }
 
-  "McpRoutes.admitsPat" should "admit a tenant's PAT and a superuser's, and no other tenant-less one" in {
-    McpRoutes.admitsPat(StaffPat) shouldBe false
-    McpRoutes.admitsPat(TenantlessUserPat) shouldBe false
-    McpRoutes.admitsPat(TenantUserPat) shouldBe true
-    McpRoutes.admitsPat(SuperuserPat) shouldBe true
-  }
+  "McpRoutes.admitsPat" should
+    "admit a tenant's PAT and a superuser's, and no other tenant-less one" in {
+      McpRoutes.admitsPat(StaffPat) shouldBe false
+      McpRoutes.admitsPat(TenantlessUserPat) shouldBe false
+      McpRoutes.admitsPat(TenantUserPat) shouldBe true
+      McpRoutes.admitsPat(SuperuserPat) shouldBe true
+    }
