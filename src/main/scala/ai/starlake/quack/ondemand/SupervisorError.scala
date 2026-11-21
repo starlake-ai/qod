@@ -58,6 +58,8 @@ package ai.starlake.quack.ondemand
   *     a `defaultDatabase` names another catalog than the one the database's nodes resolve
   *     unqualified names in (`TenantDb.defaultDatabaseError`); REST 400
   *     `default_database_mismatch`.
+  *   - [[ai.starlake.quack.ondemand.SupervisorError.NameTaken NameTaken]]: a platform role's name
+  *     (compared ignoring case) is already taken; REST 409 `name_taken`.
   */
 enum SupervisorError(val message: String):
   case NotFound(msg: String)                        extends SupervisorError(msg)
@@ -79,3 +81,4 @@ enum SupervisorError(val message: String):
   case DataPathTaken(msg: String)                   extends SupervisorError(msg)
   case LocalFilesOff(msg: String)                   extends SupervisorError(msg)
   case DefaultDatabaseMismatch(msg: String)         extends SupervisorError(msg)
+  case NameTaken(msg: String)                       extends SupervisorError(msg)

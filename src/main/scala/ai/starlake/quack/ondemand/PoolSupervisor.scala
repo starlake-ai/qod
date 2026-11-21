@@ -349,6 +349,43 @@ final class PoolSupervisor(
       PoolSupervisor.EffectiveCacheMaxEntries
     )
 
+  @volatile private var declared: List[ai.starlake.quack.ondemand.rbac.DeclaredPermission] = Nil
+
+  /** Set once at boot from the loaded modules' declarations (Main, after ModuleSurfaces). */
+  def setDeclaredPermissions(ps: List[ai.starlake.quack.ondemand.rbac.DeclaredPermission]): Unit =
+    declared = ps
+
+  def declaredPermissions: List[ai.starlake.quack.ondemand.rbac.DeclaredPermission] = declared
+
+  /** Tenant-less staff rows by user name, with their permissions (issue #274). Cleared with the
+    * effective-set cache, so every RBAC or user mutation, a peer's qod_rbac and the snapshot
+    * refresh drop it. A row that is missing, disabled or not staff is cached as None.
+    */
+  private val staffCache: com.github.benmanes.caffeine.cache.Cache[String, Option[
+    ai.starlake.quack.ondemand.rbac.StaffPrincipal
+  ]] =
+    com.github.benmanes.caffeine.cache.Caffeine
+      .newBuilder()
+      .expireAfterWrite(java.time.Duration.ofSeconds(EffectiveCacheTtl.toSeconds))
+      .maximumSize(PoolSupervisor.EffectiveCacheMaxEntries)
+      .build[String, Option[ai.starlake.quack.ondemand.rbac.StaffPrincipal]]()
+
+  /** The enabled tenant-less `staff` row named `username` and its permissions, else None. */
+  def staffPrincipal(username: String): Option[ai.starlake.quack.ondemand.rbac.StaffPrincipal] =
+    staffCache.get(
+      username,
+      name =>
+        store
+          .findUser(None, name)
+          .filter(u =>
+            u.tenant.isEmpty && u.enabled &&
+              u.kind.equalsIgnoreCase(ai.starlake.quack.ondemand.state.UserKind.Staff)
+          )
+          .map(u =>
+            ai.starlake.quack.ondemand.rbac.StaffPrincipal(u, store.platformPermissionsOfUser(u.id))
+          )
+    )
+
   /** Drop every cached `EffectiveSet` and reload the tenants' policy versions and the users' S3
     * credentials, without broadcasting. Used by [[restore]] and by peer notification handlers:
     * broadcasting from those paths would echo forever across replicas. Every RBAC mutator (the
@@ -373,6 +410,7 @@ final class PoolSupervisor(
     // whose version read failed still reaches this replica's own sessions.
     policyVersions.advance()
     effectiveCache.invalidateAll()
+    staffCache.invalidateAll()
     policyVersions.publish(versions)
     userS3.publish(credentials)
 
@@ -4109,7 +4147,11 @@ final class PoolSupervisor(
       // failIfExists = true makes this a true CREATE: an existing (tenant,
       // username) row is refused untouched (no password rotation, no kind
       // change) instead of upserted. SCIM provisioning retries depend on it.
-      failIfExists: Boolean = false
+      failIfExists: Boolean = false,
+      // Platform role names for a `staff` row (issue #274), matched ignoring case; refused on any
+      // other kind. Empty grants nothing, and on an upsert over a staff row leaves its roles as
+      // they are.
+      platformRoles: List[String] = Nil
   ): IO[Either[SupervisorError, RbacUser]] = IO.blocking {
     withCacheRecovery("createUser") {
       ai.starlake.quack.ondemand.state.UserKind.normalize(kind) match
@@ -4125,7 +4167,8 @@ final class PoolSupervisor(
             mustChangePassword,
             email,
             enabled,
-            failIfExists
+            failIfExists,
+            platformRoles
           )
     }
   }
@@ -4140,10 +4183,27 @@ final class PoolSupervisor(
       mustChangePassword: Boolean,
       email: Option[String],
       enabled: Boolean,
-      failIfExists: Boolean
+      failIfExists: Boolean,
+      platformRoles: List[String]
   ): Either[SupervisorError, RbacUser] = {
+    val staff = kind == ai.starlake.quack.ondemand.state.UserKind.Staff
+    // Refused before anything is written: the store's CHECK would otherwise answer a staff row
+    // with a tenant as a raw failure.
+    val platformIds: Either[SupervisorError, Set[String]] =
+      if staff && tenant.isDefined then
+        Left(SupervisorError.InvalidMembership("invalid_kind", "a staff user has no tenant"))
+      else if !staff && platformRoles.nonEmpty then
+        Left(
+          SupervisorError.InvalidMembership(
+            "invalid_kind",
+            "platform roles apply to staff users only"
+          )
+        )
+      else if staff then resolvePlatformRoles(platformRoles)
+      else Right(Set.empty[String])
     if username.isEmpty || password.isEmpty then
       Left(SupervisorError.InvalidArgument("username and password are required"))
+    else if platformIds.isLeft then Left(platformIds.left.toOption.get)
     else
       tenant match
         case Some(t) if t.isEmpty =>
@@ -4169,8 +4229,20 @@ final class PoolSupervisor(
               // only the lists the caller named: the built-in defaults are for a fresh user
               // and must never widen an existing user's access, so they are not even
               // resolved for an existing row (a tenant missing a built-in cannot refuse it).
-              val existedBefore =
-                !failIfExists && store.findUser(resolvedTenantId, username).isDefined
+              val prior         = store.findUser(resolvedTenantId, username)
+              val existedBefore = !failIfExists && prior.isDefined
+              // An upsert over a staff row that moves it to another kind takes its platform
+              // roles away; a staff row gets the roles named, when any.
+              val wasStaff = prior.exists(
+                _.kind.equalsIgnoreCase(ai.starlake.quack.ondemand.state.UserKind.Staff)
+              )
+              val platformWrite: Option[Set[String]] =
+                platformIds.toOption
+                  .filter(_.nonEmpty)
+                  .filter(_ => staff)
+                  .orElse(
+                    Option.when(!staff && wasStaff)(Set.empty[String])
+                  )
               // Names are resolved before anything is written: a refused membership leaves
               // no user row behind.
               resolveMemberships(resolvedTenantId, memberships, applyDefaults = !existedBefore)
@@ -4228,7 +4300,22 @@ final class PoolSupervisor(
                             }
                             .map(_ => (attachRoles, attachGroups))
                       }
-                    attached match
+                    val withPlatform: Either[SupervisorError, (List[RbacRole], List[RbacGroup])] =
+                      attached.flatMap { r =>
+                        platformWrite match
+                          case None      => Right(r)
+                          case Some(ids) =>
+                            Try(store.setUserPlatformRoles(out.id, ids)).toEither.left
+                              .map { t =>
+                                logger.error(
+                                  s"createUser: could not set the platform roles of user ${out.id}",
+                                  t
+                                )
+                                SupervisorError.Internal("could not set platform roles")
+                              }
+                              .map(_ => r)
+                      }
+                    withPlatform match
                       case Left(err) =>
                         // User rows and edges live in two connection pools, so they cannot
                         // share a transaction: undo the user row we just inserted.
@@ -4242,7 +4329,9 @@ final class PoolSupervisor(
                           )
                         Left(err)
                       case Right((attachRoles, attachGroups)) =>
-                        if attachRoles.nonEmpty || attachGroups.nonEmpty then
+                        // A staff row, or one that was, also drops the staff cache: it may hold
+                        // a miss for this name, or the row's former permissions.
+                        if attachRoles.nonEmpty || attachGroups.nonEmpty || staff || wasStaff then
                           invalidateEffectiveCache()
                         val u = RbacUser(
                           out.id,
@@ -4327,7 +4416,10 @@ final class PoolSupervisor(
       userStore: ai.starlake.quack.ondemand.state.UserStore,
       mustChangePassword: Option[Boolean] = None,
       email: Option[Option[String]] = None,
-      enabled: Option[Boolean] = None
+      enabled: Option[Boolean] = None,
+      // Replaces a staff row's platform roles (issue #274), matched ignoring case; None leaves
+      // them. Refused unless the row is, or becomes, staff.
+      platformRoles: Option[List[String]] = None
   ): IO[Either[SupervisorError, RbacUser]] = IO.blocking {
     withCacheRecovery("updateUserPassword") {
       // mustChangePassword = Some(true) with no password is a legitimate flag-only
@@ -4354,9 +4446,30 @@ final class PoolSupervisor(
                 .map(Some(_))
                 .left
                 .map(SupervisorError.InvalidArgument(_))
-          emailCheck.flatMap(e => kindCheck.map(k => (e, k))) match
-            case Left(err)                     => Left(err)
-            case Right((effEmail, normalKind)) =>
+          // The platform-role write the update makes: Some(ids) replaces them, a move away from
+          // staff clears them. Refused before anything is written: the store's CHECK would
+          // otherwise answer a staff row with a tenant as a raw failure.
+          def platformCheck(newKind: String): Either[SupervisorError, Option[Set[String]]] =
+            val toStaff  = newKind.equalsIgnoreCase(ai.starlake.quack.ondemand.state.UserKind.Staff)
+            val wasStaff = u.kind.equalsIgnoreCase(ai.starlake.quack.ondemand.state.UserKind.Staff)
+            if toStaff && u.tenant.isDefined then
+              Left(SupervisorError.InvalidMembership("invalid_kind", "a staff user has no tenant"))
+            else if !toStaff && platformRoles.isDefined then
+              Left(
+                SupervisorError.InvalidMembership(
+                  "invalid_kind",
+                  "platform roles apply to staff users only"
+                )
+              )
+            else
+              platformRoles match
+                case Some(names) => resolvePlatformRoles(names).map(Some(_))
+                case None        => Right(Option.when(wasStaff && !toStaff)(Set.empty[String]))
+          emailCheck
+            .flatMap(e => kindCheck.map(k => (e, k)))
+            .flatMap((e, k) => platformCheck(k.getOrElse(u.kind)).map(p => (e, k, p))) match
+            case Left(err)                                    => Left(err)
+            case Right((effEmail, normalKind, platformWrite)) =>
               val newKind = normalKind.getOrElse(u.kind)
               // A rotation always writes the flag: the requested value, or false when
               // absent -- an unflagged admin reset hands out a normal password and
@@ -4432,6 +4545,7 @@ final class PoolSupervisor(
                       email = effEmail.getOrElse(u.email),
                       enabled = enabled.getOrElse(u.enabled)
                     )
+                  platformWrite.foreach(ids => store.setUserPlatformRoles(u.id, ids))
                   store.upsertUserIdentity(updated)
                   invalidateEffectiveCache()
                   Right(updated)
@@ -4457,6 +4571,116 @@ final class PoolSupervisor(
         case Some(tn) => store.listUsers(Some(tn.id))
         case None     => Nil
     case None => store.listUsers(None)
+
+  // ---------- Platform roles (issue #274) ----------
+
+  def listPlatformRoles(): List[ai.starlake.quack.ondemand.state.PlatformRole] =
+    store.listPlatformRoles()
+
+  private def permissionRefusal(ps: Set[String]): Option[SupervisorError] =
+    val known   = declared.map(_.name).toSet
+    val unknown = ps.diff(known).toList.sorted
+    if unknown.isEmpty then None
+    else
+      Some(
+        SupervisorError.InvalidMembership(
+          "unknown_permission",
+          s"no loaded module declares: ${unknown.mkString(", ")}"
+        )
+      )
+
+  /** The stored role named `name`, ignoring case: an exact match first, else the first other. */
+  private def platformRoleNamed(
+      name: String
+  ): Option[ai.starlake.quack.ondemand.state.PlatformRole] =
+    val all = store.listPlatformRoles()
+    all.find(_.name == name).orElse(all.find(_.name.equalsIgnoreCase(name)))
+
+  /** Names are unique ignoring case, so `Support` is taken while `support` exists. */
+  private def roleNameRefusal(name: String, exceptId: Option[String]): Option[SupervisorError] =
+    val n = name.trim
+    if n.isEmpty then Some(SupervisorError.InvalidArgument("a platform role needs a name"))
+    else if n.equalsIgnoreCase(ai.starlake.quack.ondemand.rbac.PlatformPermissions.ReservedRoleName)
+    then Some(SupervisorError.ReservedName(s"'$n' is reserved: superusers hold every permission"))
+    else
+      store
+        .listPlatformRoles()
+        .find(r => r.name.equalsIgnoreCase(n) && !exceptId.contains(r.id))
+        .map(r => SupervisorError.NameTaken(s"a platform role named '${r.name}' already exists"))
+
+  def createPlatformRole(
+      name: String,
+      description: Option[String],
+      permissions: Set[String]
+  ): Either[SupervisorError, ai.starlake.quack.ondemand.state.PlatformRole] =
+    roleNameRefusal(name, None).orElse(permissionRefusal(permissions)) match
+      case Some(e) => Left(e)
+      case None    =>
+        val r = store.insertPlatformRole(name.trim, description, permissions)
+        invalidateEffectiveCache()
+        Right(r)
+
+  def updatePlatformRole(
+      id: String,
+      name: Option[String],
+      description: Option[Option[String]],
+      permissions: Option[Set[String]]
+  ): Either[SupervisorError, ai.starlake.quack.ondemand.state.PlatformRole] =
+    store.getPlatformRole(id) match
+      case None      => Left(SupervisorError.NotFound(s"platform role not found: $id"))
+      case Some(cur) =>
+        val newName  = name.map(_.trim).getOrElse(cur.name)
+        val newDesc  = description.getOrElse(cur.description)
+        val newPerms = permissions.getOrElse(cur.permissions)
+        // An unchanged permission set may hold names no module declares any more: keep them.
+        val permCheck = permissions.flatMap(p => permissionRefusal(p.diff(cur.permissions)))
+        roleNameRefusal(newName, Some(id)).orElse(permCheck) match
+          case Some(e) => Left(e)
+          case None    =>
+            store.updatePlatformRole(id, newName, newDesc, newPerms) match
+              case None    => Left(SupervisorError.NotFound(s"platform role not found: $id"))
+              case Some(r) =>
+                invalidateEffectiveCache()
+                Right(r)
+
+  def deletePlatformRole(id: String): Either[SupervisorError, Unit] =
+    if store.deletePlatformRole(id) then
+      invalidateEffectiveCache()
+      Right(())
+    else Left(SupervisorError.NotFound(s"platform role not found: $id"))
+
+  def platformRoleNamesOf(userId: String): List[String] =
+    store.listUserPlatformRoleIds(userId).flatMap(store.getPlatformRole).map(_.name).sorted
+
+  /** Replaces a staff user's platform roles by name, matched ignoring case. */
+  def setUserPlatformRoles(userId: String, roleNames: List[String]): Either[SupervisorError, Unit] =
+    store.getUserById(userId) match
+      case None => Left(SupervisorError.NotFound(s"user not found: $userId"))
+      case Some(u) if !u.kind.equalsIgnoreCase(ai.starlake.quack.ondemand.state.UserKind.Staff) =>
+        Left(
+          SupervisorError.InvalidMembership(
+            "invalid_kind",
+            "platform roles apply to staff users only"
+          )
+        )
+      case Some(u) =>
+        resolvePlatformRoles(roleNames).map { ids =>
+          store.setUserPlatformRoles(u.id, ids)
+          invalidateEffectiveCache()
+        }
+
+  /** Platform role names -> ids, ignoring case; refused when any name matches no role. */
+  private def resolvePlatformRoles(names: List[String]): Either[SupervisorError, Set[String]] =
+    val found   = names.map(_.trim).distinct.map(n => n -> platformRoleNamed(n))
+    val missing = found.collect { case (n, None) => n }
+    if missing.nonEmpty then
+      Left(
+        SupervisorError.InvalidMembership(
+          "unknown_role",
+          s"unknown platform role(s): ${missing.mkString(", ")}"
+        )
+      )
+    else Right(found.flatMap(_._2).map(_.id).toSet)
 
   // ---------- RBAC: roles ----------
 
