@@ -1246,6 +1246,24 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
     refusalOf(out) shouldBe ((StatusCode.Forbidden, "admin_required"))
   }
 
+  it should "ignore an IdP role claim of staff: a tenant login onto a user row mints role user" in {
+    val tokens    = new SessionTokenStore
+    val directory = new RecordingDirectory(
+      Map((LoginRealm.Tenant(AcmeId), "alice") -> List(UserGrant(Some(AcmeId), "user")))
+    )
+    val h = makeHandlers(
+      Right(passwordGrantProfile(role = "staff")),
+      noCalls(),
+      tokens = tokens,
+      grantsForIdentity = directory.lookup
+    )
+    val resp =
+      sessionOf(h.login(LoginRequest("alice", "pw", tenant = Some(AcmeId))).unsafeRunSync())
+    resp.staff shouldBe false
+    resp.admin shouldBe false
+    tokens.get(resp.token).map(_.profile.role) shouldBe Some("user")
+  }
+
   it should "mint a staff session for a database-verified staff row in db mode" in {
     val tokens = new SessionTokenStore
     val h      = makeHandlers(

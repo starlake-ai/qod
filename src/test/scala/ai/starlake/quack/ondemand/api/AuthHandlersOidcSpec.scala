@@ -560,6 +560,36 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
     session.get.value shouldBe "" // no session set
   }
 
+  // Issue #274: a tenant-less staff row signs in through the system OIDC login too, as a staff
+  // session; a tenant admin stays refused there, staff row or not.
+  it should "mint a staff session on the system scope for a tenant-less staff row" in {
+    val directory                         = new RecordingDirectory(List(UserGrant(None, "staff")))
+    val (status, location, token, tokens) =
+      callbackWith(OidcScope.System, "/ui/", "s6-staff", directory.lookup)
+    status shouldBe StatusCode.Found
+    location shouldBe "/ui/"
+    val s = tokens.get(token).get
+    s.profile.role shouldBe "staff"
+    s.profile.tenant shouldBe None
+    s.scope.superuser shouldBe false
+    s.scope.manageableTenants shouldBe empty
+  }
+
+  it should "302 to /ui/?error=admin_required on the system scope for a tenant admin, with or without a staff row" in
+    Seq(
+      List(UserGrant(Some("acme"), "admin")),
+      List(UserGrant(None, "staff"), UserGrant(Some("acme"), "admin"))
+    ).zipWithIndex.foreach { (grants, i) =>
+      withClue(s"[$grants] ") {
+        val directory                    = new RecordingDirectory(grants)
+        val (status, location, token, _) =
+          callbackWith(OidcScope.System, "/ui/", s"s6-admin-$i", directory.lookup)
+        status shouldBe StatusCode.Found
+        location shouldBe "/ui/?error=admin_required"
+        token shouldBe ""
+      }
+    }
+
   // ================================================================
   // 7. oidcCallback with mismatched state cookie -> invalid_state
   // ================================================================

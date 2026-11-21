@@ -32,9 +32,11 @@ import sttp.model.headers.{Cookie, CookieValueWithMeta}
 /** What the chosen login entry point requires of the authenticated principal.
   *
   *   - `System`: the caller did not specify a tenant. Any admin (superuser or tenant-admin) is
-  *     accepted; the resulting session reflects exactly the grants the principal holds.
-  *   - `SystemStrict`: superuser ONLY. Used by the OIDC bare `/ui/` (system IdP) login. A
-  *     non-superuser tenant-admin must sign in through their tenant scope instead.
+  *     accepted, and so is a platform staff principal (a tenant-less `staff` row holding no admin
+  *     grant, issue #274); the resulting session reflects exactly the grants the principal holds.
+  *   - `SystemStrict`: a superuser or a platform staff principal only. Used by the OIDC bare `/ui/`
+  *     (system IdP) login. A non-superuser tenant-admin must sign in through their tenant scope
+  *     instead, whether or not it also holds a staff row.
   *   - `Tenant(id)`: the caller presented a tenant. Whatever proved the identity, the grants of
   *     such a login are that tenant's `qodstate_user` rows alone (`LoginRealm.Tenant`): the row the
   *     database authenticator verified, or the realm's row lookup when an identity provider proved
@@ -826,16 +828,17 @@ final class AuthHandlers(
     // regular user may log into for the profile-only view.
     val selfTenants: Set[String] = grants.collect { case UserGrant(Some(t), _) => t }.toSet
 
-    // `System` scope (no tenant in the login form) accepts any admin role --
-    // superuser or tenant-admin. This preserves the original `login` behavior
+    // `System` scope (no tenant in the login form) accepts any admin role (superuser or
+    // tenant-admin) and a platform staff principal. This preserves the original `login` behavior
     // where the absence of a tenant did not restrict which admins could proceed.
-    // `SystemStrict` (OIDC bare /ui/ login) further restricts to superuser only.
+    // `SystemStrict` (OIDC bare /ui/ login) admits a superuser or a staff principal only: `staff`
+    // already requires no admin grant, so a tenant admin stays refused, staff row or not.
     // `Tenant(t)` scope admits an admin of that specific tenant or a regular user holding a row on
     // it (profile-only session), and nothing else: a tenant login's grants are that tenant's rows,
     // so a superuser grant never opens a tenant (it fails closed if a profile ever carried one).
     val scopeOk = required match
       case RequiredScope.System       => isAdminPrincipal || staff
-      case RequiredScope.SystemStrict => superuser
+      case RequiredScope.SystemStrict => superuser || staff
       case RequiredScope.Tenant(t)    =>
         manageableTenants.contains(t) ||
         // Profile-only sessions belong to the password logins: in Db mode every grant is a
@@ -942,7 +945,11 @@ final class AuthHandlers(
       val mintProfile =
         if staff then profile.copy(role = ai.starlake.quack.ondemand.state.UserKind.Staff)
         else if isAdminPrincipal then profile.copy(role = "admin")
-        else if profile.role.equalsIgnoreCase("admin") then profile.copy(role = "user")
+        // The IdP's role claim grants nothing: a claim of admin or staff on a principal holding
+        // neither is demoted to user.
+        else if profile.role.equalsIgnoreCase("admin") ||
+          profile.role.equalsIgnoreCase(ai.starlake.quack.ondemand.state.UserKind.Staff)
+        then profile.copy(role = "user")
         else profile
       val token = tokens.mintWithScope(mintProfile, sessionScope)
       audit.restAs(
