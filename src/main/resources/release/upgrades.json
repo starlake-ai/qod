@@ -110,6 +110,15 @@
         { "when": "before", "boot_refuses_until_done": false, "text": "Enable every disabled tenant still in use: from this release a disabled tenant's nodes stop at the first boot and its users can no longer sign in, use their tokens or keep their sessions; only a superuser can enable it again." },
         { "when": "before", "boot_refuses_until_done": false, "text": "If an upgrade agent runs deploy/host/install.sh through sudo with a rule that allows any argument, narrow it to the version argument: install.sh now takes --wheel FILE, which chooses code that runs as root." }
       ]
+    },
+    {
+      "version": "0.14.2",
+      "changesets": [],
+      "min_from_version": "0.10.0",
+      "rollback_without_restore": true,
+      "rollback_blocked_by": [],
+      "notes": "https://github.com/starlake-ai/quack-on-demand/blob/v0.14.2/CHANGELOG.md",
+      "steps": []
     }
   ]
 }
