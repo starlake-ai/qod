@@ -128,9 +128,10 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
       executor: CatalogPreviewHandlers.PreviewExecutor,
       cfg: McpConfig = McpConfig(),
       sessionOf: String => Option[SessionTokenStore.Session] = _ => None,
-      stmtHistory: StatementHistoryStore = new StatementHistoryStore()
+      stmtHistory: StatementHistoryStore = new StatementHistoryStore(),
+      store: InMemoryControlPlaneStore = new InMemoryControlPlaneStore(),
+      executorOf: Option[PoolSupervisor => CatalogPreviewHandlers.PreviewExecutor] = None
   ): McpDataTools =
-    val store   = new InMemoryControlPlaneStore()
     val backend = ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend.noop()
     val tracker = new ai.starlake.quack.edge.adapter.NodeLoadTracker
     val sup     = new PoolSupervisor(backend, tracker, store)
@@ -169,7 +170,17 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
       sup,
       RestCaller()
     )
-    new McpDataTools(cfg, executor, sup, catalog, history, tags, tenantDbs, profile, scopeOf)
+    new McpDataTools(
+      cfg,
+      executorOf.fold(executor)(_(sup)),
+      sup,
+      catalog,
+      history,
+      tags,
+      tenantDbs,
+      profile,
+      scopeOf
+    )
 
   // ------------------------------------------------------------------
   // Iceberg fixture (Task 8): a minimal real Arrow-backed NodeMetadataQuery stub, reusing the
@@ -640,6 +651,45 @@ class McpDataToolsSpec extends AnyFlatSpec with Matchers:
       ("alice", true, false),
       (McpSuperuserPat.Owner.username, true, false)
     )
+  }
+
+  it should "refuse a demoted superuser's PAT at the handshake gate and route nothing" in {
+    // The real routed executor over the fixture's supervisor: its handshake gate is what binds
+    // (or refuses) the owner row. The inner route stands for the node; it records every statement
+    // that reaches it. The owner row is a superuser that was demoted to kind `user`, tenant kept
+    // empty, while its PAT (resolved while the owner is enabled) stays valid.
+    val store = new InMemoryControlPlaneStore()
+    store.upsertUserIdentity(McpSuperuserPat.Owner)
+    store.upsertUserIdentity(McpSuperuserPat.Owner.copy(kind = "user"))
+    val reached = ListBuffer.empty[String]
+    val history = new StatementHistoryStore()
+    val tools   = fixture(
+      rangeExecutor(1),
+      stmtHistory = history,
+      store = store,
+      executorOf = Some(sup =>
+        ai.starlake.quack.boot.RoutedExecutor(
+          sup,
+          ai.starlake.quack.route.StatementClassifier.default,
+          (_, _, sql, _, _) =>
+            IO {
+              reached += sql
+              Left(RouterFailure.Unavailable("reached the node"))
+            }
+        )(recordExecution = false)
+      )
+    )
+    val out = call(
+      tools,
+      "run_sql",
+      McpSuperuserPat.principal,
+      "sql"      -> Json.fromString("SELECT 1"),
+      "database" -> Json.fromString(TenantDb),
+      "tenant"   -> Json.fromString(Tenant)
+    )
+    out.isLeft shouldBe true
+    out.swap.toOption.get should include("is not registered in tenant")
+    reached.toList shouldBe Nil
   }
 
   // ------------------------------------------------------------------
