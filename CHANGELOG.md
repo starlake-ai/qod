@@ -1,6 +1,17 @@
 # Changelog
 
-## Unreleased
+## 0.14.1
+
+### Upgrading
+
+- Enable, before upgrading, every disabled tenant still in use. From this release a disabled
+  tenant is fully inert: at the first boot its pools' nodes stop and none starts, its users can no
+  longer sign in, their console sessions and personal access tokens are refused, and its open
+  FlightSQL and native Quack sessions are refused on their next statement. Only a superuser can
+  enable it again.
+- If an upgrade agent runs `deploy/host/install.sh` through sudo with a rule that allows any
+  argument, narrow the rule to the version argument (`deploy/host/README.md`, "An upgrade
+  agent"): `install.sh` now takes `--wheel FILE`, which chooses code that runs as root.
 
 ### Changed
 

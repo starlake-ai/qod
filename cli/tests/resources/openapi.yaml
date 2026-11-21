@@ -11723,6 +11723,7 @@ components:
       - opaSendStatementText
       - clientSecretSet
       - policyVersion
+      - deleteEnabled
       properties:
         name:
           type: string
@@ -11755,6 +11756,8 @@ components:
         policyVersion:
           type: integer
           format: int64
+        deleteEnabled:
+          type: boolean
     TrendBucketEntry:
       title: TrendBucketEntry
       type: object
