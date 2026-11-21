@@ -425,3 +425,37 @@ class FlightHandshakeSecuritySpec extends AnyFlatSpec with Matchers:
     val roleNames = result.toOption.get.effectiveSet.roles.map(_.name)
     roleNames should not contain "ghostrole"
   }
+
+  it should "refuse a tenant-less row whose kind is not admin, as an unknown user" in {
+    val fix = SecurityFixtures.freshStore()
+    // A superuser demoted to kind user keeps tenant NULL.
+    val demoted = fix.store.listSuperusers().find(_.username == SecurityFixtures.RootUsername).get
+    fix.store.upsertUserWithHash(
+      tenant = None,
+      username = demoted.username,
+      passwordHash = fix.store.getPasswordHash(None, demoted.username).get,
+      kind = "user"
+    )
+    val sup    = buildSupervisor(fix.store)
+    val result = sup.authorizeHandshake(
+      SecurityFixtures.TenantName,
+      SecurityFixtures.PoolName,
+      SecurityFixtures.RootUsername,
+      superuserAdmissible = true
+    )
+    result shouldBe a[Left[?, ?]]
+    result.left.toOption.get should include("is not registered in tenant")
+  }
+
+  it should "still bind a tenant-less admin row as a superuser" in {
+    val fix    = SecurityFixtures.freshStore()
+    val sup    = buildSupervisor(fix.store)
+    val result = sup.authorizeHandshake(
+      SecurityFixtures.TenantName,
+      SecurityFixtures.PoolName,
+      SecurityFixtures.RootUsername,
+      superuserAdmissible = true
+    )
+    result.toOption.get.isSuperuser shouldBe true
+    result.toOption.get.effectiveSet.roles shouldBe empty
+  }

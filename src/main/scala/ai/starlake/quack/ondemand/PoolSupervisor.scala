@@ -1441,7 +1441,9 @@ final class PoolSupervisor(
     // A disabled tenant runs no node: the one refusal, as every pool node start passes here
     // (create, scale-up, resume, restart, reconcile's respawns).
     if tenantDisabled(key.tenant) then
-      IO.raiseError(new PoolSupervisor.TenantDisabledOff(PoolSupervisor.tenantDisabledMessage(key.tenant)))
+      IO.raiseError(
+        new PoolSupervisor.TenantDisabledOff(PoolSupervisor.tenantDisabledMessage(key.tenant))
+      )
     else
       backend
         .start(spec)
@@ -5162,6 +5164,24 @@ final class PoolSupervisor(
                         s"user '$username' is not registered in tenant '${key.tenant}'"
                       )
                     )
+                  case Some(user)
+                      if user.tenant.isEmpty &&
+                        !user.kind.equalsIgnoreCase(
+                          ai.starlake.quack.ondemand.state.UserKind.Admin
+                        ) =>
+                    // A tenant-less row is a data-plane superuser only when its kind is admin. Any
+                    // other (a superuser demoted to kind user, a platform staff row) would get the
+                    // empty EffectiveSet that bypasses ACL, RLS/CLS and the node decision. Same
+                    // message as an unknown user so the refusal is not an existence oracle.
+                    logger.warn(
+                      s"handshake refused: tenant-less row '$username' of kind '${user.kind}' is " +
+                        s"not a superuser (tenant '${key.tenant}')"
+                    )
+                    Left(
+                      HandshakeDenial.Denied(
+                        s"user '$username' is not registered in tenant '${key.tenant}'"
+                      )
+                    )
                   case Some(user) if user.tenant.isEmpty && !superuserAdmissible =>
                     // The credential was validated by a TENANT-scoped authority (per-tenant
                     // OIDC, or the tenant arm of the auth chain), which can only speak for
@@ -5376,8 +5396,8 @@ object PoolSupervisor:
   def tenantDisabledMessage(tenant: String): String =
     s"tenant '$tenant' is disabled: its pools run no node until a superuser enables it"
 
-  /** A node start of a disabled tenant's pool ([[PoolSupervisor.tenantDisabled]]); REST answers
-    * a pool create or scale-up so refused `409 tenant_disabled`.
+  /** A node start of a disabled tenant's pool ([[PoolSupervisor.tenantDisabled]]); REST answers a
+    * pool create or scale-up so refused `409 tenant_disabled`.
     */
   final class TenantDisabledOff(reason: String) extends RuntimeException(reason)
 

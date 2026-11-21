@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Security
+
+- **A tenant-less account that is not a superuser no longer reaches data.** A superuser demoted to
+  `kind user` left the management plane but still connected to every pool as a superuser, over
+  FlightSQL and the native front door (`superuser=true` and the password) and through a personal
+  access token on `/mcp` and the admin SQL routes, bypassing grants, row and column policies. The
+  handshake now binds a tenant-less row only when its kind is `admin` and refuses any other as an
+  unknown user, logging the reason at WARN.
+
 ## 0.14.1
 
 ### Upgrading
