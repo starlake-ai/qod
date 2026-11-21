@@ -44,7 +44,8 @@ final case class McpToolDef(
   * cannot forget it.
   *
   * `resolvePat` is the narrow seam (`PatAuthenticator.resolve` in Main) so protocol tests need no
-  * store.
+  * store. What it resolves passes [[McpRoutes.admitsPat]] too, so a staff token, or any tenant-less
+  * one whose owner is no superuser, is a 401 whatever the wiring.
   */
 final class McpRoutes(
     cfg: McpConfig,
@@ -76,7 +77,8 @@ final class McpRoutes(
       if !h.startsWith("Bearer ") then None
       else
         val token = h.stripPrefix("Bearer ")
-        resolvePat(token).map(p => new McpPrincipal.Pat(p, token))
+        // A tenant-less PAT reaches MCP only when its owner is a superuser (issue #274).
+        resolvePat(token).filter(McpRoutes.admitsPat).map(p => new McpPrincipal.Pat(p, token))
     }
 
   private def mayUse(principal: McpPrincipal, tool: McpToolDef): Boolean =
@@ -221,6 +223,15 @@ final class McpRoutes(
     )
 
 object McpRoutes:
+
+  /** Whether a resolved PAT may use `/mcp` (issue #274): a tenant's token, or a tenant-less one
+    * only when its owner is a superuser. A staff token, and any other tenant-less owner, holds no
+    * data plane and no MCP tool, so it is refused like a token that did not resolve.
+    */
+  def admitsPat(p: PatPrincipal): Boolean =
+    p.user.tenant.isDefined ||
+      p.user.kind.equalsIgnoreCase(ai.starlake.quack.ondemand.state.UserKind.Admin)
+
   /** The tools a token with a ceiling of `RO` may use. A tool not named here is closed to it, so a
     * new tool stays closed until someone decides it only reads. `run_sql` is here because the
     * ceiling already limits what the statement may do.

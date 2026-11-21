@@ -110,6 +110,15 @@ final class PatAuthenticator(
           PatPrincipal(user, rec.id, scope, adminOf(scope), rec.restriction)
         }
 
+  /** This authenticator with `lookup` as its staff row lookup, everything else the same. Lets a
+    * wiring that builds the authenticator before the supervisor (a test harness) hand it the
+    * supervisor's `staffPrincipal` afterwards.
+    */
+  def withStaffPrincipal(
+      lookup: String => Option[ai.starlake.quack.ondemand.rbac.StaffPrincipal]
+  ): PatAuthenticator =
+    new PatAuthenticator(pats, userById, grantsFor, tenantDisabled, lookup)
+
   /** Authorization envelope for `token`, for the `TenantScopeCheck` gates that only need the scope.
     */
   def scopeOf(token: String): Option[SessionScope] = resolve(token).map(_.scope)

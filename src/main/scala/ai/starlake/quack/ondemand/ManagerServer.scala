@@ -4,7 +4,7 @@ import ai.starlake.quack.{FleetConfig, FlightConfig, ManagerConfig}
 import ai.starlake.quack.edge.{BoundedBody, ConnectionBudget}
 import ai.starlake.quack.ondemand.auth.ReadOnlyCeilingRoutes
 import ai.starlake.quack.ondemand.api._
-import ai.starlake.quack.ondemand.state.PatStore
+import ai.starlake.quack.ondemand.state.{PatStore, UserKind}
 import ai.starlake.quack.ondemand.telemetry.{
   AuditActions,
   AuditRateLimiter,
@@ -121,7 +121,11 @@ final class ManagerServer(
     // The live staff row of a name and its platform permissions (issue #274,
     // PoolSupervisor.staffPrincipal). The default answers nothing, so every staff session
     // resolves to no session at all: closed.
-    staffPrincipal: String => Option[ai.starlake.quack.ondemand.rbac.StaffPrincipal] = _ => None
+    staffPrincipal: String => Option[ai.starlake.quack.ondemand.rbac.StaffPrincipal] = _ => None,
+    // Path prefixes modules declare for staff callers (issue #274): a staff session or PAT reaches
+    // a module route only under one of these, matched on whole segments. Empty keeps every module
+    // route closed to staff.
+    moduleStaffPrefixes: Set[String] = Set.empty
 ) extends LazyLogging:
 
   // The bearer-credential lookups, composed session-first: the JWT verify is a
@@ -200,6 +204,19 @@ final class ManagerServer(
       // exactly as before this feature existed, not a silent profile-allowlist grant
       // ahead of the route ever being wired.
       (cfg.auth.management.slIntegrationOn && path == "/api/auth/sso/ticket")
+
+  /** A path at or under a prefix a module declared for staff, on whole segments. */
+  private def underStaffPrefix(path: String): Boolean =
+    moduleStaffPrefixes.exists(p => path == p || path.startsWith(p + "/"))
+
+  /** What a staff session or PAT may reach (issue #274): its profile allowlist without the
+    * data-plane routes (`ManagerServer.StaffExcludedProfilePaths`), the console page list and the
+    * paths modules declare for staff. Everything else is `403 admin_required`, so a module route
+    * written for superusers stays closed to staff, and so do the branch routes: staff hold no pool.
+    */
+  private def isStaffApi(path: String): Boolean =
+    (isProfileApi(path) && !ManagerServer.StaffExcludedProfilePaths.contains(path)) ||
+      path == ManagerServer.ConsolePagesPath || underStaffPrefix(path)
 
   /** The branch routes a NON-ADMIN session may reach, and the only paths whose tenant the guard
     * leaves to the handler: any principal who may connect may branch, in its own tenant, which
@@ -344,8 +361,9 @@ final class ManagerServer(
     * `role=admin`), which reach the whole namespace, and non-admin sessions minted by a
     * tenant-scoped login for a `role=user` principal, which are demoted here to the
     * [[isProfileApi]] and [[isBranchApi]] allowlists and get `403 admin_required` everywhere else.
-    * The 403 (rather than the anonymous 401) is what tells a client its session is valid but
-    * under-privileged.
+    * A staff session or PAT (role `staff`, issue #274) gets [[isStaffApi]] instead: no data-plane
+    * profile route, no branch route, only the module paths declared for staff. The 403 (rather than
+    * the anonymous 401) is what tells a client its session is valid but under-privileged.
     *
     * Always-open paths: `/api/auth/login`, `/api/auth/change-password` (the current password is the
     * credential, and a user blocked by must_change_password has no session to present),
@@ -428,11 +446,19 @@ final class ManagerServer(
         // then an absent scope skipped the tenant check. A PAT's synthetic session carries
         // role "admin" exactly when PatAuthenticator.isAdmin holds.
         OptionT.liftF(resolveCredential(provided)).flatMap { resolved =>
-          val sessionAdmin    = resolved.exists(_.profile.role.equalsIgnoreCase("admin"))
+          val sessionAdmin = resolved.exists(_.profile.role.equalsIgnoreCase("admin"))
+          // A staff session or PAT (issue #274): its own allowlist, never the tenant user's.
+          val staffSession =
+            resolved.exists(_.profile.role.equalsIgnoreCase(UserKind.Staff))
           val tokenScope      = resolved.map(_.scope)
-          val nonAdminSession = resolved.isDefined && !sessionAdmin
+          val nonAdminSession = resolved.isDefined && !sessionAdmin && !staffSession
 
-          val admitted = sessionAdmin || (nonAdminSession && (isProfileApi(path) || branchApi))
+          // A tenant user reads the console page list too, and gets no page.
+          val admitted =
+            sessionAdmin ||
+              (staffSession && isStaffApi(path)) ||
+              (nonAdminSession &&
+                (isProfileApi(path) || branchApi || path == ManagerServer.ConsolePagesPath))
           // A session of a disabled tenant's user (every tenant it holds disabled) is refused
           // everything but signing out, until a superuser enables the tenant. A PAT of one already
           // resolves to nothing (PatAuthenticator).
@@ -472,7 +498,7 @@ final class ManagerServer(
                 )
               )
           else if !admitted then
-            if nonAdminSession then
+            if nonAdminSession || staffSession then
               // A real, valid session without an admin grant. Answer with the
               // same stable code the login gate uses so clients treat both alike
               // -- and not with the anonymous 401, which would send a browser
@@ -492,7 +518,8 @@ final class ManagerServer(
               auditDenial("session:" + username)(
                 audit.restAs(
                   username,
-                  "tenant",
+                  // A staff caller has no tenant: it signs in through the system login.
+                  if staffSession then "system" else "tenant",
                   "auth",
                   AuditActions.AuthAdminRequired,
                   "denied",
@@ -1239,7 +1266,7 @@ object ManagerServer extends com.typesafe.scalalogging.LazyLogging:
     * SPI modules mount their own prefixes under `/api`, and a prefix match would hand every one of
     * them to regular users.
     */
-  private[ondemand] val ProfileApiPaths: Set[String] = Set(
+  private[quack] val ProfileApiPaths: Set[String] = Set(
     "/api/auth/whoami",
     "/api/auth/logout",
     "/api/profile/usage",
@@ -1263,6 +1290,25 @@ object ManagerServer extends com.typesafe.scalalogging.LazyLogging:
     // The names valid on a token's tools axis: the same static list for every caller.
     "/api/auth/pat/tools"
   )
+
+  /** Profile routes a staff caller does not get (issue #274): staff have no data plane, so no S3
+    * credentials, pools, usage, statements or undrop of their own, and no Starlake grant, so no
+    * Starlake SSO ticket. Every other profile path (whoami, logout, the caller's own PATs) stays.
+    */
+  val StaffExcludedProfilePaths: Set[String] = Set(
+    "/api/profile/s3/list",
+    "/api/profile/s3/add",
+    "/api/profile/s3/remove",
+    "/api/profile/pools",
+    "/api/profile/usage",
+    "/api/profile/statements",
+    "/api/profile/recoverable",
+    "/api/profile/undrop",
+    "/api/auth/sso/ticket"
+  )
+
+  /** The console's module page list, which every signed-in caller may read (issue #274). */
+  val ConsolePagesPath: String = "/api/console/pages"
 
   /** The branch routes a NON-ADMIN session may reach (see `isBranchApi`), as a method and a path
     * template split into segments. A `{name}` segment matches any non-empty segment; every other
