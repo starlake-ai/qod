@@ -32,10 +32,13 @@ def create(
     ctx: typer.Context,
     username: str = typer.Option(..., "--username"),
     tenant: str = typer.Option(None, "--tenant"),
-    superuser: bool = typer.Option(False, "--superuser", help="Create a superuser (no tenant)."),
+    superuser: bool = typer.Option(False, "--superuser", help="Create a superuser (no tenant, kind admin)."),
     password: str = typer.Option(None, "--password", help="Prompted when omitted."),
     kind: str = typer.Option(
-        "user", "--kind", help="Account kind: admin | user | staff. staff is tenant-less: platform roles only."
+        None,
+        "--kind",
+        help="Account kind: admin | user | staff. Default user, or admin with --superuser. "
+        "staff is tenant-less: platform roles only.",
     ),
     must_change_password: bool = typer.Option(
         False,
@@ -62,7 +65,14 @@ def create(
         None, "--platform-role", help="Platform role of a staff user (repeatable)."
     ),
 ):
+    kind = kind.strip().lower() if kind is not None else None
     staff = kind == "staff"
+    if superuser and staff:
+        raise typer.BadParameter("--superuser and --kind staff are mutually exclusive")
+    if superuser and kind not in (None, "admin"):
+        raise typer.BadParameter("--superuser creates kind admin; drop --kind or pass --kind admin")
+    if kind is None:
+        kind = "admin" if superuser else "user"
     tenantless = superuser or staff
     if tenantless and tenant:
         raise typer.BadParameter("--superuser and --kind staff take no --tenant")
