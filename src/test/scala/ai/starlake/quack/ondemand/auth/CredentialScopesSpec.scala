@@ -114,6 +114,23 @@ class CredentialScopesSpec extends AnyFlatSpec with Matchers:
     caller.auditDetail("m.write") shouldBe Map("permission" -> "m.write", "actorKind" -> "staff")
   }
 
+  it should "look a staff session's row up once" in {
+    val sessions = new SessionTokenStore()
+    var lookups  = 0
+    val creds    = new CredentialScopes(
+      sessions,
+      None,
+      n =>
+        lookups += 1
+        if n == "sam" then Some(StaffPrincipal(sam, Set("m.read"))) else None
+    )
+    val token = sessions.mintWithScope(profile("staff"), SessionScope.NoAccess)
+    creds.platformCallerOf(Some(token)) shouldBe Some(
+      PlatformCaller(Some("u-sam"), "sam", superuser = false, Set("m.read"))
+    )
+    lookups shouldBe 1
+  }
+
   it should "be None for a staff session whose row stopped qualifying" in {
     val sessions = new SessionTokenStore()
     val creds    = new CredentialScopes(sessions, None, _ => None)

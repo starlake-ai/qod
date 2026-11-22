@@ -71,20 +71,35 @@ final class CredentialScopes(
   /** The caller behind `credential` as a platform caller (issue #274): a superuser session or PAT
     * holds every permission, a staff one its row's live permissions (a `dropAdmin` staff PAT none).
     * None for anyone else (a tenant admin or user, a superuser's `dropAdmin` PAT, whose scope is no
-    * longer superuser), no credential, or one that does not resolve.
+    * longer superuser), no credential, or one that does not resolve. One staff row lookup per call:
+    * a staff JWT's id and permissions come from the same lookup, a PAT's from its own resolve.
     */
   def platformCallerOf(credential: Option[String]): Option[PlatformCaller] =
-    credential.flatMap(sessionOf).flatMap { s =>
-      if s.scope.superuser then
-        Some(PlatformCaller(None, s.profile.username, superuser = true, Set.empty))
-      else if isStaff(s) then
-        staffPrincipal(s.profile.username).map(sp =>
-          PlatformCaller(
-            Some(sp.user.id),
-            sp.user.username,
-            superuser = false,
-            s.scope.platformPermissions
+    credential.flatMap { token =>
+      sessions.get(token) match
+        case Some(s) if isStaff(s) =>
+          if s.profile.tenant.isDefined then None
+          else
+            staffPrincipal(s.profile.username).map(sp =>
+              PlatformCaller(Some(sp.user.id), sp.user.username, superuser = false, sp.permissions)
+            )
+        case Some(s) =>
+          Option.when(s.scope.superuser)(
+            PlatformCaller(None, s.profile.username, superuser = true, Set.empty)
           )
-        )
-      else None
+        case None =>
+          pats.flatMap(_.resolve(token)).flatMap { p =>
+            if p.scope.superuser then
+              Some(PlatformCaller(None, p.user.username, superuser = true, Set.empty))
+            else if p.user.tenant.isEmpty && p.user.kind.equalsIgnoreCase(UserKind.Staff) then
+              Some(
+                PlatformCaller(
+                  Some(p.user.id),
+                  p.user.username,
+                  superuser = false,
+                  p.scope.platformPermissions
+                )
+              )
+            else None
+          }
     }

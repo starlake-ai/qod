@@ -283,7 +283,7 @@ class StaffGuardSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers:
     }
   }
 
-  it should "keep the URL tenant check off its staff prefixes" in withHarness(
+  it should "keep the URL tenant check outside its staff prefixes" in withHarness(
     moduleEndpoints = staffModuleEndpoints,
     moduleStaffPrefixes = Set("/api/test-module/staff")
   ) { h =>

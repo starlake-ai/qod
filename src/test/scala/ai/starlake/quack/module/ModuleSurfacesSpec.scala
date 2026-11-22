@@ -152,6 +152,112 @@ class ModuleSurfacesSpec extends AnyFlatSpec with Matchers:
     validate(mod("catalog")) shouldBe Right(ModuleSurfaces.Empty)
   }
 
+  // Fix round 1: every bundle segment is allowlisted, since a browser resolves an escaped dot, a
+  // backslash or a dot pair split by a tab or a line break as '..' and leaves the mount.
+  it should "refuse a bundle segment a browser would resolve outside the mount" in {
+    for b <- List(
+        "/ops/%2e%2e/elsewhere/x.js",
+        "/ops/.%2e/elsewhere/x.js",
+        "/ops/%2e./elsewhere/x.js",
+        "/ops/%2e/x.js",
+        "/ops/%2E%2E/elsewhere/x.js",
+        "/ops/..\\x.js",
+        "/ops/.\t./x.js",
+        "/ops/.\n./x.js",
+        "/ops/a b.js",
+        "/ops/./q.js",
+        "/ops//q.js",
+        "/ops/"
+      )
+    do
+      withClue(b) {
+        refused(mod("hosted", List(p), pages = List(ConsolePage("q", "Q", p.name, b)))) should
+          include("bundle")
+      }
+  }
+
+  it should "accept a bundle of plain segments under a mount" in {
+    val pg = ConsolePage("q", "Q", p.name, "/ops/v1.2/q-x_Y.js")
+    validate(mod("hosted", List(p), pages = List(pg))).map(_.pages.map(_.bundle)) shouldBe
+      Right(List("/ops/v1.2/q-x_Y.js"))
+  }
+
+  it should "cover no bundle with a root mount" in {
+    val m = mod(
+      "hosted",
+      List(p),
+      pages = List(ConsolePage("q", "Q", p.name, "/q.js")),
+      mounts = List(StaticMount("/", "/www"))
+    )
+    val msg = refused(m)
+    msg should include("bundle")
+    msg should include("a root mount (/) covers no bundle")
+  }
+
+  it should "refuse a staff prefix with an empty, dot or unlisted segment" in {
+    for pre <- List(
+        "/api/hosted//",
+        "/api/hosted//x",
+        "/api/hosted/ops/",
+        "/api/hosted/./x",
+        "/api/hosted/../tenant",
+        "/api/hosted/..",
+        "/api/hosted/%2e%2e",
+        "/api/hosted/a b",
+        "/api/hosted/a\\b",
+        "api/hosted/x",
+        "//api/hosted/x",
+        "/api/hostedx/y",
+        "/apix/hosted/y"
+      )
+    do
+      withClue(pre) {
+        refused(mod("hosted", prefixes = Set(pre))) should include("staff path prefix")
+      }
+  }
+
+  it should "accept a staff prefix of plain segments under /api/<module>/" in {
+    validate(mod("hosted", prefixes = Set("/api/hosted/ops", "/api/hosted/a.b/c-d_E")))
+      .map(_.staffPrefixes) shouldBe Right(Set("/api/hosted/ops", "/api/hosted/a.b/c-d_E"))
+  }
+
+  it should "refuse a bad or repeated module name when the module declares a surface" in {
+    for n <- List("Hosted", "", "ho sted", "hosted_x", "hosted.x", "h/x") do
+      withClue(s"'$n'") {
+        refused(mod(n, prefixes = Set(s"/api/$n/x"))) should include("module name")
+      }
+    refused(
+      mod("hosted", prefixes = Set("/api/hosted/a")),
+      mod("hosted", prefixes = Set("/api/hosted/b"))
+    ) should include("module name 'hosted' is used twice")
+  }
+
+  it should "leave the name of a module with no surface unchecked" in {
+    validate(mod("Not A Name"), mod("Not A Name"), mod("hosted", prefixes = Set("/api/hosted/x")))
+      .map(_.staffPrefixes) shouldBe Right(Set("/api/hosted/x"))
+  }
+
+  it should "read each module's surfaces once and return those values" in {
+    var reads = 0
+    val m     = new ManagerModule:
+      def name                       = "hosted"
+      def changelogPath              = None
+      def start(ctx: ManagerContext) = IO.unit
+      def endpoints                  = Nil
+      def publicPathPrefixes         = Set.empty
+      override def staticMounts      = List(StaticMount("/ops", "/ops"))
+      override def permissions       = { reads += 1; List(p) }
+      override def staffPathPrefixes = { reads += 1; Set(s"/api/hosted/r$reads") }
+      override def consolePages      =
+        reads += 1
+        List(ConsolePage("q", "Q", p.name, "/ops/q.js"))
+      def onEvent(event: ManagerEvent) = IO.unit
+      def stop                         = IO.unit
+    val s = validate(m).toOption.get
+    reads shouldBe 3
+    s.staffPrefixes shouldBe Set("/api/hosted/r2")
+  }
+
   "ModuleSurfaces.apiSegments" should "list the first segment after api of every core endpoint" in {
     coreSegments should contain allOf (
       "catalog",
