@@ -25,6 +25,7 @@ def list_(ctx: typer.Context, tenant: str = typer.Option(None, "--tenant", help=
         "email": "--email",
         "roles": "--role",
         "groups": "--group",
+        "platformRoles": "--platform-role",
     },
 )
 def create(
@@ -34,7 +35,7 @@ def create(
     superuser: bool = typer.Option(False, "--superuser", help="Create a superuser (no tenant)."),
     password: str = typer.Option(None, "--password", help="Prompted when omitted."),
     kind: str = typer.Option(
-        "user", "--kind", help="Account kind: admin | user. admin grants management rights only."
+        "user", "--kind", help="Account kind: admin | user | staff. staff is tenant-less: platform roles only."
     ),
     must_change_password: bool = typer.Option(
         False,
@@ -57,17 +58,24 @@ def create(
         "--group",
         help="Group name in the tenant (repeatable). Omit for the default qod_all_pools.",
     ),
+    platform_roles: list[str] = typer.Option(
+        None, "--platform-role", help="Platform role of a staff user (repeatable)."
+    ),
 ):
-    if superuser and tenant:
-        raise typer.BadParameter("--superuser and --tenant are mutually exclusive")
-    if not superuser and not tenant:
-        raise typer.BadParameter("pass --tenant, or --superuser for a tenant-less superuser")
-    if superuser and (roles or groups):
-        raise typer.BadParameter("--role / --group do not apply to a superuser")
+    staff = kind == "staff"
+    tenantless = superuser or staff
+    if tenantless and tenant:
+        raise typer.BadParameter("--superuser and --kind staff take no --tenant")
+    if not tenantless and not tenant:
+        raise typer.BadParameter("pass --tenant, or --superuser / --kind staff for a tenant-less account")
+    if tenantless and (roles or groups):
+        raise typer.BadParameter("--role / --group do not apply to a tenant-less account")
+    if platform_roles and not staff:
+        raise typer.BadParameter("--platform-role applies to --kind staff only")
     if password is None:
         password = typer.prompt("Password", hide_input=True, confirmation_prompt=True)
     body: dict = {
-        "tenant": None if superuser else tenant,
+        "tenant": None if tenantless else tenant,
         "username": username,
         "password": password,
         "kind": kind,
@@ -79,6 +87,8 @@ def create(
         body["roles"] = roles
     if groups:
         body["groups"] = groups
+    if platform_roles:
+        body["platformRoles"] = platform_roles
     call(ctx, "POST", "/api/user/create", body=body)
 
 
@@ -94,6 +104,7 @@ def create(
         "mustChangePassword": "--must-change-password",
         "email": "--email",
         "enabled": "--enabled",
+        "platformRoles": "--platform-role",
     },
 )
 def update(
@@ -119,7 +130,15 @@ def update(
         help="Omit = unchanged. --no-enabled locks the account (sign-in refused, "
         "tokens stop working); --enabled unlocks.",
     ),
+    platform_roles: list[str] = typer.Option(
+        None, "--platform-role", help="Replace the staff user's platform roles (repeatable)."
+    ),
+    clear_platform_roles: bool = typer.Option(
+        False, "--clear-platform-roles", help="Remove every platform role of the staff user."
+    ),
 ):
+    if platform_roles and clear_platform_roles:
+        raise typer.BadParameter("--platform-role and --clear-platform-roles are mutually exclusive")
     body: dict = {"id": user_id}
     if tenant is not None:
         body["tenant"] = tenant
@@ -133,6 +152,10 @@ def update(
         body["email"] = email
     if enabled is not None:
         body["enabled"] = enabled
+    if platform_roles:
+        body["platformRoles"] = platform_roles
+    if clear_platform_roles:
+        body["platformRoles"] = []
     call(ctx, "POST", "/api/user/update", body=body)
 
 
