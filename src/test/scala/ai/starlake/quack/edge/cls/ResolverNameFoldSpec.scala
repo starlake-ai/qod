@@ -106,3 +106,20 @@ class ResolverNameFoldSpec extends AnyFlatSpec with Matchers:
         }
       }
     }
+
+  // Review round 3, R3-M1: an unqualified column over two FROM items. The visitor's own binding
+  // (`resolveTable`) is empty there, so only the backstop finds the deny on the table; this pins
+  // that layer.
+  for (table, cte) <- tablePairs do
+    s"an unqualified column of table $table beside another FROM item and a CTE named $cte" should
+      "be refused under a deny and a wildcard mask" in {
+        val r    = rw(Map(table -> List("id", "secret"), "other" -> List("id")))
+        val deny = RoleColumnPolicy("cp-d", "r-2", "*", "main", table, "secret", "deny", None)
+        val sql  =
+          s"WITH ${q(cte)} AS (SELECT 'cte' AS secret) SELECT secret FROM ${q(table)}, other"
+        bothOrders(deny, wildcardMask).foreach { ps =>
+          withClue(s"$sql with ${ps.map(_.id)}") {
+            rewrite(r, sql, ps) shouldBe a[Denied]
+          }
+        }
+      }

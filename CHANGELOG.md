@@ -63,6 +63,9 @@
   so a CTE the node never binds, listed first, could make a wildcard mask displace a deny or a
   stronger mask. A column two different masks still cover is now refused with `conflicting
   column policies on <table>.<column>`; give the column one mask, or a deny.
+  A column covered by both a wildcard mask and a named mask can now also be refused when it is
+  read through a derived table or a CTE, or by a correlated subquery whose unqualified column
+  binds to the outer table; give such a column one mask.
 
 ## 0.14.1
 
