@@ -14,13 +14,14 @@ class ModuleSurfacesSpec extends AnyFlatSpec with Matchers:
       perms: List[PlatformPermission] = Nil,
       prefixes: Set[String] = Set.empty,
       pages: List[ConsolePage] = Nil,
-      mounts: List[StaticMount] = List(StaticMount("/ops", "/ops"))
+      mounts: List[StaticMount] = List(StaticMount("/ops", "/ops")),
+      public: Set[String] = Set.empty
   ): ManagerModule = new ManagerModule:
     def name                         = n
     def changelogPath                = None
     def start(ctx: ManagerContext)   = IO.unit
     def endpoints                    = Nil
-    def publicPathPrefixes           = Set.empty
+    def publicPathPrefixes           = public
     override def staticMounts        = mounts
     override def permissions         = perms
     override def staffPathPrefixes   = prefixes
@@ -255,6 +256,91 @@ class ModuleSurfacesSpec extends AnyFlatSpec with Matchers:
     val s = validate(m).toOption.get
     reads shouldBe 3
     s.staffPrefixes shouldBe Set("/api/hosted/r2")
+  }
+
+  "ModuleSurfaces.validate on public path prefixes" should "refuse a malformed one from any module" in {
+    for pre <- List(
+        "",
+        "/",
+        "api/hosted/x",
+        "//api/hosted/x",
+        "/api//hosted/x",
+        "/api/hosted//x",
+        "/api/hosted/x/",
+        "/api/hosted/./x",
+        "/api/hosted/../tenant",
+        "/api/hosted/x/..",
+        "/api/hosted/%2e%2e",
+        "/api/hosted/a b",
+        "/ops//x",
+        "/ops/../api"
+      )
+    do
+      withClue(s"'$pre'") {
+        // With a platform surface and without one: the shape rules bind every module.
+        refused(mod("hosted", prefixes = Set("/api/hosted/s"), public = Set(pre))) should
+          include("public path prefix")
+        refused(mod("plain", public = Set(pre))) should include("public path prefix")
+      }
+  }
+
+  it should "refuse one over /api itself, a core API segment or another module's name" in {
+    for pre <- List(
+        "/api",
+        "/api/auth",
+        "/api/auth/login",
+        "/api/tenant/list",
+        "/api/platform/x",
+        "/api/console/pages",
+        "/api/hosted",
+        "/api/other/x"
+      )
+    do
+      withClue(s"'$pre'") {
+        refused(mod("hosted", public = Set(pre)), mod("other")) should
+          include(s"public path prefix '$pre'")
+      }
+  }
+
+  it should "refuse one outside /api that no static mount of the module covers" in {
+    for (pre, mounts) <- List(
+        "/portal/x" -> List(StaticMount("/ops", "/ops")),
+        "/opsx/y"   -> List(StaticMount("/ops", "/ops")),
+        "/x"        -> List(StaticMount("/", "/www")),
+        "/ops/x"    -> Nil
+      )
+    do
+      withClue(s"'$pre' with $mounts") {
+        refused(mod("hosted", mounts = mounts, public = Set(pre))) should
+          include(s"public path prefix '$pre'")
+      }
+  }
+
+  it should "accept the prefixes qod-hosted declares, under its name and its mounts" in {
+    validate(
+      mod(
+        "hosted",
+        prefixes = Set("/api/hosted/ops"),
+        mounts = List(StaticMount("/portal", "/portal"), StaticMount("/", "/www")),
+        public = Set(
+          "/api/hosted/signup",
+          "/api/hosted/portal/password/reset-request",
+          "/api/hosted/portal/password/reset-complete",
+          "/api/hosted/billing/webhook",
+          "/api/hosted/billing/plans/public",
+          "/portal",
+          "/portal/reset"
+        )
+      )
+    ).isRight shouldBe true
+  }
+
+  it should "accept a prefix under a first segment other than the module's own name" in {
+    // The fixture module is named test-module and has a platform surface, while its public
+    // prefix is /api/hosted-test/ping: what binds every module is that a prefix keeps off core
+    // and off another loaded module's name, not that it lies under its own.
+    validate(new TestModule).isRight shouldBe true
+    validate(mod("plain", public = Set("/api/hosted-test/ping"))).isRight shouldBe true
   }
 
   "ModuleSurfaces.apiSegments" should "list the first segment after api of every core endpoint" in {

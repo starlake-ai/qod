@@ -198,18 +198,39 @@ final class ManagerServer(
       (path == p || path.startsWith(p + "/")) && segments.startsWith(prefix)
     )
 
+  /** Whether the request is exactly one of `paths`, split once at construction. On whole segments,
+    * as the router reads them (see [[isModulePublic]]): `auth%2Flogin` reads as `/api/auth/login`
+    * in the joined path while the router sees one segment `auth/login`, which a module route shaped
+    * `/api/{x}` or `/api/auth/{x}` would serve with no credential. The joined path's test stays
+    * too, so that a trailing `/` still matches none.
+    */
+  private def isExactly(
+      paths: Map[String, Vector[String]],
+      path: String,
+      segments: Vector[String]
+  ): Boolean =
+    paths.get(path).contains(segments)
+
+  private val publicApiSegments: Map[String, Vector[String]] =
+    ManagerServer.segmentsOf(ManagerServer.PublicApiPaths)
+  private val ssoRedeemSegments: Map[String, Vector[String]] =
+    ManagerServer.segmentsOf(Set("/api/auth/sso/redeem"))
+  private val fleetHeartbeatSegments: Map[String, Vector[String]] =
+    ManagerServer.segmentsOf(Set("/api/fleet/heartbeat"))
+
   /** Path is unauthenticated - the UI needs these before login. */
   private def isPublicApi(path: String, segments: Vector[String]): Boolean =
-    ManagerServer.PublicApiPaths.contains(path) ||
+    isExactly(publicApiSegments, path, segments) ||
       // Starlake SSO redeem: the ticket is the credential (public server-to-server call).
       // Gated on the integration flag, not just on the route being unmounted when off: with
       // SL_ENABLED=false an anonymous POST here must fall through to the same 401 (with its
       // audit row) that an unrecognized path got before this feature existed, not silently
       // become "public" ahead of the route ever being wired.
-      (cfg.auth.management.slIntegrationOn && path == "/api/auth/sso/redeem") ||
+      (cfg.auth.management.slIntegrationOn && isExactly(ssoRedeemSegments, path, segments)) ||
       // Fleet heartbeat (qod fleet join): the handler validates X-Fleet-Token itself. Gated on the
       // runtime so the path stays 401 at the guard everywhere else.
-      (FleetConfig.isFleet(cfg.runtimeType) && path == "/api/fleet/heartbeat") ||
+      (FleetConfig.isFleet(cfg.runtimeType) &&
+        isExactly(fleetHeartbeatSegments, path, segments)) ||
       isModulePublic(path, segments)
 
   /** Paths a NON-ADMIN session may reach: the self-service profile surface. Everything else on
@@ -1297,11 +1318,16 @@ final class ManagerServer(
 
 object ManagerServer extends com.typesafe.scalalogging.LazyLogging:
 
+  /** Each of `paths` beside its segments: every one after the leading `/`, as written. */
+  private[ondemand] def segmentsOf(paths: Set[String]): Map[String, Vector[String]] =
+    paths.map(p => p -> p.split("/", -1).toVector.drop(1)).toMap
+
   /** The core `/api` paths the guard admits with no credential: the UI needs these before login.
-    * Exact paths, never prefixes. The config-gated public paths (Starlake SSO redeem, the fleet
-    * heartbeat) and a module's public prefixes are decided in `isPublicApi`.
+    * Exact paths, never prefixes, matched on whole segments. The config-gated public paths
+    * (Starlake SSO redeem, the fleet heartbeat) and a module's public prefixes are decided in
+    * `isPublicApi`.
     */
-  private[ondemand] val PublicApiPaths: Set[String] = Set(
+  private[quack] val PublicApiPaths: Set[String] = Set(
     "/api/auth/login",
     "/api/auth/change-password",
     "/api/auth/forgot-password",

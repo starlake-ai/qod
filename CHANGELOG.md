@@ -36,12 +36,16 @@
   the reason at WARN. A superuser's session already open when its row is demoted, disabled or
   deleted is refused on its next statement on the replica that made the change, and on another
   replica once that one has seen the change, through its NOTIFY or its periodic snapshot refresh.
-- **A module's public path prefix is matched on whole path segments.** It was matched on the
-  decoded path, where an encoded `/` (`%2F`) inside a segment reads as a separator, so
-  `/api/hosted-test/ping%2Fx/secret` passed as under the public prefix `/api/hosted-test/ping`
-  and reached a module route capturing that segment, such as `/api/hosted-test/{id}/secret`, with
-  no credential. An encoded `/` can no longer carry an anonymous request past the prefix; every
-  other path is answered as before.
+- **A module's public path prefix, and the core's exact public paths, are matched on whole path
+  segments.** They were matched on the decoded path, where an encoded `/` (`%2F`) inside a segment
+  reads as a separator, so `/api/hosted-test/ping%2Fx/secret` passed as under the public prefix
+  `/api/hosted-test/ping`, and `/api/auth%2Flogin` as the public `/api/auth/login`, each reaching
+  a module route capturing that segment (such as `/api/hosted-test/{id}/secret` or `/api/{x}`)
+  with no credential. An encoded `/` can no longer carry an anonymous request onto a public path;
+  every other path is answered as before. Boot now also refuses a module public prefix that is
+  empty, not absolute, holds an empty, `.` or `..` segment, is `/api` itself or lies under a core
+  API segment or another loaded module's name, or, outside `/api`, under none of the module's own
+  static mounts.
 
 ### Changed
 

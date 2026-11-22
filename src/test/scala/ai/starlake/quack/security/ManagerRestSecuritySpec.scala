@@ -895,6 +895,42 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
     finally h.shutdown()
   }
 
+  it should "match the exact public paths on whole segments, never across an encoded slash" in {
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(fix.store)
+    try
+      // A `%2F` decodes to `/` in the joined path, so `auth%2Flogin` once read as the public
+      // `/api/auth/login`, while the router sees one segment `auth/login`, which a module route
+      // shaped `/api/{x}` would serve with no credential. The guard's 401 is bare and bodyless.
+      List(
+        "POST" -> "/api/auth%2Flogin",
+        "POST" -> "/api/auth%2flogin",
+        "POST" -> "/%61pi/auth%2Flogin",
+        "POST" -> "/api/auth%2Fchange-password",
+        "GET"  -> "/api/config%2Fclient",
+        "GET"  -> "/api/auth/oidc%2Fstart",
+        "GET"  -> "/api/auth/login/",
+        "GET"  -> "/api/config/client/"
+      ).foreach { (method, path) =>
+        val resp = send(h, method, path, None)
+        withClue(s"$method $path (no credential) body: ${resp.body()}") {
+          resp.statusCode() shouldBe 401
+          resp.body() shouldBe ""
+        }
+      }
+      // Controls: every exact public path as written still reaches past the guard, so whatever
+      // answers it is not the guard's bare 401.
+      ai.starlake.quack.ondemand.ManagerServer.PublicApiPaths.toList.sorted.foreach { path =>
+        List("GET", "POST").foreach { method =>
+          val resp = send(h, method, path, None)
+          withClue(s"$method $path (no credential) body: ${resp.body()}") {
+            (resp.statusCode() == 401 && resp.body().isEmpty) shouldBe false
+          }
+        }
+      }
+    finally h.shutdown()
+  }
+
   it should "keep POST /api/fleet/heartbeat behind the guard outside fleet mode" in {
     val fix = SecurityFixtures.freshStore()
     // The harness boots runtimeType=local: the heartbeat is public at the guard only when

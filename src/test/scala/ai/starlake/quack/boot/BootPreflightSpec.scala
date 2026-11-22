@@ -198,9 +198,12 @@ class BootPreflightSpec extends AnyFlatSpec with Matchers:
             "UPDATE qodstate_user SET failed_attempts = 3 WHERE username = 'root'"
           )
         val before = row()
+        // A kind other than the first boot's, so that an unchanged row proves the kind was not
+        // rewritten. seedAdminUsers is called directly: the boot check refusing a kind other than
+        // admin (BootPreflight.checkAdminKind) is Main's, run before it.
         BootPreflight.seedAdminUsers(
           userStore,
-          AdminConfig(username = "root", password = "second-pw", kind = "admin"),
+          AdminConfig(username = "root", password = "second-pw", kind = "user"),
           _ => None
         )
         row() shouldBe before
