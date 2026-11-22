@@ -1179,8 +1179,17 @@ docs/superpowers/specs/2026-09-26-fleet-join-approval-design.md.
 A known name reporting a new address is refused unless drained and unassigned (shared-token takeover guard).
 `QOD_FLEET_EPHEMERAL=local` runs maintenance and merge nodes on the manager host instead of a
 fleet server. Manager-to-node is plain HTTP: fleet mode needs a private network.
-Containers: `deploy/docker/fleet-worker` is the server image (`qod fleet join` + DuckDB; requires
-`QOD_FLEET_NAME` and `QOD_FLEET_ADVERTISE_HOST`, publishes the node port under the same number),
+Containers: one image for every role, the root `Dockerfile`, dispatched by
+`deploy/docker/qod-entrypoint.sh` on its first argument (none or `manager`: the manager with
+`-XX:+ExitOnOutOfMemoryError` ahead of `JAVA_OPTS`; `worker`: `qod fleet join`, requiring
+`QOD_FLEET_NAME` and `QOD_FLEET_ADVERTISE_HOST` and publishing the node port under the same number;
+anything else: the jar). It needs nothing writable or downloaded at run time: every extension a node
+or the manager's own DuckDB loads is pre-installed in `quack`'s `~/.duckdb`, and qod-node is
+installed at `/opt/qod-node` (`QOD_NODE_BIN`, `QOD_SPAWN_SCRIPT`, which both the manager and `qod
+fleet join` honor). `starlakeai/quack-on-demand-worker` is a deprecated alias,
+`deploy/docker/worker-alias.Dockerfile` (`FROM` the image, `CMD ["worker"]`). `qod healthcheck
+manager|worker` are its healthchecks (the worker's reads `heartbeat.json` in the join state
+directory), and `qod fleet join --spill-dir` sweeps a server's own spill directory at start.
 `host_capacity` reports cgroup limits, and `QOD_FLEET_NODE_PG_HOST` / `_PORT` rewrite the managed
 Postgres address in assignments only (`NodePgAddress`). `deploy/docker/docker-compose.fleet.yml` layers fleet mode
 with two workers on a separate network onto the bundled stack. Design:

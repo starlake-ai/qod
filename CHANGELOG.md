@@ -114,9 +114,39 @@
 
 - `qod user create --superuser` now creates an account of kind `admin`. Earlier releases created
   kind `user`, which was not a superuser on the management plane.
+- **One Docker image for every role.** `starlakeai/quack-on-demand` now also runs a fleet server:
+  `docker run starlakeai/quack-on-demand worker` (compose `command: [worker]`) runs `qod fleet
+  join` with the same environment the worker image took. No argument, or `manager`, runs the
+  manager as before; any other argument goes to the jar. `deploy/docker/fleet-worker` is gone and
+  `starlakeai/quack-on-demand-worker` is now that image in its worker role, published for two more
+  releases: move fleet servers to `starlakeai/quack-on-demand` with `command: [worker]`.
+  `deploy/docker/docker-compose.fleet.yml` runs its workers that way. The image needs nothing from
+  the network and nothing writable at run time: it ships every DuckDB extension a node or the
+  manager loads (avro included, which every node start installed; ducklake, postgres_scanner and
+  httpfs for the manager's own DuckDB) and `qod-node` at `/opt/qod-node` (`QOD_NODE_BIN`), which
+  `qod fleet join` no longer unpacks into `~/.cache`. It carries the `qod` CLI without the
+  dependencies of `qod sql` (pyarrow and the ADBC driver). The manager runs with
+  `-XX:+ExitOnOutOfMemoryError` ahead of `JAVA_OPTS`, so a heap OOM ends the JVM and the restart
+  policy applies.
+- The bundled compose file's manager `stop_grace_period` is 75 s, as its comment said: at 30 s
+  Docker killed the manager halfway through its 60 s drain.
+- A failed DuckLake pre-init on the manager (its catalog's Postgres unreachable, an extension its
+  DuckDB cannot install or load) is now an ERROR and a boot PROBLEMS entry (`catalog NOT initialized
+  by the manager`), retried before reconcile passes every 1 to 15 minutes until it succeeds.
+  Before, it was a WARN the default log level hid, never retried until the next boot, and the
+  database's nodes attached its catalog unmigrated and without the dataPath and encryption checks.
 
 ### Added
 
+- `qod healthcheck manager` and `qod healthcheck worker`, the image's container healthchecks: exit
+  0 when the manager's `/ready` answers 200, or when `qod fleet join` runs and its last heartbeat
+  was accepted within three intervals (at least 30 s; it records each in `heartbeat.json` in its
+  state directory). They read no profile.
+- `qod fleet join --spill-dir DIR` (`QOD_FLEET_SPILL_DIR`): at start, removes the spill folders a
+  node of an earlier run left in this server's own spill directory, as a node killed with its
+  container leaves its folder behind. Only for a directory no other server shares. `--qod-node-bin`
+  now also reads `QOD_NODE_BIN`, and `--spawn-script` (`QOD_SPAWN_SCRIPT`) names a pre-installed
+  spawn script.
 - **Platform staff roles for modules.** A superuser can create tenant-less `staff` users and give
   them platform roles, named bundles of the permissions that manager modules declare
   (`qod platform permission list`, `qod platform role create`, `qod user create --kind staff
