@@ -2,7 +2,7 @@
 #
 # Usage:
 #   1. Boot the manager on the host (./scripts/run-jar.sh - listens on :20900).
-#   2. docker compose -f observability/docker-compose.yml up -d
+#   2. docker compose -f deploy/observability/docker-compose.yml up -d
 #   3. Prometheus UI:  http://localhost:9090
 #      Grafana UI:     http://localhost:3000   (anonymous admin, no login)
 #

@@ -486,12 +486,12 @@ services:
   # Optional. Bring up with
   #   docker compose --profile observability up -d
   # alongside (or without) the seaweedfs profile. Configs come from
-  # `observability/`, mounted read-only. Grafana is anonymous-admin so the
+  # `deploy/observability/`, mounted read-only. Grafana is anonymous-admin so the
   # dashboard is reachable without a login - DON'T expose the port to a
   # public network without flipping that off.
   #
   # Standalone variant (against a native-jar manager on the host) lives at
-  # `observability/docker-compose.yml`; this one scrapes the in-network
+  # `deploy/observability/docker-compose.yml`; this one scrapes the in-network
   # `quack` service directly.
   prometheus:
     image: prom/prometheus:v2.55.1
@@ -504,7 +504,7 @@ services:
     ports:
       - "${PROMETHEUS_PORT:-9090}:9090"
     volumes:
-      - ./observability/prometheus-compose.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/observability/prometheus-compose.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
     command:
       - --config.file=/etc/prometheus/prometheus.yml
@@ -529,9 +529,9 @@ services:
       GF_AUTH_DISABLE_LOGIN_FORM:    "true"
       GF_USERS_DEFAULT_THEME:        light
     volumes:
-      - ./observability/grafana-provisioning/datasources:/etc/grafana/provisioning/datasources:ro
-      - ./observability/grafana-provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
-      - ./observability/grafana-dashboard-single.json:/var/lib/grafana/dashboards/quack-on-demand.json:ro
+      - ./deploy/observability/grafana-provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./deploy/observability/grafana-provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./deploy/observability/grafana-dashboard-single.json:/var/lib/grafana/dashboards/quack-on-demand.json:ro
       - grafana-data:/var/lib/grafana
 
 volumes:

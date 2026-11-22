@@ -167,7 +167,9 @@
 - **Deployment files moved under `deploy/`.** The Helm chart is now at
   `deploy/charts/quack-on-demand/` (kind rig: `deploy/charts/quack-on-demand/local-stack-k8s/`),
   the image Dockerfiles at `deploy/docker/{quack-node,fleet-worker,starflow}/`, and the compose
-  files at `deploy/docker/docker-compose.yml` and `deploy/docker/docker-compose.fleet.yml`. The
+  files at `deploy/docker/docker-compose.yml` and `deploy/docker/docker-compose.fleet.yml`, and
+  the Prometheus and Grafana files (dashboards, provisioning, the standalone stack) at
+  `deploy/observability/` (`docker compose -f deploy/observability/docker-compose.yml up -d`). The
   manager's `Dockerfile` stays at the root. `scripts/docker/run-docker-compose.sh` and
   `stop-docker-compose.sh` are unchanged to use. Without them, run Compose from the repository
   root as `docker compose --project-directory . -f deploy/docker/docker-compose.yml ...`: the

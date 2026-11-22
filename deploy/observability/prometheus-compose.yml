@@ -2,8 +2,8 @@
 # deploy/docker/docker-compose.yml's `observability` profile (alongside the `quack`
 # manager service on the same bridge network).
 #
-# `observability/prometheus.yml` is the standalone variant for when you
-# run the observability stack via `observability/docker-compose.yml`
+# `deploy/observability/prometheus.yml` is the standalone variant for when you
+# run the observability stack via `deploy/observability/docker-compose.yml`
 # against a host-side native-jar manager - that one targets
 # `host.docker.internal:20900` instead.
 

@@ -84,16 +84,16 @@ kubectl -n qod port-forward svc/qod-quack-on-demand 20900:20900 &
 # Just Prometheus + Grafana, scraping the port-forwarded manager
 # via host.docker.internal:20900 (mapped through extra_hosts on Linux,
 # automatic on Docker Desktop).
-docker compose -f observability/docker-compose.yml up -d
+docker compose -f deploy/observability/docker-compose.yml up -d
 
 # Grafana http://localhost:3000  (anonymous admin)
 # Prometheus http://localhost:9090
 
 # Tear down (keeps history)
-docker compose -f observability/docker-compose.yml down
+docker compose -f deploy/observability/docker-compose.yml down
 
 # Wipe data volumes too
-docker compose -f observability/docker-compose.yml down -v
+docker compose -f deploy/observability/docker-compose.yml down -v
 ```
 
 Grafana's preprovisioning is identical to the integrated path: same
@@ -152,7 +152,7 @@ Which stack mounts which:
 | Stack | Dashboard |
 |---|---|
 | `deploy/docker/docker-compose.yml` (`observability` profile) | `grafana-dashboard-single.json` |
-| Standalone `observability/docker-compose.yml` (manager elsewhere / port-forward) | `grafana-dashboard-k8s.json` |
+| Standalone `deploy/observability/docker-compose.yml` (manager elsewhere / port-forward) | `grafana-dashboard-k8s.json` |
 | kind smoke rig (`deploy/charts/quack-on-demand/local-stack-k8s`) | `grafana-dashboard-k8s.json` |
 
 **Import procedure:**
