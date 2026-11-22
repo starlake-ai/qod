@@ -191,7 +191,10 @@ object ManagerServerHarness:
       // The control plane and the supervisor behind this server, for specs that change a row and
       // then reload the supervisor's caches (`supervisor.restore()`).
       store: InMemoryControlPlaneStore,
-      supervisor: PoolSupervisor
+      supervisor: PoolSupervisor,
+      // The server's own credential resolver as a platform caller (CredentialScopes, as Main hands
+      // it to modules in ManagerContext.platformCallerOf), for a module the spec does not start.
+      platformCallerOf: Option[String] => Option[ai.starlake.quack.spi.PlatformCaller]
   ):
 
     /** A session of a new tenant-less `staff` row `username` holding one platform role with
@@ -932,6 +935,7 @@ object ManagerServerHarness:
       telemetryStore = telemetryStore,
       store = store,
       supervisor = sup,
+      platformCallerOf = credentials.platformCallerOf,
       shutdown = () => {
         closeHttpClient()
         // Release the server. Ember's default shutdown drain is 30 s which

@@ -203,7 +203,7 @@ class StaffGuardSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers:
   )
 
   it should "reach a module path under a declared staff prefix, and only that" in withHarness(
-    moduleEndpoints = (new TestModule).endpoints ++ staffModuleEndpoints,
+    moduleEndpoints = (new TestModule).hostedTestEndpoints ++ staffModuleEndpoints,
     moduleStaffPrefixes = Set("/api/test-module/staff")
   ) { h =>
     val staff = h.staffSession(StaffName, StaffPerms)
