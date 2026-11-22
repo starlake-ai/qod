@@ -389,7 +389,11 @@ final case class FleetAssignmentDto(
     tenantDbInitSql: String,
     tenantDbInitTrusted: Boolean,
     tenantPoolInitSql: String,
-    tenantPoolInitTrusted: Boolean
+    tenantPoolInitTrusted: Boolean,
+    // The manager's default-store credentials (secret files on the server) and settings (spawn
+    // env), empty for a node whose database has a store of its own.
+    storeSecrets: Map[String, String],
+    storeEnv: Map[String, String]
 )
 
 /** `approval` is approved | pending: a pending server gets no assignment until it is approved (`qod

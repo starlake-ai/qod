@@ -862,7 +862,8 @@ object ManagerServerHarness:
           backend = None,
           nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
           nodeAuthzLimits = mgrCfg.nodeAuthzLimits,
-          nodeFiles = ai.starlake.quack.NodeFilesConfig()
+          nodeFiles = ai.starlake.quack.NodeFilesConfig(),
+          readEnv = _ => None
         )
       ),
       canonicalTenantIdOf = t => HandlerResolvers.resolveTenantId(sup, t),

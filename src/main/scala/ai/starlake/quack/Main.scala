@@ -2311,7 +2311,9 @@ object Main extends IOApp with LazyLogging:
             nodeKeys = nodeKeys,
             nodeExtensions = mgrCfg.nodeExtensions,
             nodeFiles = mgrCfg.nodeFiles,
-            nodeAuthzLimits = mgrCfg.nodeAuthzLimits
+            nodeAuthzLimits = mgrCfg.nodeAuthzLimits,
+            // The environment DuckLakeInitializer reads the manager's QOD_S3_* from.
+            readEnv = sys.env.get
           )
         ),
         patAuth = Some(patAuthenticator),

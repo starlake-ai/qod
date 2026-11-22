@@ -1283,7 +1283,16 @@ final case class FleetConfig(
         "Port fleet servers dial for the managed Postgres; replaces pgPort only where it equals " +
           "the default metastore's. Empty = unchanged."
     )
-    nodePgPort: String = ""
+    nodePgPort: String = "",
+    @field @ConfigField(
+      envVar = "QOD_FLEET_NODE_S3_ENDPOINT",
+      description =
+        "S3 endpoint (host[:port]) fleet servers dial for the manager's default store, when it " +
+          "differs from the manager's own QOD_S3_ENDPOINT. Replaces QOD_S3_ENDPOINT in the store " +
+          "settings of fleet assignments only, for nodes whose database has no store of its own. " +
+          "Empty = unchanged."
+    )
+    nodeS3Endpoint: String = ""
 ):
   require(heartbeatSec >= 1, "fleet: heartbeatSec must be >= 1")
   require(Set("fleet", "local").contains(ephemeral), "fleet: ephemeral must be 'fleet' or 'local'")
