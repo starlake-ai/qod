@@ -78,6 +78,8 @@ import { defaultScope, parseScope, scopePrefix, scopeRedirect, type Scope } from
 import SidebarLayout from './nav/SidebarLayout';
 import TenantSwitcher from './nav/TenantSwitcher';
 import { NAV, visibleNav } from './nav/navModel';
+import { layoutFor, platformNavItems, routerPath } from './nav/platformNav';
+import { useConsolePages } from './modules/useConsolePages';
 import { legacyRedirect } from './nav/legacy';
 import Config from './pages/Config';
 import Profile from './pages/Profile';
@@ -98,6 +100,29 @@ function ProfileShell() {
       <Routes>
         <Route path="/settings/profile" element={<Profile />} />
         <Route path="*" element={<Navigate to="/settings/profile" replace />} />
+      </Routes>
+    </SidebarLayout>
+  );
+}
+
+// Platform staff session (issue #274): no tenant scope, only the module pages the staff roles
+// grant, plus the caller's own profile.
+function StaffShell() {
+  const { starlakeUrl, telemetryEnabled, fleetEnabled } = useAuth();
+  const { pages, loading } = useConsolePages();
+  const ctx = {
+    superuser: false, admin: false, telemetry: telemetryEnabled, fleet: fleetEnabled,
+    starlake: !!starlakeUrl, scope: { kind: 'all' } as Scope,
+  };
+  const items = [...visibleNav(platformNavItems(pages), ctx), ...visibleNav(NAV, ctx)];
+  if (loading) return <div className="loading">Loading pages...</div>;
+  const landing = pages.length > 0 ? routerPath(pages[0]) : '/settings/profile';
+  return (
+    <SidebarLayout items={items} switcher={() => null}>
+      <Routes>
+        <Route path="/x/:module/:page/*" element={<div className="card">Module pages arrive in the next task</div>} />
+        <Route path="/settings/profile" element={<Profile />} />
+        <Route path="*" element={<Navigate to={landing} replace />} />
       </Routes>
     </SidebarLayout>
   );
@@ -156,14 +181,19 @@ function Shell() {
   const [lastScope, setLastScope] = useState<Scope>(() => defaultScope(principal));
   useEffect(() => { if (urlScope) setLastScope(urlScope); }, [location.pathname]); // eslint-disable-line react-hooks/exhaustive-deps
   const scope = urlScope ?? lastScope;
-  const items = visibleNav(NAV, {
+  const { pages } = useConsolePages();
+  const navCtx = {
     superuser: isSuperuser,
     admin: role?.toLowerCase() === 'admin',
     telemetry: telemetryEnabled,
     fleet: fleetEnabled,
     starlake: !!starlakeUrl,
     scope,
-  });
+  };
+  const items = [
+    ...(isSuperuser ? visibleNav(platformNavItems(pages), navCtx) : []),
+    ...visibleNav(NAV, navCtx),
+  ];
   return (
     <SidebarLayout
       items={items}
@@ -176,6 +206,7 @@ function Shell() {
         {isSuperuser && <Route path="/servers" element={<Servers />} />}
         {isSuperuser && <Route path="/settings/config" element={<Config />} />}
         {isSuperuser && <Route path="/settings/security-audit" element={<SecurityAudit />} />}
+        {isSuperuser && <Route path="/x/:module/:page/*" element={<div className="card">Module pages arrive in the next task</div>} />}
         <Route path="/settings/profile" element={<Profile />} />
         <Route path="*" element={<LegacyRedirect />} />
       </Routes>
@@ -207,9 +238,10 @@ function AuthGate() {
   // Case-insensitive to match the server's equalsIgnoreCase("admin") gate --
   // a qodstate role of "Admin" is admin server-side and must get the full shell.
   if (username) {
-    return role?.toLowerCase() === 'admin'
-      ? <TenantsProvider><Shell /></TenantsProvider>
-      : <ProfileShell />;
+    const layout = layoutFor(role);
+    if (layout === 'admin') return <TenantsProvider><Shell /></TenantsProvider>;
+    if (layout === 'staff') return <StaffShell />;
+    return <ProfileShell />;
   }
   // OIDC mode: redirect to the IdP, or show an error card when the callback
   // returned with ?error=<code>.

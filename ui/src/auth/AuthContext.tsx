@@ -8,6 +8,8 @@ interface AuthState {
   tenant: string | null;
   superuser: boolean;
   manageableTenants: string[];
+  staff: boolean;
+  permissions: string[];
   loading: boolean;
   // "db" = password form login; "oidc" = IdP redirect flow.
   identitySource: 'db' | 'oidc';
@@ -45,6 +47,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [tenant, setTenant]     = useState<string | null>(null);
   const [superuser, setSuperuser]                   = useState<boolean>(false);
   const [manageableTenants, setManageableTenants]   = useState<string[]>([]);
+  const [staff, setStaff]     = useState<boolean>(false);
+  const [permissions, setPermissions] = useState<string[]>([]);
   const [loading, setLoading]   = useState(true);
   const [identitySource, setIdentitySource] = useState<'db' | 'oidc'>('db');
   const [ssoProviderName, setSsoProviderName] = useState<string>('');
@@ -98,6 +102,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setTenant(w.tenant ?? null);
         setSuperuser(w.superuser ?? false);
         setManageableTenants(w.manageableTenants ?? []);
+        setStaff(w.staff ?? false);
+        setPermissions(w.permissions ?? []);
       } catch {
         /* no live session; render login */
       } finally {
@@ -127,6 +133,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setTenant(w.tenant ?? null);
       setSuperuser(w.superuser ?? false);
       setManageableTenants(w.manageableTenants ?? []);
+      setStaff(w.staff ?? false);
+      setPermissions(w.permissions ?? []);
     } catch {
       setRole(r.admin === false ? 'user' : 'admin');
     }
@@ -157,10 +165,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setTenant(null);
     setSuperuser(false);
     setManageableTenants([]);
+    setStaff(false);
+    setPermissions([]);
   }
 
   return (
-    <AuthContext.Provider value={{ username, role, tenant, superuser, manageableTenants, loading, identitySource, ssoProviderName, telemetryEnabled, starlakeUrl, fleetEnabled, login, logout, ssoLogin }}>
+    <AuthContext.Provider value={{ username, role, tenant, superuser, manageableTenants, staff, permissions, loading, identitySource, ssoProviderName, telemetryEnabled, starlakeUrl, fleetEnabled, login, logout, ssoLogin }}>
       {children}
     </AuthContext.Provider>
   );
