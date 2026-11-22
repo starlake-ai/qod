@@ -180,10 +180,25 @@
 
 ### Added
 
+- **One host as containers: `deploy/host/container/`.** `install.sh --version V --settings FILE`
+  installs the manager and its fleet workers from the one image on one Linux server under systemd:
+  host networking, read-only containers with their own limits, the worker count and size from the
+  host's CPU and RAM (or `--workers N --worker-size 4cpu,16g`), one spill folder per worker, an
+  external PostgreSQL or a bundled one (`--postgres bundled`, preview), object storage or a
+  filesystem data path (`--data-dir`), a self-signed certificate until the host's own replaces it.
+  It refuses a host or a size that breaks a sizing rule, naming it, and ends with
+  `smoke-test.sh`. `qod-host status|scale|backup|uninstall` runs it after that: `scale` adds
+  workers, removes free ones (never the last spare; `--remove NAME --move` retires a worker that
+  runs a node, restarting the node elsewhere first) and resizes them one at a time so a pool with
+  two nodes keeps serving. `switch.sh VERSION` changes release after a control-plane dump and
+  refuses a rollback across a one-way release unless `--restore-backup` restores the dump taken
+  before it. `qod-health.timer` restarts a container Docker reports unhealthy. The native
+  single-host layout of `deploy/host/` is unchanged.
 - `qod healthcheck manager` and `qod healthcheck worker`, the image's container healthchecks: exit
-  0 when the manager's `/ready` answers 200, or when `qod fleet join` runs and its last heartbeat
-  was accepted within three intervals (at least 30 s; it records each in `heartbeat.json` in its
-  state directory). They read no profile.
+  0 when the manager's `/ready` answers 200, or when `qod fleet join` runs and its heartbeat loop
+  ran within three waits (at least 60 s; it records each attempt in `heartbeat.json` in its state
+  directory), whatever the manager answered: a manager that is down or hung leaves its workers
+  healthy, as restarting them would only kill their nodes. They read no profile.
 - `qod fleet join --spill-dir DIR` (`QOD_FLEET_SPILL_DIR`): at start, removes the spill folders a
   node of an earlier run left in this server's own spill directory, as a node killed with its
   container leaves its folder behind. Only for a directory no other server shares. `--qod-node-bin`

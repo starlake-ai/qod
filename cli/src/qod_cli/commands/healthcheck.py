@@ -37,7 +37,7 @@ def manager(
 def worker(
     state_dir: Path = typer.Option(None, "--state-dir", help="The `qod fleet join --state-dir`; default: ~/.qod-fleet when it exists (the image's), else the qod cache's."),
 ):
-    """Healthy when `qod fleet join` runs and its last heartbeat was accepted recently."""
+    """Healthy when `qod fleet join` runs and its heartbeat loop ran recently, whatever the manager answered."""
     if state_dir is None:
         image_dir = Path.home() / ".qod-fleet"
         state_dir = image_dir if image_dir.is_dir() else launcher.default_cache_dir() / "agent"
