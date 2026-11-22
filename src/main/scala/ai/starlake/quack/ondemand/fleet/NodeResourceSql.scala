@@ -3,11 +3,15 @@ package ai.starlake.quack.ondemand.fleet
 import io.fabric8.kubernetes.api.model.Quantity
 import scala.util.Try
 
-/** Engine-enforced cpu / memory for fleet nodes: the pool's Kubernetes quantities become DuckDB
-  * SETs, the assignment's `resourceSql`, which the spawn script runs before the tenant-db's initSql
-  * (a later operator SET still wins). Kernel limits are a v1 non-goal.
+/** Engine-enforced cpu / memory for fleet and local nodes: the pool's Kubernetes quantities become
+  * DuckDB SETs, which the spawn script runs before the tenant-db's initSql (a later operator SET
+  * still wins). A fleet node gets them as the assignment's `resourceSql`, a local node as the spawn
+  * environment variable of that name (decision D6). Kernel limits are a v1 non-goal.
   */
 object NodeResourceSql:
+  /** The spawn environment variable, and the fleet assignment's field, the SETs travel in. */
+  val EnvVar = "resourceSql"
+
   private val MiB = BigDecimal(1024L * 1024L)
 
   // The exact conversions sit inside the Try: an absurd quantity (cpu "1e10") throws and is

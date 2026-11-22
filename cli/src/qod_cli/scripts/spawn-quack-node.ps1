@@ -752,6 +752,10 @@ $sb = [System.Text.StringBuilder]::new()
 # mismatch (or without this line), refuses to run the init SQL at all. Mirrors spawn-quack-node.sh.
 if ($initNonce -cmatch '^[0-9a-f]{32,128}$') { [void]$sb.AppendLine("-- qod:init-nonce $initNonce") }
 foreach ($line in $proxySql) { [void]$sb.AppendLine($line) }
+# The pool's cpu/memory SETs (resourceSql, the manager's), right after the proxy settings and before
+# the tenant's initSql, so an operator's own "SET threads=..." there still wins. Mirrors
+# spawn-quack-node.sh.
+Add-ClosedSql $sb $env:resourceSql
 # Before the tenant-db's initSql, so an operator's own SET still wins.
 [void]$sb.AppendLine("SET temp_directory = '$($spillDir.Replace("'", "''"))';")
 # qod-node opens the database with autoinstall_known_extensions off (decision 17): install, without

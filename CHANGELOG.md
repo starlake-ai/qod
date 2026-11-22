@@ -64,6 +64,14 @@
   this release takes none from an earlier manager. Set `QOD_FLEET_NODE_S3_ENDPOINT` on the manager
   where servers reach the store at another address than the manager, and give every HA replica the
   same `QOD_S3_*`.
+- Local runtime: a pool that sets `cpu` or `memory` now gets them as its nodes' DuckDB `threads`
+  and `memory_limit` (Changed below), from each node's next start. Such a pool used to get every
+  core and 80% of the host's memory, so its nodes can now be much smaller. Before upgrading, list
+  those pools on the control-plane database with
+  `SELECT tenant_db_id, name, cpu, memory FROM qodstate_pool WHERE cpu <> '' OR memory <> ''`,
+  and clear the ones that should keep the host's size (`qod pool set-resources --cpu '' --memory
+  ''`) or set the size they should have. A `SET threads` or `SET memory_limit` in the database's
+  or the pool's `initSql` still wins.
 
 ### Security
 
@@ -135,6 +143,10 @@
 
 ### Changed
 
+- **The local runtime sizes nodes from the pool's `cpu` and `memory`**, as the fleet runtime does:
+  `cpu` becomes DuckDB's `threads` (rounded up, at least 1) and `memory` its `memory_limit` (at
+  least 64 MiB), set before the database's and the pool's `initSql`. A pool that sets neither keeps
+  DuckDB's defaults. A pool moved from the local runtime to fleet no longer changes size.
 - `qod user create --superuser` now creates an account of kind `admin`. Earlier releases created
   kind `user`, which was not a superuser on the management plane.
 - **One Docker image for every role.** `starlakeai/quack-on-demand` now also runs a fleet server:
