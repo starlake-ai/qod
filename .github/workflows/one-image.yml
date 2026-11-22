@@ -1,0 +1,94 @@
+name: one image
+
+# The one image (root Dockerfile) and the developer stack around it:
+#   - run-docker-compose.sh, unchanged, with QOD_VERSION=BUILD (this checkout) and with the
+#     published latest-snapshot: the manager on the local runtime spawns its node inside its
+#     own container, the minimal demo loads, a tenant user's Flight SQL query answers;
+#   - the image's compressed size against deploy/docker/image-size.json (110% gate);
+#   - a heap OOM of the manager exits the JVM, with JAVA_OPTS set and unset;
+#   - deploy/docker/docker-compose.fleet.yml runs its workers from the same image.
+# Each step is scripts/ci/one-image-checks.sh, which runs the same way on a laptop.
+
+on:
+  pull_request:
+    paths:
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'deploy/docker/**'
+      - 'scripts/docker/**'
+      - 'scripts/spawn-quack-node.sh'
+      - 'scripts/ci/one-image-checks.sh'
+      - 'cli/**'
+      - '.github/workflows/one-image.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'deploy/docker/**'
+      - 'scripts/docker/**'
+      - 'scripts/spawn-quack-node.sh'
+      - 'scripts/ci/one-image-checks.sh'
+      - 'cli/**'
+      - '.github/workflows/one-image.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: one-image-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: QOD_VERSION=BUILD, size, heap OOM, fleet
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Flight SQL client
+        run: pip install --quiet adbc-driver-flightsql pyarrow
+      - name: Developer stack, built from this checkout
+        run: scripts/ci/one-image-checks.sh dev-stack BUILD
+      - name: Image size
+        run: scripts/ci/one-image-checks.sh size starlakeai/quack-on-demand:local
+      - name: Heap OOM, JAVA_OPTS set
+        run: scripts/ci/one-image-checks.sh heap-oom set
+      - name: Heap OOM, JAVA_OPTS unset
+        run: scripts/ci/one-image-checks.sh heap-oom unset
+      - name: Fleet overlay on the same image
+        run: scripts/ci/one-image-checks.sh fleet
+      - name: Logs on failure
+        if: failure()
+        run: |
+          docker ps -a
+          docker logs --tail 200 quack-on-demand 2>&1 | grep -v -i -E 'password|secret|token' || true
+      - name: Tear down
+        if: always()
+        run: scripts/ci/one-image-checks.sh down
+
+  published:
+    name: QOD_VERSION=latest-snapshot
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Flight SQL client
+        run: pip install --quiet adbc-driver-flightsql pyarrow
+      - name: Developer stack, published image
+        run: scripts/ci/one-image-checks.sh dev-stack latest-snapshot
+      - name: Logs on failure
+        if: failure()
+        run: |
+          docker ps -a
+          docker logs --tail 200 quack-on-demand 2>&1 | grep -v -i -E 'password|secret|token' || true
+      - name: Tear down
+        if: always()
+        run: scripts/ci/one-image-checks.sh down

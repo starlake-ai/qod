@@ -51,6 +51,7 @@ keys in the file.
 | `--data-dir DIR` | none | A filesystem data path, mounted at the same path in every container, instead of object storage. No managed storage, and no second host until it moves to S3 |
 | `--spill-root DIR` | `/fastdisk/qod-spill` | One folder per worker under it, mounted at `/duckdb-tmp`. Mount a fast local disk at its parent |
 | `--image REPO`, `--no-pull` | `starlakeai/quack-on-demand` | Another image, or one already on the host |
+| `--no-verify` | | Skip the image's signature check (an image you built yourself) |
 | `--name NAME` | the short host name | Prefix of the worker names (`NAME-w1`, ...) |
 | `--skip-smoke` | | Skip the smoke test at the end |
 
@@ -127,6 +128,16 @@ then recreated at the new size and undrained, so a pool with two nodes keeps ser
 bundled PostgreSQL, the DuckLake catalogs included (`pg_dumpall`); `qod-backup.timer` runs it
 daily. With `--encrypt-to` it writes an `age`-encrypted copy beside it: only that copy should
 leave the host. A dump holds every secret PostgreSQL holds.
+
+**Signatures.** Every published image is signed keyless with cosign by the release and snapshot
+workflows. With `cosign` installed, `install.sh` and `switch.sh` refuse an image without a valid
+signature from them; without it they say so and go on. By hand:
+
+```sh
+cosign verify starlakeai/quack-on-demand:<tag> \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp '^https://github.com/starlake-ai/(qod|quack-on-demand)/\.github/workflows/(release|snapshot)\.yml@'
+```
 
 **switch.sh VERSION** pulls the release, dumps the control plane, then recreates every container:
 statements drain for up to 60 s first, so it is a short outage. It refuses an upgrade from a

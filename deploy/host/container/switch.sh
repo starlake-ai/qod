@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# switch.sh VERSION [--restore-backup FILE] [--no-pull]: runs another release on this host (README.md).
+# switch.sh VERSION [--restore-backup FILE] [--no-pull] [--no-verify]: runs another release on this host
+# (README.md). The image's cosign signature is checked first when cosign is installed.
 #
 # Upgrade and rollback are the same command. Before switching it dumps the control plane
 # (qod-host backup) and reads the release manifest (release/upgrades.json in the jar):
@@ -16,11 +17,12 @@ HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 # shellcheck source=lib.sh
 source "$HERE/lib.sh"
 
-TARGET="" RESTORE="" PULL=1
+TARGET="" RESTORE="" PULL=1 VERIFY=1
 while (( $# )); do
   case "$1" in
     --restore-backup) RESTORE="$2"; shift 2 ;;
     --no-pull) PULL=0; shift ;;
+    --no-verify) VERIFY=0; shift ;;
     -h|--help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) die "unknown argument '$1' (switch.sh --help)" ;;
     *) TARGET="$1"; shift ;;
@@ -35,6 +37,7 @@ CURRENT="$(grep -E '^QOD_VERSION=' "$VERSION_ENV" | cut -d= -f2-)"
 
 if (( PULL )); then docker pull -q "$QOD_IMAGE:$TARGET" >/dev/null; fi
 docker image inspect "$QOD_IMAGE:$TARGET" >/dev/null 2>&1 || die "image $QOD_IMAGE:$TARGET is not on this host"
+if (( VERIFY )); then verify_image "$QOD_IMAGE:$TARGET"; else say "WARN: --no-verify: the signature of $QOD_IMAGE:$TARGET is not checked"; fi
 
 manifest() {
   docker run --rm --network none --entrypoint python3 "$QOD_IMAGE:$1" -c \
