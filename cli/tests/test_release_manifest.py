@@ -389,7 +389,10 @@ _DROP_COLUMN = "databaseChangeLog:\n  - changeSet:\n      id: x\n      changes:\
 def _list_in_last_release(repo: pathlib.Path, name: str, rollback: bool = True) -> None:
     path, data = _upgrades(repo)
     data["releases"][-1]["changesets"].append(name)
-    if not rollback:
+    # Stated either way, so the case does not depend on what the newest real entry says.
+    if rollback:
+        data["releases"][-1].update(rollback_without_restore=True, rollback_blocked_by=[])
+    else:
         data["releases"][-1].update(rollback_without_restore=False, rollback_blocked_by=["drops a column"])
     path.write_text(json.dumps(data), encoding="utf-8")
 

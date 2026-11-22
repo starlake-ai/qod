@@ -125,3 +125,32 @@ class ManifestImportAtomicitySpec extends AnyFlatSpec with Matchers:
     pg.listTenantDbs("acme").map(_.name) shouldBe List("new_db")
     pg.listRoles("acme").map(_.name) should contain("reader")
   }
+
+  it should "roll back platform roles and staff assignments when apply refuses a later entry" in
+    withStore { pg =>
+      seed(pg)
+      val old   = pg.insertPlatformRole("old", None, Set("hosted.tenant.read"))
+      val samId =
+        pg.upsertUserWithHash(tenant = None, username = "sam", passwordHash = "x", kind = "admin")
+      pg.setUserPlatformRoles(samId, Set(old.id))
+      // sam is written (made staff, its roles replaced) before newbie, found only while applying
+      // to have no password, refuses the import.
+      val m = replacing().copy(
+        platformRoles = List(ManifestPlatformRole("support", permissions = List("hosted.x"))),
+        users = List(
+          ManifestUser(
+            tenant = None,
+            username = "sam",
+            kind = "staff",
+            platformRoles = List("support")
+          ),
+          ManifestUser(tenant = Some("acme"), username = "newbie")
+        )
+      )
+      val err = ManifestImporter.apply(m, pg, requireEncryption = false).left.toOption.get
+      err.exists(_.contains("newbie")) shouldBe true
+      assertUntouched(pg)
+      pg.listPlatformRoles().map(_.name) shouldBe List("old")
+      pg.getUserById(samId).get.kind shouldBe "admin"
+      pg.listUserPlatformRoleIds(samId) shouldBe List(old.id)
+    }

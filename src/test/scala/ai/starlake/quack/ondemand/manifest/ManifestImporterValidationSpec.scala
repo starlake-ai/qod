@@ -1,4 +1,3 @@
-
 // src/test/scala/ai/starlake/quack/ondemand/manifest/ManifestImporterValidationSpec.scala
 package ai.starlake.quack.ondemand.manifest
 
@@ -15,20 +14,20 @@ class ManifestImporterValidationSpec extends AnyFlatSpec with Matchers:
 
   private def baseManifest = ConfigManifest(
     apiVersion = ConfigManifest.ApiVersion,
-    kind       = ConfigManifest.Kind,
+    kind = ConfigManifest.Kind,
     exportedAt = Instant.EPOCH,
     exportedFrom = ExportedFrom("0.2.0", "test")
   )
 
   "ManifestImporter.validate" should "reject an unknown apiVersion" in {
-    val m = baseManifest.copy(apiVersion = "quack-on-demand/v0")
+    val m   = baseManifest.copy(apiVersion = "quack-on-demand/v0")
     val err = ManifestImporter.validate(m, emptyStore).left.toOption.get
-    err.head should include ("apiVersion")
+    err.head should include("apiVersion")
   }
 
   it should "reject a user whose tenant is neither in the YAML nor the DB" in {
-    val m = baseManifest.copy(users = List(
-      ManifestUser(tenant = Some("ghost"), username = "alice")))
+    val m =
+      baseManifest.copy(users = List(ManifestUser(tenant = Some("ghost"), username = "alice")))
     val err = ManifestImporter.validate(m, emptyStore).left.toOption.get
     err.exists(_.contains("ghost")) shouldBe true
   }
@@ -38,15 +37,17 @@ class ManifestImporterValidationSpec extends AnyFlatSpec with Matchers:
     // against a DB tenant whose display name is not its id.
     val store = emptyStore
     store.upsertTenant(Tenant(id = "acme", displayName = "Acme Corporation"))
-    val m = baseManifest.copy(users = List(
-      ManifestUser(tenant = Some("acme"), username = "alice")))
+    val m = baseManifest.copy(users = List(ManifestUser(tenant = Some("acme"), username = "alice")))
     ManifestImporter.validate(m, store) shouldBe Right(())
   }
 
   it should "reject duplicate (tenant, username) pairs" in {
-    val m = baseManifest.copy(users = List(
-      ManifestUser(tenant = None, username = "admin"),
-      ManifestUser(tenant = None, username = "admin")))
+    val m = baseManifest.copy(users =
+      List(
+        ManifestUser(tenant = None, username = "admin"),
+        ManifestUser(tenant = None, username = "admin")
+      )
+    )
     val err = ManifestImporter.validate(m, emptyStore).left.toOption.get
     err.exists(_.contains("duplicate")) shouldBe true
   }
@@ -54,8 +55,8 @@ class ManifestImporterValidationSpec extends AnyFlatSpec with Matchers:
   it should "reject a user-role reference that doesn't resolve" in {
     val m = baseManifest.copy(
       tenants = List(ManifestTenant(name = "tpch")),
-      users   = List(ManifestUser(tenant = Some("tpch"), username = "alice",
-                                   roles = List("ghost"))))
+      users = List(ManifestUser(tenant = Some("tpch"), username = "alice", roles = List("ghost")))
+    )
     val err = ManifestImporter.validate(m, emptyStore).left.toOption.get
     err.exists(_.contains("ghost")) shouldBe true
   }
@@ -218,4 +219,109 @@ class ManifestImporterValidationSpec extends AnyFlatSpec with Matchers:
     )
     val err = ManifestImporter.validate(m, emptyStore).left.toOption.get
     err.exists(_.contains("qod_no_pools")) shouldBe true
+  }
+
+  // ------------------------------------------------------------------
+  // Platform roles and staff users (issue #274)
+  // ------------------------------------------------------------------
+
+  private def errorsOf(m: ConfigManifest): List[String] =
+    ManifestImporter.validate(m, emptyStore).left.toOption.getOrElse(Nil)
+
+  it should "reject platform roles on a tenant user" in {
+    val m = baseManifest.copy(
+      tenants = List(ManifestTenant(name = "acme")),
+      platformRoles = List(ManifestPlatformRole("support")),
+      users = List(
+        ManifestUser(tenant = Some("acme"), username = "alice", platformRoles = List("support"))
+      )
+    )
+    errorsOf(m) shouldBe List(
+      "user 'alice': platform roles are held only by a tenant-less staff user"
+    )
+  }
+
+  it should "reject platform roles on a tenant-less user that is not staff" in {
+    val m = baseManifest.copy(
+      platformRoles = List(ManifestPlatformRole("support")),
+      users = List(
+        ManifestUser(
+          tenant = None,
+          username = "root",
+          kind = "admin",
+          platformRoles = List("support")
+        )
+      )
+    )
+    errorsOf(m) shouldBe List(
+      "user 'root': platform roles are held only by a tenant-less staff user"
+    )
+  }
+
+  it should "reject a staff user with a tenant" in {
+    val m = baseManifest.copy(
+      tenants = List(ManifestTenant(name = "acme")),
+      users = List(ManifestUser(tenant = Some("acme"), username = "sam", kind = "staff"))
+    )
+    errorsOf(m) shouldBe List("user 'sam': a staff user has no tenant")
+  }
+
+  it should "reject a staff user naming a platform role the manifest does not define" in {
+    val m = baseManifest.copy(
+      platformRoles = List(ManifestPlatformRole("support")),
+      users = List(
+        ManifestUser(tenant = None, username = "sam", kind = "staff", platformRoles = List("ghost"))
+      )
+    )
+    errorsOf(m) shouldBe List(
+      "user 'sam' references platform role 'ghost', which the manifest's platformRoles do not define"
+    )
+  }
+
+  it should "resolve a staff user's platform role ignoring case" in {
+    val m = baseManifest.copy(
+      platformRoles = List(ManifestPlatformRole("Support")),
+      users = List(
+        ManifestUser(
+          tenant = None,
+          username = "sam",
+          kind = "staff",
+          platformRoles = List("support")
+        )
+      )
+    )
+    errorsOf(m) shouldBe Nil
+  }
+
+  it should "reject two platform roles whose names differ only by case" in {
+    val m = baseManifest.copy(
+      platformRoles = List(ManifestPlatformRole("support"), ManifestPlatformRole("Support"))
+    )
+    errorsOf(m) shouldBe List(
+      "platform roles 'Support' and 'support': names are unique ignoring case"
+    )
+  }
+
+  it should "reject the reserved platform role name in any case" in {
+    val m = baseManifest.copy(platformRoles = List(ManifestPlatformRole("SuperUser")))
+    errorsOf(m) shouldBe List(
+      "platform role 'SuperUser': the name 'superuser' is reserved: superusers hold every permission"
+    )
+  }
+
+  it should "reject a blank or padded platform role name" in {
+    val m = baseManifest.copy(
+      platformRoles = List(ManifestPlatformRole(" "), ManifestPlatformRole(" support"))
+    )
+    errorsOf(m) shouldBe List(
+      "platform role ' ': a platform role needs a name",
+      "platform role ' support': the name has leading or trailing spaces"
+    )
+  }
+
+  it should "admit a permission no loaded module declares" in {
+    val m = baseManifest.copy(
+      platformRoles = List(ManifestPlatformRole("support", permissions = List("gone.module.x")))
+    )
+    errorsOf(m) shouldBe Nil
   }

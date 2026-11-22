@@ -25,6 +25,13 @@ class SpiDefaultsSpec extends AnyFlatSpec with Matchers:
     m.mutationGates shouldBe Nil
   }
 
+  it should "default the platform surfaces to none" in {
+    val m = new MinimalModule
+    m.permissions shouldBe Nil
+    m.staffPathPrefixes shouldBe empty
+    m.consolePages shouldBe Nil
+  }
+
   "ManagerEventSink.noop" should "accept events without effect" in {
     noException should be thrownBy ManagerEventSink.noop.emit(
       ManagerEvent.TenantCreated("acme")

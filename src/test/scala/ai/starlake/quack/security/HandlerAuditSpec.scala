@@ -420,7 +420,8 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
       tenantDisabled = _ => false,
       grantsForIdentity = (_, _, _) => Nil,
       audit = audit,
-      patSessionOf = _ => None
+      patSessionOf = _ => None,
+      enrichSession = s => Some(s)
     )
     (handlers, sessions)
 
@@ -582,7 +583,8 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
       tenantDisabled = _ => false,
       grantsForIdentity = (_, _, _) => Nil,
       audit = audit,
-      patSessionOf = _ => None
+      patSessionOf = _ => None,
+      enrichSession = s => Some(s)
     )
     (handlers, sessions)
 
@@ -600,7 +602,8 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
       tenantDisabled = _ => false,
       grantsForIdentity = (_, _, _) => Nil,
       audit = audit,
-      patSessionOf = _ => None
+      patSessionOf = _ => None,
+      enrichSession = s => Some(s)
     )
     val loginResult = handlers
       .login(LoginRequest(SecurityFixtures.RootUsername, SecurityFixtures.RootPassword))
@@ -631,7 +634,8 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
       tenantDisabled = _ => false,
       grantsForIdentity = (_, _, _) => Nil,
       audit = audit,
-      patSessionOf = _ => None
+      patSessionOf = _ => None,
+      enrichSession = s => Some(s)
     )
     val loginResult = handlers
       .login(LoginRequest(SecurityFixtures.RootUsername, SecurityFixtures.RootPassword))

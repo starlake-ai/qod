@@ -61,8 +61,25 @@ final class UserHandlers(
       groups = groups,
       poolGrants = grants,
       email = u.email,
-      directRoles = eff.directRoles.map(_.name)
+      directRoles = eff.directRoles.map(_.name),
+      platformRoles = platformRolesOf(u)
     )
+
+  /** A staff row's platform role names (issue #274), read for staff rows only so a listing of many
+    * tenant users makes no per-row lookup; empty for every other row.
+    */
+  private def platformRolesOf(u: RbacUser): List[String] =
+    if u.kind.equalsIgnoreCase(ai.starlake.quack.ondemand.state.UserKind.Staff) then
+      sup.platformRoleNamesOf(u.id)
+    else Nil
+
+  /** The responses of `users`, in order, their effective sets resolved in one batch. A row that
+    * disappeared meanwhile is left out. Blocking: call it on `IO.blocking`.
+    */
+  def responsesFor(users: List[RbacUser]): List[UserResponse] =
+    val effs      = sup.effectiveSetsForUsers(users)
+    val tenantMap = tenantNameMap
+    users.flatMap(u => effs.get(u.id).map(eff => toResponse(eff, tenantMap)))
 
   /** Convenience: build the response for one user, doing the supervisor lookup inline. Returns
     * `None` if the user no longer exists.
@@ -129,49 +146,53 @@ final class UserHandlers(
             userStore,
             UserMemberships.Requested(req.roles, req.groups),
             mustChangePassword = req.mustChangePassword,
-            email = req.email
+            email = req.email,
+            platformRoles = req.platformRoles.getOrElse(Nil)
           )
-          .map {
-            case Right(u) =>
-              val tenantId = u.tenant
-              // NEVER include password in detail.
-              audit.rest(
-                apiKey,
-                "control-plane",
-                AuditActions.UserCreate,
-                "ok",
-                tenant = tenantId,
-                target = Some(u.username),
-                detail = Map("username" -> u.username, "kind" -> u.kind) ++
-                  req.roles.map(r => "roles" -> r.mkString(",")) ++
-                  req.groups.map(g => "groups" -> g.mkString(","))
-              )
-              toResponseFor(u.id) match
-                case Some(r) => Right(r)
-                case None    =>
-                  Left(
-                    (
-                      StatusCode.InternalServerError,
-                      ErrorResponse("missing", s"created user ${u.id} not found")
-                    )
-                  )
-            case Left(err) =>
-              Left(
-                SupervisorErrorHttp
-                  .special(err)
-                  .getOrElse(err match
-                    case SupervisorError.InvalidEmail(m) =>
-                      (StatusCode.BadRequest, ErrorResponse("invalid_email", m))
-                    // The supervisor logged the cause; never echo driver text to the caller.
-                    case SupervisorError.Internal(_) =>
+          // The response reads the store (effective set, platform roles): off the compute pool.
+          .flatMap(res =>
+            IO.blocking(res match
+              case Right(u) =>
+                val tenantId = u.tenant
+                // NEVER include password in detail.
+                audit.rest(
+                  apiKey,
+                  "control-plane",
+                  AuditActions.UserCreate,
+                  "ok",
+                  tenant = tenantId,
+                  target = Some(u.username),
+                  detail = Map("username" -> u.username, "kind" -> u.kind) ++
+                    req.roles.map(r => "roles" -> r.mkString(",")) ++
+                    req.groups.map(g => "groups" -> g.mkString(",")) ++
+                    req.platformRoles.map(p => "platformRoles" -> p.mkString(","))
+                )
+                toResponseFor(u.id) match
+                  case Some(r) => Right(r)
+                  case None    =>
+                    Left(
                       (
                         StatusCode.InternalServerError,
-                        ErrorResponse("internal", "could not create the user")
+                        ErrorResponse("missing", s"created user ${u.id} not found")
                       )
-                    case _ =>
-                      (StatusCode.BadRequest, ErrorResponse("invalid_user", err.message)))
-              )
-          }
+                    )
+              case Left(err) =>
+                Left(
+                  SupervisorErrorHttp
+                    .special(err)
+                    .getOrElse(err match
+                      case SupervisorError.InvalidEmail(m) =>
+                        (StatusCode.BadRequest, ErrorResponse("invalid_email", m))
+                      // The supervisor logged the cause; never echo driver text to the caller.
+                      case SupervisorError.Internal(_) =>
+                        (
+                          StatusCode.InternalServerError,
+                          ErrorResponse("internal", "could not create the user")
+                        )
+                      case _ =>
+                        (StatusCode.BadRequest, ErrorResponse("invalid_user", err.message)))
+                ))
+          )
 
   // ---------- self + last-superuser guards (shared by update-lock and delete) ----------
 
@@ -291,36 +312,48 @@ final class UserHandlers(
                 userStore,
                 mustChangePassword = req.mustChangePassword,
                 email = email,
-                enabled = req.enabled
+                enabled = req.enabled,
+                platformRoles = req.platformRoles
               )
-              .map {
-                case Right(u) =>
-                  // NEVER include password in detail.
-                  audit.rest(
-                    apiKey,
-                    "control-plane",
-                    AuditActions.UserUpdate,
-                    "ok",
-                    tenant = u.tenant,
-                    target = Some(u.username),
-                    detail = req.enabled.map(e => Map("enabled" -> e.toString)).getOrElse(Map.empty)
-                  )
-                  toResponseFor(u.id) match
-                    case Some(r) => Right(r)
-                    case None    =>
-                      Left(
-                        (StatusCode.NotFound, ErrorResponse("not_found", s"user ${u.id} not found"))
-                      )
-                case Left(err) =>
-                  err match
-                    case SupervisorError.InvalidEmail(m) =>
-                      Left((StatusCode.BadRequest, ErrorResponse("invalid_email", m)))
-                    case _ =>
-                      val code = err match
-                        case SupervisorError.NotFound(_) => StatusCode.NotFound
-                        case _                           => StatusCode.BadRequest
-                      Left((code, ErrorResponse("invalid_user", err.message)))
-              }
+              // The response reads the store (effective set, platform roles): off the compute pool.
+              .flatMap(res =>
+                IO.blocking(res match
+                  case Right(u) =>
+                    // NEVER include password in detail.
+                    audit.rest(
+                      apiKey,
+                      "control-plane",
+                      AuditActions.UserUpdate,
+                      "ok",
+                      tenant = u.tenant,
+                      target = Some(u.username),
+                      detail =
+                        req.enabled.map(e => Map("enabled" -> e.toString)).getOrElse(Map.empty) ++
+                          req.platformRoles.map(p => "platformRoles" -> p.mkString(","))
+                    )
+                    toResponseFor(u.id) match
+                      case Some(r) => Right(r)
+                      case None    =>
+                        Left(
+                          (
+                            StatusCode.NotFound,
+                            ErrorResponse("not_found", s"user ${u.id} not found")
+                          )
+                        )
+                  case Left(err) =>
+                    SupervisorErrorHttp.special(err) match
+                      // invalid_kind, unknown_role (platform roles) and the other fixed codes.
+                      case Some(fixed) => Left(fixed)
+                      case None        =>
+                        err match
+                          case SupervisorError.InvalidEmail(m) =>
+                            Left((StatusCode.BadRequest, ErrorResponse("invalid_email", m)))
+                          case _ =>
+                            val code = err match
+                              case SupervisorError.NotFound(_) => StatusCode.NotFound
+                              case _                           => StatusCode.BadRequest
+                            Left((code, ErrorResponse("invalid_user", err.message))))
+              )
 
   // ---------- /user/delete ----------
 

@@ -76,6 +76,10 @@ object AuditActions:
   val RoleColumnPolicyDelete = "role.columnPolicy.delete"
   val GroupCreate            = "group.create"
   val GroupDelete            = "group.delete"
+  // platform staff roles (issue #274), superuser-only
+  val PlatformRoleCreate = "platform.role.create"
+  val PlatformRoleUpdate = "platform.role.update"
+  val PlatformRoleDelete = "platform.role.delete"
   // memberships
   val MembershipUserRoleAdd     = "membership.user-role.add"
   val MembershipUserRoleRemove  = "membership.user-role.remove"
@@ -199,6 +203,9 @@ object AuditActions:
     RoleColumnPolicyDelete,
     GroupCreate,
     GroupDelete,
+    PlatformRoleCreate,
+    PlatformRoleUpdate,
+    PlatformRoleDelete,
     MembershipUserRoleAdd,
     MembershipUserRoleRemove,
     MembershipUserGroupAdd,

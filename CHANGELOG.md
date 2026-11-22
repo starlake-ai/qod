@@ -4,7 +4,19 @@
 
 ### Upgrading
 
-- A tenant-less account whose kind is not `admin` (one seeded with `QOD_ADMIN_KIND=user`, or a
+- **This release is one way.** Rolling back from it needs a restore of the control-plane database
+  backup taken before the upgrade: an older manager reads every staff user as a superuser, with
+  full data access. The release gate records that, so an older release with the gate refuses to
+  boot on the upgraded control plane.
+- In an HA deployment, finish the rollout before creating staff users: a replica still on an older
+  release reads each staff user as a superuser.
+- Before upgrading, check that no tenant row has the kind `staff`, which Liquibase 0061 refuses
+  (a kind was free text before 0.11.0): on the control-plane database,
+  `SELECT tenant, username, kind FROM qodstate_user WHERE tenant IS NOT NULL AND lower(kind) = 'staff'`
+  must return nothing. Change the kind of any such row first (`qod user update --kind user`, or an
+  `UPDATE` of the row).
+- A tenant-less account whose kind is not `admin` (one seeded with `QOD_ADMIN_KIND=user`, one
+  created with `qod user create --superuser` on an earlier release, which sent kind `user`, or a
   superuser demoted earlier) loses data access with this release. Its refusal reads like an
   unknown user, and the WARN line naming the reason is below the default ERROR log level. Find
   such accounts before upgrading, on the control-plane database, with
@@ -21,6 +33,25 @@
   the reason at WARN. A superuser's session already open when its row is demoted, disabled or
   deleted is refused on its next statement on the replica that made the change, and on another
   replica once that one has seen the change, through its NOTIFY or its periodic snapshot refresh.
+
+### Changed
+
+- `qod user create --superuser` now creates an account of kind `admin`. Earlier releases created
+  kind `user`, which was not a superuser on the management plane.
+
+### Added
+
+- **Platform staff roles for modules.** A superuser can create tenant-less `staff` users and give
+  them platform roles, named bundles of the permissions that manager modules declare
+  (`qod platform permission list`, `qod platform role create`, `qod user create --kind staff
+  --platform-role NAME`, the console's Settings > Staff page). A staff user signs in through the
+  system login and reaches only the module routes its permissions allow: no tenant, pool, node or
+  user in core, and no data. Revoking a role or disabling the user takes effect on the next
+  request. Modules declare `permissions`, `staffPathPrefixes` and `consolePages` and check a caller
+  with `ManagerContext.platformCallerOf`; the manager refuses to boot on a malformed declaration.
+- **Module pages in the admin console.** A module's page appears in a Platform section, at
+  `/ui/x/<module>/<page>`, for superusers and for staff holding its permission, inside the console's
+  layout and session (console page contract 1).
 
 ## 0.14.1
 

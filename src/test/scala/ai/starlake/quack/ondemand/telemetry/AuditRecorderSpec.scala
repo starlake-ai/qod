@@ -71,6 +71,26 @@ class AuditRecorderSpec extends AnyFlatSpec with Matchers:
     store.events.map(e => (e.actor, e.actorRealm)).toList shouldBe List(("root", "system"))
   }
 
+  it should "record a tenant-less staff session in the system realm" in {
+    val staff = SessionTokenStore.Session(
+      AuthenticatedProfile("sam", "staff", Set.empty, Map.empty, "db", None),
+      SessionScope(superuser = false, manageableTenants = Set.empty),
+      Instant.now()
+    )
+    val store = new RecordingStore
+    recorder(store, t => if t == "staff-tok" then Some(staff) else None)
+      .rest(Some("staff-tok"), "auth", "auth.logout", "ok")
+    recorder(
+      store,
+      t =>
+        if t == "staff-in-tenant" then
+          Some(staff.copy(profile = staff.profile.copy(tenant = Some("t-a"))))
+        else None
+    ).rest(Some("staff-in-tenant"), "auth", "auth.logout", "ok")
+    store.events.map(e => (e.actor, e.actorRealm)).toList shouldBe
+      List(("sam", "system"), ("sam", "tenant"))
+  }
+
   it should "record the manager's own work (AuditActor.System) as system, whatever the lookup" in {
     val store = new RecordingStore
     AuditActor.System.controlPlane(recorder(store, _ => None), "tenant.create", "ok")

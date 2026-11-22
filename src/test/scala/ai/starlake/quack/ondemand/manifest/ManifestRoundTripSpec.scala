@@ -19,6 +19,7 @@ import ai.starlake.quack.ondemand.runtime.testkit.StubQuackBackend
 import ai.starlake.quack.ondemand.state.{
   InMemoryControlPlaneStore,
   InMemoryFederatedSourceStore,
+  PlatformRole,
   PoolPermission,
   RbacGroup,
   RbacRole,
@@ -1644,4 +1645,94 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
     )
     val err = ManifestImporter.apply(bad, src, requireEncryption = false).left.toOption.get
     err.exists(_.contains("ghost_db")) shouldBe true
+  }
+
+  // ------------------------------------------------------------------
+  // Platform roles and staff users' assignments (issue #274)
+  // ------------------------------------------------------------------
+
+  it should "round-trip platform roles and a staff user's roles, keeping an undeclared permission" in {
+    val src  = buildSrc()
+    val role =
+      src.insertPlatformRole("support", Some("helps"), Set("hosted.tenant.read", "gone.module.x"))
+    val sam =
+      src.upsertUserWithHash(tenant = None, username = "sam", passwordHash = "x", kind = "staff")
+    src.setUserPlatformRoles(sam, Set(role.id))
+    val m = exportOk(ManifestExporter.build(src, ExportedAt, AdminVersion, Hostname))
+    m.platformRoles shouldBe List(
+      ManifestPlatformRole("support", Some("helps"), List("gone.module.x", "hosted.tenant.read"))
+    )
+    m.users.find(_.username == "sam").get.platformRoles shouldBe List("support")
+    // A non-staff tenant-less user carries no platform roles.
+    m.users
+      .filter(u => u.tenant.isEmpty && u.username != "sam")
+      .map(_.platformRoles)
+      .distinct shouldBe
+      List(Nil)
+    // Through the YAML text too.
+    val text    = Yaml.pretty(m.asJson)
+    val decoded =
+      parser.parse(text).flatMap(_.as[ConfigManifest]).fold(e => fail(e.toString), identity)
+    decoded.platformRoles shouldBe m.platformRoles
+    decoded.users.find(_.username == "sam").get.platformRoles shouldBe List("support")
+
+    val dst = new InMemoryControlPlaneStore()
+    ManifestImporter.apply(decoded, dst, requireEncryption = false) shouldBe Right(())
+    val samId = dst.listSuperusers().find(_.username == "sam").get.id
+    dst.platformPermissionsOfUser(samId) shouldBe Set("hosted.tenant.read", "gone.module.x")
+  }
+
+  it should "clear the stale platform roles of a row the import makes staff with none" in {
+    val dst   = new InMemoryControlPlaneStore()
+    val old   = dst.insertPlatformRole("old", None, Set("hosted.tenant.read"))
+    val samId =
+      dst.upsertUserWithHash(tenant = None, username = "sam", passwordHash = "x", kind = "admin")
+    val bobId =
+      dst.upsertUserWithHash(tenant = None, username = "bob", passwordHash = "y", kind = "admin")
+    // Edges a row can hold only through a direct store write: neither is staff.
+    dst.setUserPlatformRoles(samId, Set(old.id))
+    dst.setUserPlatformRoles(bobId, Set(old.id))
+    val m = ConfigManifest(
+      apiVersion = ConfigManifest.ApiVersion,
+      kind = ConfigManifest.Kind,
+      exportedAt = ExportedAt,
+      exportedFrom = ExportedFrom(AdminVersion, Hostname),
+      users = List(
+        ManifestUser(tenant = None, username = "sam", passwordHash = Some("x"), kind = "staff"),
+        ManifestUser(tenant = None, username = "bob", passwordHash = Some("y"), kind = "admin")
+      )
+    )
+    ManifestImporter.apply(m, dst, requireEncryption = false) shouldBe Right(())
+    dst.getUserById(samId).get.kind shouldBe "staff"
+    dst.platformPermissionsOfUser(samId) shouldBe empty
+    dst.platformPermissionsOfUser(bobId) shouldBe empty
+    // A stored role the manifest does not list is left as it is.
+    dst.listPlatformRoles().map(_.name) shouldBe List("old")
+  }
+
+  it should "match a stored platform role ignoring case, adopting the manifest's spelling" in {
+    val dst    = new InMemoryControlPlaneStore()
+    val stored = dst.insertPlatformRole("Support", Some("before"), Set("a.b"))
+    val m      = ConfigManifest(
+      apiVersion = ConfigManifest.ApiVersion,
+      kind = ConfigManifest.Kind,
+      exportedAt = ExportedAt,
+      exportedFrom = ExportedFrom(AdminVersion, Hostname),
+      platformRoles = List(ManifestPlatformRole("support", Some("after"), List("c.d"))),
+      users = List(
+        ManifestUser(
+          tenant = None,
+          username = "sam",
+          passwordHash = Some("x"),
+          kind = "staff",
+          platformRoles = List("SUPPORT")
+        )
+      )
+    )
+    ManifestImporter.apply(m, dst, requireEncryption = false) shouldBe Right(())
+    dst.listPlatformRoles() shouldBe List(
+      PlatformRole(stored.id, "support", Some("after"), Set("c.d"))
+    )
+    val samId = dst.listSuperusers().find(_.username == "sam").get.id
+    dst.listUserPlatformRoleIds(samId) shouldBe List(stored.id)
   }

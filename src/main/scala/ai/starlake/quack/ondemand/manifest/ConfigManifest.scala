@@ -297,7 +297,20 @@ final case class ManifestUser(
     email: Option[String] = None,
     roles: List[String] = Nil,
     groups: List[String] = Nil,
-    poolGrants: List[ManifestPoolGrant] = Nil
+    poolGrants: List[ManifestPoolGrant] = Nil,
+    // A tenant-less staff user's platform roles, by name (issue #274); matched ignoring case
+    // against the manifest's `platformRoles`. Empty for every other user.
+    platformRoles: List[String] = Nil
+)
+
+/** A platform role (issue #274): a named bundle of permission names manager modules declare. Names
+  * are unique ignoring case. A permission no loaded module declares is kept as it is, so a backup
+  * always restores; boot reports it.
+  */
+final case class ManifestPlatformRole(
+    name: String,
+    description: Option[String] = None,
+    permissions: List[String] = Nil
 )
 
 final case class ConfigManifest(
@@ -308,7 +321,8 @@ final case class ConfigManifest(
     tenants: List[ManifestTenant] = Nil,
     roles: List[ManifestRole] = Nil,
     groups: List[ManifestGroup] = Nil,
-    users: List[ManifestUser] = Nil
+    users: List[ManifestUser] = Nil,
+    platformRoles: List[ManifestPlatformRole] = Nil
 )
 
 object ConfigManifest:
@@ -343,6 +357,7 @@ object ConfigManifest:
   given Codec[ManifestTenant]           = ConfiguredCodec.derived
   given Codec[ManifestRole]             = ConfiguredCodec.derived
   given Codec[ManifestGroup]            = ConfiguredCodec.derived
+  given Codec[ManifestPlatformRole]     = ConfiguredCodec.derived
   // The `role` user key was renamed to `kind`. Without this guard `withDefaults` would decode an
   // old `role: admin` entry as `kind: user`, silently demoting the account.
   given Codec[ManifestUser] =

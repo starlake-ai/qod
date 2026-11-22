@@ -227,6 +227,7 @@ class ModuleSystemSqlSpec extends AnyFlatSpec with Matchers:
         singleton = null,
         scopeOf = ai.starlake.quack.ondemand.auth.SessionScope.resolver(_ => None),
         sessionOf = _ => None,
+        platformCallerOf = _ => None,
         systemSql = (_, _) => cats.effect.IO.pure(Right(()))
       )
     """ should compile
@@ -239,7 +240,8 @@ class ModuleSystemSqlSpec extends AnyFlatSpec with Matchers:
         audit = null,
         singleton = null,
         scopeOf = ai.starlake.quack.ondemand.auth.SessionScope.resolver(_ => None),
-        sessionOf = _ => None
+        sessionOf = _ => None,
+        platformCallerOf = _ => None
       )
     """ shouldNot typeCheck
   }

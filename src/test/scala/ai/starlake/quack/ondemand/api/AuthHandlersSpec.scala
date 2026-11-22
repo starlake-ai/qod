@@ -109,7 +109,10 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
       grantsForIdentity: GrantsLookup = (_, _, _) => Nil,
       events: ManagerEventSink = ManagerEventSink.noop,
       patSessionOf: String => Option[SessionTokenStore.Session] = _ => None,
-      publicDenialAudit: AuditRateLimiter = new AuditRateLimiter()
+      publicDenialAudit: AuditRateLimiter = new AuditRateLimiter(),
+      // The live check of a staff session (`CredentialScopes.enrich` in Main). The identity unless
+      // a test exercises staff permissions.
+      enrichSession: SessionTokenStore.Session => Option[SessionTokenStore.Session] = s => Some(s)
   ): AuthHandlers =
     val fakeSvc = new AuthenticationService(emptyConfig, "x"):
       override val hasProviders: Boolean = true
@@ -133,7 +136,8 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
       audit = audit,
       events = events,
       patSessionOf = patSessionOf,
-      publicDenialAudit = publicDenialAudit
+      publicDenialAudit = publicDenialAudit,
+      enrichSession = enrichSession
     )
 
   "login" should "forward tenant scope to the auth service and surface manageableTenants" in {
@@ -1180,6 +1184,130 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
     directory.asked.toList shouldBe List((LoginRealm.System, SeededSuperuser, None))
   }
 
+  // ----- platform staff (issue #274) -----
+  //
+  // A tenant-less staff row signs in through the system login only, as a session of role staff that
+  // is neither admin nor superuser. The directory answers the same rows to every realm, as a store
+  // that ignored the realm would: only the handler's own realm filter keeps a row out of a tenant
+  // login.
+
+  private def loginAs(
+      username: String,
+      grants: List[UserGrant],
+      tenant: Option[String] = None,
+      tokens: SessionTokenStore = new SessionTokenStore
+  ): LoginOutcome =
+    val directory = new RecordingDirectory(
+      Map((LoginRealm.System, username) -> grants) ++
+        tenant.map(t => (LoginRealm.Tenant(t), username) -> grants)
+    )
+    makeHandlers(
+      Right(passwordGrantProfile(username = username, role = "user")),
+      noCalls(),
+      tokens = tokens,
+      grantsForIdentity = directory.lookup
+    ).login(LoginRequest(username, "pw", tenant = tenant)).unsafeRunSync()
+
+  it should "mint a staff session for a tenant-less staff row on the system login" in {
+    val tokens = new SessionTokenStore
+    val resp   = sessionOf(loginAs("sam", grants = List(UserGrant(None, "staff")), tokens = tokens))
+    resp.staff shouldBe true
+    resp.admin shouldBe false
+    resp.superuser shouldBe false
+    resp.manageableTenants shouldBe empty
+    val s = tokens.get(resp.token).get
+    s.profile.role shouldBe "staff"
+    s.profile.tenant shouldBe None
+    s.scope shouldBe SessionScope(superuser = false, manageableTenants = Set.empty)
+  }
+
+  it should "sign an identity holding a staff row and an admin grant in as the admin" in {
+    val tokens = new SessionTokenStore
+    val resp   = sessionOf(
+      loginAs(
+        "sam",
+        grants = List(UserGrant(None, "staff"), UserGrant(Some("acme"), "admin")),
+        tokens = tokens
+      )
+    )
+    resp.staff shouldBe false
+    resp.admin shouldBe true
+    resp.manageableTenants shouldBe List("acme")
+    tokens.get(resp.token).map(_.profile.role) shouldBe Some("admin")
+  }
+
+  it should "never bind a staff row on a tenant login" in {
+    val out = loginAs("sam", grants = List(UserGrant(None, "staff")), tenant = Some("acme"))
+    refusalOf(out) shouldBe ((StatusCode.Forbidden, "not_provisioned"))
+  }
+
+  it should "still refuse a tenant-less row of kind user on the system login" in {
+    val out = loginAs("sam", grants = List(UserGrant(None, "user")))
+    refusalOf(out) shouldBe ((StatusCode.Forbidden, "admin_required"))
+  }
+
+  it should "ignore an IdP role claim of staff: a tenant login onto a user row mints role user" in {
+    val tokens    = new SessionTokenStore
+    val directory = new RecordingDirectory(
+      Map((LoginRealm.Tenant(AcmeId), "alice") -> List(UserGrant(Some(AcmeId), "user")))
+    )
+    val h = makeHandlers(
+      Right(passwordGrantProfile(role = "staff")),
+      noCalls(),
+      tokens = tokens,
+      grantsForIdentity = directory.lookup
+    )
+    val resp =
+      sessionOf(h.login(LoginRequest("alice", "pw", tenant = Some(AcmeId))).unsafeRunSync())
+    resp.staff shouldBe false
+    resp.admin shouldBe false
+    tokens.get(resp.token).map(_.profile.role) shouldBe Some("user")
+  }
+
+  it should "mint a staff session for a database-verified staff row in db mode" in {
+    val tokens = new SessionTokenStore
+    val h      = makeHandlers(
+      Right(DatabaseAuthenticator.profileFor("sam", "staff", None)),
+      noCalls(),
+      tokens = tokens
+    )
+    val resp = sessionOf(h.login(LoginRequest("sam", "pw", tenant = None)).unsafeRunSync())
+    resp.staff shouldBe true
+    resp.admin shouldBe false
+    resp.superuser shouldBe false
+    tokens.get(resp.token).map(_.profile.role) shouldBe Some("staff")
+  }
+
+  it should "answer whoami for a staff session with its live permissions" in {
+    val tokens = new SessionTokenStore
+    val h      = makeHandlers(
+      Right(DatabaseAuthenticator.profileFor("sam", "staff", None)),
+      noCalls(),
+      tokens = tokens,
+      enrichSession = s => Some(s.copy(scope = s.scope.copy(platformPermissions = Set("m.read"))))
+    )
+    val token = sessionOf(h.login(LoginRequest("sam", "pw", tenant = None)).unsafeRunSync()).token
+    val who   = h.whoami(Some(token), None).unsafeRunSync().toOption.get
+    who.staff shouldBe true
+    who.role shouldBe "staff"
+    who.superuser shouldBe false
+    who.permissions shouldBe List("m.read")
+  }
+
+  it should "answer whoami 401 revoked for a staff session whose row no longer qualifies" in {
+    val tokens = new SessionTokenStore
+    val h      = makeHandlers(
+      Right(DatabaseAuthenticator.profileFor("sam", "staff", None)),
+      noCalls(),
+      tokens = tokens,
+      enrichSession = _ => None
+    )
+    val token = sessionOf(h.login(LoginRequest("sam", "pw", tenant = None)).unsafeRunSync()).token
+    val (status, err) = h.whoami(Some(token), None).unsafeRunSync().swap.toOption.get
+    status shouldBe StatusCode.Unauthorized
+    err.error shouldBe "revoked"
+  }
+
   it should "refuse a tenant login whose user name is an unverified email claim, and bind the tenant's row once the address is verified" in {
     val boss      = "boss@acme.example"
     val directory = new RecordingDirectory(
@@ -1486,7 +1614,8 @@ class AuthHandlersSpec extends AnyFlatSpec with Matchers:
       tenantDisabled = _ => false,
       grantsForIdentity = fakeDirectory,
       authModeResolver = new ManagementAuthModeResolver(loadTenant, ManagementAuthMode.Oidc),
-      patSessionOf = _ => None
+      patSessionOf = _ => None,
+      enrichSession = s => Some(s)
     )
 
   "login (oidc)" should "treat tenant=NULL admin row as superuser, ignoring JWT role" in {

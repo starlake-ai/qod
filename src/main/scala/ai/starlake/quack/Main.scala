@@ -529,7 +529,10 @@ object Main extends IOApp with LazyLogging:
       patStore,
       userById = userStore.userById,
       grantsFor = u => List(ai.starlake.quack.ondemand.state.UserGrant(u.tenant, u.kind)),
-      tenantDisabled = id => supervisorRef.get().exists(_.tenantDisabled(id))
+      tenantDisabled = id => supervisorRef.get().exists(_.tenantDisabled(id)),
+      // Same reference (issue #274): until the supervisor is set it answers None, so a staff
+      // token holds no platform permission. Never open: nothing grants by default.
+      staffPrincipal = n => supervisorRef.get().flatMap(_.staffPrincipal(n))
     )
 
     val secretResolver: SecretResolver =
@@ -857,8 +860,22 @@ object Main extends IOApp with LazyLogging:
             )
     )
 
+    // The one credential resolver (session JWT, then PAT) behind every scope and session lookup
+    // below: it also ends a staff session whose row stopped qualifying (issue #274).
+    val credentialScopes = new ai.starlake.quack.ondemand.auth.CredentialScopes(
+      sessionTokens,
+      Some(patAuthenticator),
+      sup.staffPrincipal
+    )
+    // A session JWT only, checked live like every other lookup: for the seams documented to
+    // resolve no PAT (a module's sessionOf; RestCaller, which resolves a PAT itself, with its
+    // restriction and id).
+    val jwtSessionOf: String => Option[ai.starlake.quack.ondemand.api.SessionTokenStore.Session] =
+      t => if t.startsWith(PatStore.TokenPrefix) then None else credentialScopes.sessionOf(t)
+
     // A PAT bearer must attribute to its real owner, not fall through to the
-    // anonymous actor: session lookup first, PAT second.
+    // anonymous actor: session lookup first, PAT second. Attribution only, so it reads the
+    // credential as presented, without the staff row check.
     // patIdOf feeds pat_id on every audit.rest(apiKey, ...) call site (dozens,
     // across the REST handlers the MCP admin tools curry the raw PAT bearer
     // into) with zero call-site changes.
@@ -1071,7 +1088,8 @@ object Main extends IOApp with LazyLogging:
       changePasswordStore = Some(userStore),
       ssoTickets = ssoTicketStore,
       starlakeNotifier = starlakeNotifier,
-      patSessionOf = patAuthenticator.sessionOf
+      patSessionOf = patAuthenticator.sessionOf,
+      enrichSession = credentialScopes.enrich
     )
 
     // Public password-recovery handler. The reset token reuses the SESSION JWT
@@ -1124,7 +1142,7 @@ object Main extends IOApp with LazyLogging:
     // handler that needs the caller's identity, not just its scope.
     val bearerSessionOf
         : String => Option[ai.starlake.quack.ondemand.api.SessionTokenStore.Session] =
-      t => sessionTokens.get(t).orElse(patAuthenticator.sessionOf(t))
+      credentialScopes.sessionOf
     val sessions       = new SessionRegistry
     val arrowAllocator = new org.apache.arrow.memory.RootAllocator()
     // The native client is the only client; the boot gate above already refused a platform
@@ -1715,6 +1733,7 @@ object Main extends IOApp with LazyLogging:
       val groupHandlers      = new GroupHandlers(sup, userHandlers, audit = auditRecorder)
       val membershipHandlers = new MembershipHandlers(sup, userHandlers, audit = auditRecorder)
       val poolPermHandlers   = new PoolPermissionHandlers(sup, userHandlers, audit = auditRecorder)
+      val platformHandlers   = new PlatformHandlers(sup, userHandlers, audit = auditRecorder)
       val columnPolicyHandlers =
         new ai.starlake.quack.ondemand.api.RoleColumnPolicyHandlers(sup, audit = auditRecorder)
       val rowPolicyHandlers =
@@ -1826,9 +1845,7 @@ object Main extends IOApp with LazyLogging:
             resolver,
             tenantIdResolver,
             audit = auditRecorder,
-            scopeOf = ai.starlake.quack.ondemand.auth.SessionScope.resolver(t =>
-              sessionTokens.scopeOf(t).orElse(patAuthenticator.scopeOf(t))
-            ),
+            scopeOf = credentialScopes.scopeOf,
             catalogAliasOf = catalogAliasOf,
             invalidateSources = federatedSourceCaches.sourcesChanged,
             publish = publisher,
@@ -1897,10 +1914,9 @@ object Main extends IOApp with LazyLogging:
           singleton = singletonTasks,
           // Total like the REST handlers' resolver, and PAT-aware like it: no credential, or one
           // that does not resolve, is SessionScope.NoAccess to a module gate.
-          scopeOf = ai.starlake.quack.ondemand.auth.SessionScope.resolver(t =>
-            sessionTokens.scopeOf(t).orElse(patAuthenticator.scopeOf(t))
-          ),
-          sessionOf = sessionTokens.get,
+          scopeOf = credentialScopes.scopeOf,
+          sessionOf = jwtSessionOf,
+          platformCallerOf = credentialScopes.platformCallerOf,
           systemSql = ai.starlake.quack.ondemand.module
             .ModuleSystemSql(m.name, routedExecutor(recordExecution = true), auditRecorder)
         )
@@ -1962,7 +1978,7 @@ object Main extends IOApp with LazyLogging:
       // session -> its user, PAT -> its owner WITH its restriction and id, anything else (no
       // credential included) -> 401. Never a system caller: that is the manager's own work.
       val restCaller = ai.starlake.quack.ondemand.api.RestCaller(
-        sessionOf = sessionTokens.get,
+        sessionOf = jwtSessionOf,
         patOf = patAuthenticator.resolve
       )
 
@@ -2135,9 +2151,7 @@ object Main extends IOApp with LazyLogging:
         if !mgrCfg.mcp.enabled then None
         else
           val mcpScopeOf: ai.starlake.quack.ondemand.auth.SessionScope.Resolver =
-            ai.starlake.quack.ondemand.auth.SessionScope.resolver(t =>
-              sessionTokens.scopeOf(t).orElse(patAuthenticator.scopeOf(t))
-            )
+            credentialScopes.scopeOf
           for
             cat      <- catalogHandlers
             hist     <- catalogHistoryHandlers
@@ -2220,9 +2234,16 @@ object Main extends IOApp with LazyLogging:
       else if mgrCfg.mcp.enabled then logger.info("mcp: serving POST /mcp (bearer auth: PAT)")
       else logger.info("mcp: disabled (QOD_MCP_ENABLED=false); POST /mcp not mounted")
 
-      // Reads the module surfaces (endpoints / publicPathPrefixes / staticMounts),
-      // so it MUST run after moduleStart; called from the IO chain below.
-      def buildManagerServer(): ManagerServer = new ManagerServer(
+      // The first path segments after `api` that core serves or reserves: no module with a
+      // platform surface may take one as its name (ModuleSurfaces.validate).
+      val coreApiSegments: Set[String] =
+        ai.starlake.quack.ondemand.module.ModuleSurfaces.coreApiSegments
+      // Reads the module surfaces (endpoints / publicPathPrefixes / staticMounts, and the
+      // validated platform surfaces), so it MUST run after moduleStart; called from the IO chain
+      // below.
+      def buildManagerServer(
+          surfaces: ai.starlake.quack.ondemand.module.ModuleSurfaces
+      ): ManagerServer = new ManagerServer(
         mgrCfg,
         edgeCfg,
         pools,
@@ -2263,6 +2284,9 @@ object Main extends IOApp with LazyLogging:
         moduleEndpoints = modules.flatMap(_.endpoints),
         modulePublicPrefixes = modules.flatMap(_.publicPathPrefixes).toSet,
         moduleStaticMounts = modules.flatMap(_.staticMounts),
+        moduleStaffPrefixes = surfaces.staffPrefixes,
+        platform = Some(platformHandlers),
+        consolePages = surfaces.pages,
         passwordReset = Some(passwordResetHandlers),
         pat = Some(patHandlers),
         branches = branchHandlers,
@@ -2292,7 +2316,8 @@ object Main extends IOApp with LazyLogging:
         quackCfg = Some(quackCfgResolved),
         icebergCatalog = icebergCatalogHandlers,
         tenantLocations = Some(tenantLocationHandlers),
-        s3Credentials = Some(s3CredentialHandlers)
+        s3Credentials = Some(s3CredentialHandlers),
+        staffPrincipal = sup.staffPrincipal
       )
       // Nodes' verdict and credential calls: a listener of their own, bound with REST.
       val nodeInternal = new ai.starlake.quack.edge.authz.NodeInternalServer(
@@ -2408,7 +2433,25 @@ object Main extends IOApp with LazyLogging:
         // the pre-start empty list, and every gate silently never registers - live
         // enforcement off while module suites (which wire gates directly) stay green.
         IO.defer(sup.setMutationGates(modules.flatMap(_.mutationGates))) *>
-        IO.delay(buildManagerServer()).flatMap { mgr =>
+        // The platform surfaces (issue #274) are read after start() too, so the same deferral
+        // applies. A refused one aborts the boot before any listener binds.
+        IO.defer(
+          IO.fromEither(
+            ai.starlake.quack.ondemand.module.ModuleSurfaces
+              .validate(modules, coreApiSegments)
+              .left
+              .map(msg => new IllegalStateException(s"module surfaces refused: $msg"))
+          )
+        ).flatMap { surfaces =>
+          IO.delay(sup.setDeclaredPermissions(surfaces.permissions)) *>
+            // Stderr, never the logger, whose default level is ERROR.
+            IO.delay(
+              ai.starlake.quack.ondemand.rbac.PlatformPermissionReport
+                .lines(sup.listPlatformRoles(), surfaces.permissions.map(_.name).toSet)
+                .foreach(System.err.println)
+            ) *>
+            IO.delay(buildManagerServer(surfaces))
+        }.flatMap { mgr =>
           // The node listener first, then REST, released in the reverse order: one `use`.
           nodeInternal.resource.flatMap(_ => mgr.serve).use { _ =>
             logger.info(

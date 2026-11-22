@@ -2,7 +2,7 @@ package ai.starlake.quack.ondemand.auth
 
 import ai.starlake.quack.edge.auth.AuthenticatedProfile
 import ai.starlake.quack.ondemand.api.SessionTokenStore
-import ai.starlake.quack.ondemand.state.{PatStore, RbacUser, UserGrant}
+import ai.starlake.quack.ondemand.state.{PatStore, RbacUser, UserGrant, UserKind}
 
 import java.time.Instant
 
@@ -67,7 +67,13 @@ final class PatAuthenticator(
       * disabled user's does, until a superuser enables the tenant. No default, so no wiring can
       * leave a disabled tenant's tokens working.
       */
-    tenantDisabled: String => Boolean
+    tenantDisabled: String => Boolean,
+    /** The live staff row of a name and its platform permissions (issue #274), read on every
+      * resolve so a role change reaches a live token. Applied only to a tenant-less `staff` owner
+      * and only when it answers for that very row. The default answers nothing, which grants no
+      * permission.
+      */
+    staffPrincipal: String => Option[ai.starlake.quack.ondemand.rbac.StaffPrincipal] = _ => None
 ):
 
   /** The principal behind `token`, or `None` when the token is not a PAT at all, is unknown /
@@ -88,15 +94,30 @@ final class PatAuthenticator(
             .map(user => (rec, user))
         )
         .map { (rec, user) =>
-          val base = scopeFor(user)
+          val base  = scopeFor(user)
+          val staff =
+            if user.tenant.isEmpty && user.kind.equalsIgnoreCase(UserKind.Staff) then
+              staffPrincipal(user.username).filter(_.user.id == user.id)
+            else None
+          val withStaff = staff.fold(base)(sp => base.copy(platformPermissions = sp.permissions))
           // dropAdmin lands on the SAME demotion login already performs, so a
-          // restricted admin token walks the existing profile-only path.
+          // restricted admin token walks the existing profile-only path (and a
+          // restricted staff token holds no platform permission).
           val scope =
             if rec.restriction.dropAdmin then
               SessionScope(superuser = false, manageableTenants = Set.empty)
-            else base
+            else withStaff
           PatPrincipal(user, rec.id, scope, adminOf(scope), rec.restriction)
         }
+
+  /** This authenticator with `lookup` as its staff row lookup, everything else the same. Lets a
+    * wiring that builds the authenticator before the supervisor (a test harness) hand it the
+    * supervisor's `staffPrincipal` afterwards.
+    */
+  def withStaffPrincipal(
+      lookup: String => Option[ai.starlake.quack.ondemand.rbac.StaffPrincipal]
+  ): PatAuthenticator =
+    new PatAuthenticator(pats, userById, grantsFor, tenantDisabled, lookup)
 
   /** Authorization envelope for `token`, for the `TenantScopeCheck` gates that only need the scope.
     */
@@ -109,14 +130,20 @@ final class PatAuthenticator(
     * session-consuming code (the guard's admission, the profile endpoints, the self-lock guard,
     * audit attribution, `/api/auth/whoami`) works off a PAT unchanged. The role is the computed
     * privilege level, not the raw `qodstate_user.kind` label, matching the `admin` / `user`
-    * distinction `LoginResponse.admin` carries.
+    * distinction `LoginResponse.admin` carries, except that a `staff` owner's session is `staff`
+    * (issue #274), the role a staff session JWT carries too.
     */
   def sessionOf(token: String): Option[SessionTokenStore.Session] =
     resolve(token).map { p =>
       SessionTokenStore.Session(
         profile = AuthenticatedProfile(
           username = p.user.username,
-          role = if p.isAdmin then "admin" else "user",
+          role =
+            if p.isAdmin then "admin"
+            // A staff row has no tenant: a tenant row whose free-text kind reads `staff` is not one.
+            else if p.user.tenant.isEmpty && p.user.kind.equalsIgnoreCase(UserKind.Staff) then
+              UserKind.Staff
+            else "user",
           groups = Set.empty,
           claims = Map.empty,
           authMethod = "pat",

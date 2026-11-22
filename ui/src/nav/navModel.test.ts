@@ -19,7 +19,7 @@ describe('visibleNav', () => {
       'tenant', 'databases', 'catalog', 'pools', 'maintenance', 'branches', 'auth-provider', 'access-control',
       'access', 'users', 'groups', 'roles',
       'audit', 'control-plane', 'statements', 'usage',
-      'settings', 'config', 'security-audit', 'profile',
+      'settings', 'config', 'security-audit', 'staff', 'profile',
     ]);
   });
   it('shows the security audit to a superuser at its path', () => {
@@ -37,6 +37,7 @@ describe('visibleNav', () => {
     expect(got).not.toContain('servers');
     expect(got).not.toContain('config');
     expect(got).not.toContain('security-audit');
+    expect(got).not.toContain('staff');
     expect(got).toContain('profile');
   });
   it('hides fleet servers outside fleet mode, audit without telemetry, workbench without starlake', () => {

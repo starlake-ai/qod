@@ -143,6 +143,7 @@ class McpCoverageSpec extends AnyFlatSpec with Matchers:
     "POST /api/tenant/opaTest", // dry-run diagnostic for policy authors; CLI/REST only
     "POST /api/fleet/",         // fleet servers are operator infrastructure, no agent tool
     "POST /api/internal/",      // node-to-manager calls (CredentialsRoute, DecideRoute), never REST
+    "POST /api/platform/",      // platform staff roles: REST, CLI and the console only (issue #274)
     "POST /api/profile/s3/add", // a secret must not pass through an agent (decision 23)
     "POST /api/user/s3/",       // an admin's view of a user's S3 credentials: REST, CLI and UI
     "POST /api/scim/",          // IdP wire protocol

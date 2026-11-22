@@ -60,44 +60,14 @@ class SuperuserPatCompletenessSpec
     Try(TestPostgres.dropDatabase(dbName))
     ()
 
-  /** Public, zero-arg vals of `module` whose runtime return type is a tapir Endpoint. */
-  private def endpointsOf(module: AnyRef): List[(String, AnyEndpoint)] =
-    module.getClass.getMethods.toList
-      .filter(_.getParameterCount == 0)
-      .filter(m => classOf[sttp.tapir.Endpoint[?, ?, ?, ?, ?]].isAssignableFrom(m.getReturnType))
-      .map(m => m.getName -> m.invoke(module).asInstanceOf[AnyEndpoint])
-
-  private val allEndpoints: List[(String, AnyEndpoint)] =
-    EndpointModules.all.flatMap(endpointsOf)
-
-  private val CaptureRe = "\\{([^}]+)\\}".r
-
-  /** The endpoint's path with every capture filled: the tenant with the fixture tenant (the
-    * perimeter check then runs against a real tenant), any other capture with a filler segment.
-    */
-  private def concretePath(ep: AnyEndpoint): String =
-    CaptureRe.replaceAllIn(
-      ep.showPathTemplate().takeWhile(_ != '?'),
-      m => if m.group(1) == "tenant" then SecurityFixtures.TenantId else "x"
-    )
-
-  private def methodOf(ep: AnyEndpoint): String = ep.method.map(_.method).getOrElse("GET")
+  import SuperuserPatCompletenessSpec.{allEndpoints, concretePath, guardRefused, methodOf}
 
   private def call(
       h: ManagerServerHarness.Harness,
       ep: AnyEndpoint,
       credential: Option[String]
   ): HttpResponse[String] =
-    val b = HttpRequest
-      .newBuilder(URI.create(h.baseUrl + concretePath(ep)))
-      .timeout(RequestTimeout)
-      .method(methodOf(ep), HttpRequest.BodyPublishers.noBody())
-    credential.foreach(c => b.header("X-API-Key", c))
-    h.httpClient.send(b.build(), HttpResponse.BodyHandlers.ofString())
-
-  /** The guard's refusal: 401 with no body. */
-  private def guardRefused(r: HttpResponse[String]): Boolean =
-    r.statusCode() == 401 && r.body().isEmpty
+    SuperuserPatCompletenessSpec.call(h, ep, credential, RequestTimeout)
 
   "a superuser personal access token" should
     "pass the guard on every non-public endpoint, as the static key did" in {
@@ -108,8 +78,14 @@ class SuperuserPatCompletenessSpec
         patStore = Some(pats),
         patUserOf =
           Some((tenant, username) => users.userIdOf(tenant, username).flatMap(users.userById)),
-        patAuth =
-          Some(new PatAuthenticator(pats, users.userById, u => List(UserGrant(u.tenant, u.kind)), tenantDisabled = _ => false))
+        patAuth = Some(
+          new PatAuthenticator(
+            pats,
+            users.userById,
+            u => List(UserGrant(u.tenant, u.kind)),
+            tenantDisabled = _ => false
+          )
+        )
       )
       try
         val pat     = h.superuserPat()
@@ -145,8 +121,14 @@ class SuperuserPatCompletenessSpec
       patStore = Some(pats),
       patUserOf =
         Some((tenant, username) => users.userIdOf(tenant, username).flatMap(users.userById)),
-      patAuth =
-        Some(new PatAuthenticator(pats, users.userById, u => List(UserGrant(u.tenant, u.kind)), tenantDisabled = _ => false))
+      patAuth = Some(
+        new PatAuthenticator(
+          pats,
+          users.userById,
+          u => List(UserGrant(u.tenant, u.kind)),
+          tenantDisabled = _ => false
+        )
+      )
     )
     try
       val r = get(h.httpClient, s"${h.baseUrl}/api/auth/whoami", apiKey = Some(h.superuserPat()))
@@ -168,8 +150,14 @@ class SuperuserPatCompletenessSpec
       patStore = Some(pats),
       patUserOf =
         Some((tenant, username) => users.userIdOf(tenant, username).flatMap(users.userById)),
-      patAuth =
-        Some(new PatAuthenticator(pats, users.userById, u => List(UserGrant(u.tenant, u.kind)), tenantDisabled = _ => false))
+      patAuth = Some(
+        new PatAuthenticator(
+          pats,
+          users.userById,
+          u => List(UserGrant(u.tenant, u.kind)),
+          tenantDisabled = _ => false
+        )
+      )
     )
     try
       val r = get(
@@ -187,3 +175,49 @@ class SuperuserPatCompletenessSpec
       }
     finally h.shutdown()
   }
+
+/** The endpoint walk, shared with `StaffGuardSpec` so that a new core endpoint is walked by both.
+  */
+private[security] object SuperuserPatCompletenessSpec:
+
+  /** Public, zero-arg vals of `module` whose runtime return type is a tapir Endpoint. */
+  def endpointsOf(module: AnyRef): List[(String, AnyEndpoint)] =
+    module.getClass.getMethods.toList
+      .filter(_.getParameterCount == 0)
+      .filter(m => classOf[sttp.tapir.Endpoint[?, ?, ?, ?, ?]].isAssignableFrom(m.getReturnType))
+      .map(m => m.getName -> m.invoke(module).asInstanceOf[AnyEndpoint])
+
+  /** Every endpoint of [[EndpointModules.all]], by its val's name. */
+  val allEndpoints: List[(String, AnyEndpoint)] =
+    EndpointModules.all.flatMap(endpointsOf)
+
+  private val CaptureRe = "\\{([^}]+)\\}".r
+
+  /** The endpoint's path with every capture filled: the tenant with the fixture tenant (the
+    * perimeter check then runs against a real tenant), any other capture with a filler segment.
+    */
+  def concretePath(ep: AnyEndpoint): String =
+    CaptureRe.replaceAllIn(
+      ep.showPathTemplate().takeWhile(_ != '?'),
+      m => if m.group(1) == "tenant" then SecurityFixtures.TenantId else "x"
+    )
+
+  def methodOf(ep: AnyEndpoint): String = ep.method.map(_.method).getOrElse("GET")
+
+  /** `ep` called with no body, with `credential` as `X-API-Key` when given. */
+  def call(
+      h: ManagerServerHarness.Harness,
+      ep: AnyEndpoint,
+      credential: Option[String],
+      timeout: java.time.Duration
+  ): HttpResponse[String] =
+    val b = HttpRequest
+      .newBuilder(URI.create(h.baseUrl + concretePath(ep)))
+      .timeout(timeout)
+      .method(methodOf(ep), HttpRequest.BodyPublishers.noBody())
+    credential.foreach(c => b.header("X-API-Key", c))
+    h.httpClient.send(b.build(), HttpResponse.BodyHandlers.ofString())
+
+  /** The guard's refusal: 401 with no body. */
+  def guardRefused(r: HttpResponse[String]): Boolean =
+    r.statusCode() == 401 && r.body().isEmpty

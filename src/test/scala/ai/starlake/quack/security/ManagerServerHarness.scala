@@ -187,8 +187,42 @@ object ManagerServerHarness:
       stmtHistory: ai.starlake.quack.edge.StatementHistoryStore,
       activeRegistry: ActiveStatementRegistry,
       telemetryStore: TelemetryStore,
-      shutdown: () => Unit
+      shutdown: () => Unit,
+      // The control plane and the supervisor behind this server, for specs that change a row and
+      // then reload the supervisor's caches (`supervisor.restore()`).
+      store: InMemoryControlPlaneStore,
+      supervisor: PoolSupervisor,
+      // The server's own credential resolver as a platform caller (CredentialScopes, as Main hands
+      // it to modules in ManagerContext.platformCallerOf), for a module the spec does not start.
+      platformCallerOf: Option[String] => Option[ai.starlake.quack.spi.PlatformCaller]
   ):
+
+    /** A session of a new tenant-less `staff` row `username` holding one platform role with
+      * `permissions` (issue #274). The row and the role are written to the store, the supervisor's
+      * caches reloaded, and the session minted as the system login mints one, with role `staff` and
+      * no scope of its own: the guard fills it from the live row.
+      */
+    def staffSession(username: String, permissions: Set[String]): String =
+      val id = store.upsertUserWithHash(
+        None,
+        username,
+        "not-a-password-hash",
+        ai.starlake.quack.ondemand.state.UserKind.Staff
+      )
+      val role = store.insertPlatformRole("r-" + username, None, permissions)
+      store.setUserPlatformRoles(id, Set(role.id))
+      supervisor.restore()
+      tokens.mintWithScope(
+        ai.starlake.quack.edge.auth.AuthenticatedProfile(
+          username,
+          ai.starlake.quack.ondemand.state.UserKind.Staff,
+          Set.empty,
+          Map.empty,
+          "db",
+          None
+        ),
+        ai.starlake.quack.ondemand.auth.SessionScope.NoAccess
+      )
 
     /** Mint a UI session token via real POST /api/auth/login. Returns the `token` field from
       * LoginResponse. Throws on non-200.
@@ -304,6 +338,10 @@ object ManagerServerHarness:
       moduleEndpoints: List[sttp.tapir.server.ServerEndpoint[Any, IO]] = Nil,
       modulePublicPrefixes: Set[String] = Set.empty,
       moduleStaticMounts: List[ai.starlake.quack.spi.StaticMount] = Nil,
+      // Path prefixes modules declare for staff callers (issue #274).
+      moduleStaffPrefixes: Set[String] = Set.empty,
+      // The modules' console pages, as GET /api/console/pages lists them (issue #274).
+      consolePages: List[ai.starlake.quack.ondemand.module.ResolvedConsolePage] = Nil,
       // SPI module event sink (Task 9): defaulted to noop so every pre-existing caller
       // compiles unchanged; specs that want to observe emissions pass a recording sink.
       events: ai.starlake.quack.spi.ManagerEventSink = ai.starlake.quack.spi.ManagerEventSink.noop,
@@ -384,9 +422,20 @@ object ManagerServerHarness:
         new MetricsEndpoint(prometheus = None, beforeScrape = () => ()),
       // The REST data edge's routes (`RestEdgeRoutes.routes`), mounted as Main mounts them. None,
       // the default, leaves `/data/` to the manager's own routes, like a boot with the edge off.
-      dataEdgeRoutes: Option[org.http4s.HttpRoutes[IO]] = None
+      dataEdgeRoutes: Option[org.http4s.HttpRoutes[IO]] = None,
+      // Turns the Starlake SSO integration on (SL_ENABLED with a URL), which mounts
+      // /api/auth/sso/ticket and /api/auth/sso/redeem.
+      slIntegration: Boolean = false
   ): Harness =
-    val mgrCfg  = minimalManagerConfig(port = 0).copy(restLimits = restLimits)
+    val baseCfg = minimalManagerConfig(port = 0).copy(restLimits = restLimits)
+    val mgrCfg  =
+      if !slIntegration then baseCfg
+      else
+        baseCfg.copy(auth =
+          baseCfg.auth.copy(management =
+            baseCfg.auth.management.copy(slEnabled = true, slUrl = "https://starlake.invalid")
+          )
+        )
     val edgeCfg = minimalFlightConfig
     val tracker = new NodeLoadTracker
     val backend = stubBackend
@@ -401,6 +450,22 @@ object ManagerServerHarness:
     // Restore the in-memory store into the supervisor's caches.
     sup.restore()
 
+    // Mirror Main: the PAT authenticator reads staff rows through the supervisor, and one
+    // credential resolver (session JWT checked live, then PAT) backs every scope and session
+    // lookup below, the ManagerServer's own included.
+    val livePatAuth = patAuth.map(_.withStaffPrincipal(sup.staffPrincipal))
+    val credentials =
+      new ai.starlake.quack.ondemand.auth.CredentialScopes(
+        sessions,
+        livePatAuth,
+        sup.staffPrincipal
+      )
+    // A session JWT only, checked live (Main's jwtSessionOf): RestCaller resolves a PAT itself.
+    val jwtSessionOf: String => Option[ai.starlake.quack.ondemand.api.SessionTokenStore.Session] =
+      t =>
+        if t.startsWith(ai.starlake.quack.ondemand.state.PatStore.TokenPrefix) then None
+        else credentials.sessionOf(t)
+
     // The executor every statement surface below shares (see `executorOf`).
     val statementExecutor: CatalogPreviewHandlers.PreviewExecutor =
       executorOf.fold(previewExecutor)(build => build(sup))
@@ -410,7 +475,7 @@ object ManagerServerHarness:
     // wiring; needed by UserHandlers for the self-lock guard.
     val bearerSessionOf
         : String => Option[ai.starlake.quack.ondemand.api.SessionTokenStore.Session] =
-      t => sessions.get(t).orElse(patAuth.flatMap(_.sessionOf(t)))
+      credentials.sessionOf
     val userHandlers         = new UserHandlers(sup, userStore, sessionOf = bearerSessionOf)
     val roleHandlers         = new RoleHandlers(sup, userHandlers)
     val groupHandlers        = new GroupHandlers(sup, userHandlers)
@@ -442,7 +507,9 @@ object ManagerServerHarness:
       oidc = oidcOf.map(build => build(sup)),
       audit = audit,
       events = events,
-      patSessionOf = t => patAuth.flatMap(_.sessionOf(t))
+      patSessionOf = t => livePatAuth.flatMap(_.sessionOf(t)),
+      // Mirror Main: whoami checks a staff session against its live row.
+      enrichSession = credentials.enrich
     )
 
     // Public password-recovery handler over the harness's DuckDB UserStore. The
@@ -575,8 +642,8 @@ object ManagerServerHarness:
 
     // Main's executor-identity resolver: session, PAT (when wired), else 401.
     val restCaller = RestCaller(
-      sessionOf = sessions.get,
-      patOf = t => patAuth.flatMap(_.resolve(t))
+      sessionOf = jwtSessionOf,
+      patOf = t => livePatAuth.flatMap(_.resolve(t))
     )
     // Mirror Main: built after the executor-identity resolver, which the pool listing shares.
     val profileHandlers = new ai.starlake.quack.ondemand.api.ProfileHandlers(
@@ -662,9 +729,7 @@ object ManagerServerHarness:
       if !mcpEnabled then None
       else
         val mcpScopeOf: ai.starlake.quack.ondemand.auth.SessionScope.Resolver =
-          ai.starlake.quack.ondemand.auth.SessionScope.resolver(t =>
-            sessions.scopeOf(t).orElse(patAuth.flatMap(_.scopeOf(t)))
-          )
+          credentials.scopeOf
         val mcpCatalog = catalogHandlers.getOrElse(
           new CatalogHandlers((_, _) => noSnapshotReader, sup, store)
         )
@@ -728,9 +793,9 @@ object ManagerServerHarness:
           )
           new ai.starlake.quack.mcp.McpRoutes(
             ai.starlake.quack.McpConfig(),
-            patAuth.fold[String => Option[ai.starlake.quack.ondemand.auth.PatPrincipal]](_ => None)(
-              pa => pa.resolve
-            ),
+            livePatAuth.fold[String => Option[ai.starlake.quack.ondemand.auth.PatPrincipal]](_ =>
+              None
+            )(pa => pa.resolve),
             dataTools.tools ++ adminTools.tools ++ identityTools.tools ++
               accessTools.tools ++ platformTools.tools ++
               new ai.starlake.quack.mcp.McpProfileTools(s3CredentialHandlers).tools,
@@ -780,10 +845,13 @@ object ManagerServerHarness:
       moduleEndpoints = moduleEndpoints,
       modulePublicPrefixes = modulePublicPrefixes,
       moduleStaticMounts = moduleStaticMounts,
+      moduleStaffPrefixes = moduleStaffPrefixes,
+      platform = Some(new PlatformHandlers(sup, userHandlers, audit)),
+      consolePages = consolePages,
       passwordReset = Some(passwordResetHandlers),
       pat = patHandlers,
       branches = branchesOf.map(build => build(sup, previewHandlers, restCaller)),
-      patAuth = patAuth,
+      patAuth = livePatAuth,
       scim = Some(new ai.starlake.quack.ondemand.api.ScimHandlers(sup, userStore, audit)),
       // Mirrors Main: the fleet routes are always mounted; outside fleet mode the handler has no
       // backend and answers 400 fleet_disabled.
@@ -802,6 +870,7 @@ object ManagerServerHarness:
       dataEdgeRoutes = dataEdgeRoutes,
       tenantLocations = Some(tenantLocationHandlers),
       s3Credentials = Some(s3CredentialHandlers),
+      staffPrincipal = sup.staffPrincipal,
       icebergCatalog = icebergSourcesOf.map { sourcesOf =>
         new IcebergCatalogHandlers(
           sup,
@@ -864,6 +933,9 @@ object ManagerServerHarness:
       stmtHistory = statementStore,
       activeRegistry = activeRegistry,
       telemetryStore = telemetryStore,
+      store = store,
+      supervisor = sup,
+      platformCallerOf = credentials.platformCallerOf,
       shutdown = () => {
         closeHttpClient()
         // Release the server. Ember's default shutdown drain is 30 s which

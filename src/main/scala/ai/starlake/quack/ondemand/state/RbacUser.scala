@@ -7,9 +7,9 @@ import java.time.Instant
   * principals carry a non-empty tenant; uniqueness is enforced by the partial unique index on
   * `(tenant, username) WHERE tenant IS NOT NULL`.
   *
-  * `kind` is the account kind (`admin` | `user`): `admin` grants management rights (UI, REST admin
-  * endpoints, SQL admin statements). It does NOT participate in RBAC role resolution, which lives
-  * in `qodstate_role`.
+  * `kind` is the account kind (`admin` | `user` | `staff`): `admin` grants management rights (UI,
+  * REST admin endpoints, SQL admin statements). It does NOT participate in RBAC role resolution,
+  * which lives in `qodstate_role`.
   */
 final case class RbacUser(
     id: String,
@@ -28,9 +28,14 @@ final case class RbacUser(
 
 /** The account kinds a row may hold, and the one spelling each is stored under. */
 object UserKind:
-  val Admin: String    = "admin"
-  val User: String     = "user"
-  val All: Set[String] = Set(Admin, User)
+  val Admin: String = "admin"
+  val User: String  = "user"
+
+  /** A tenant-less platform staff account (issue #274): no tenant, no data plane, only the
+    * permissions of its platform roles.
+    */
+  val Staff: String    = "staff"
+  val All: Set[String] = Set(Admin, User, Staff)
 
   /** `raw` trimmed and lowercased when it names a kind; else why not. Every writer stores the
     * normalized value: a guard that compares a trimmed value while the row keeps the raw one (`"
