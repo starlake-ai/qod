@@ -73,7 +73,7 @@ class MintedHandlesSpec extends AnyFlatSpec with Matchers:
         .nonce
     ) shouldBe None
     // A superuser needs no context: none is registered, though the handle digests it.
-    val root = Ctx.effective.copy(user = Ctx.effective.user.copy(tenant = None))
+    val root = Ctx.effective.copy(user = Ctx.effective.user.copy(tenant = None, kind = "admin"))
     val su   = keys.handle(node, NodePrincipal.of(Some(root), Pool, DecidePurpose.Live))
     val suh = NodeHandles.verify(su, keys.key(node.nodeId), node.nodeId, System.currentTimeMillis())
     suh.toOption.get.principal.superuser shouldBe true

@@ -318,6 +318,8 @@ object Main extends IOApp with LazyLogging:
     NettyMemory.warning().foreach(w => System.err.println(w))
     // Tenant folders with nodes that cannot read them.
     BootPreflight.checkNodeFiles(mgrCfg0.nodeFiles, mgrCfg0.tenantFiles).left.foreach(sys.error)
+    // The seeded accounts are tenant-less: only kind admin makes them superusers.
+    BootPreflight.checkAdminKind(mgrCfg0.admin.kind).left.foreach(sys.error)
     // Then an empty FlightSQL auth chain: the edge and the Quack front door would refuse every
     // client.
     BootPreflight.checkEdgeAuthAvailable(authCfg).left.foreach(msg => sys.error(msg))
@@ -2288,7 +2290,8 @@ object Main extends IOApp with LazyLogging:
         usage = usageHandlers,
         profile = profileHandlers,
         moduleEndpoints = modules.flatMap(_.endpoints),
-        modulePublicPrefixes = modules.flatMap(_.publicPathPrefixes).toSet,
+        // As validated: ModuleSurfaces.validate read each module's getter once.
+        modulePublicPrefixes = surfaces.publicPrefixes,
         moduleStaticMounts = modules.flatMap(_.staticMounts),
         moduleStaffPrefixes = surfaces.staffPrefixes,
         platform = Some(platformHandlers),

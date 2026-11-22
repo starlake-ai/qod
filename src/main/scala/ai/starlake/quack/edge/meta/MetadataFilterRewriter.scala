@@ -106,12 +106,12 @@ final class MetadataFilterRewriter(
     * principal holding `*.*.* ALL` or an explicit information_schema grant, it passes them through.
     */
   def narrows(eff: EffectiveSet, ctx: SchemaContext): Boolean =
-    enabled && eff.user.tenant.nonEmpty && !hasWildcardAll(eff) &&
+    enabled && !eff.user.isSuperuser && !hasWildcardAll(eff) &&
       !readGrants(eff, ctx).exists(g => IdentifierFold.same(g.schemaName, InformationSchema))
 
   def rewrite(sql: String, eff: EffectiveSet, ctx: SchemaContext): MetadataFilterOutcome =
     if !enabled then Passthrough
-    else if eff.user.tenant.isEmpty then Passthrough // superuser: unfiltered, as today
+    else if eff.user.isSuperuser then Passthrough // superuser: unfiltered, as today
     else if hasWildcardAll(eff) then Passthrough
     // A too-deep statement overflows the parse and substitution walks: denied (TooDeep).
     else TooDeep.orElse(Denied(TooDeep.Reason))(filtered(sql, eff, ctx))

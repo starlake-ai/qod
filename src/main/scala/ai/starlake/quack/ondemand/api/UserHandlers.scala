@@ -239,9 +239,8 @@ final class UserHandlers(
     if callerRowIds(apiKey).contains(targetId) then Some((StatusCode.BadRequest, selfError))
     else
       sup.findUserById(targetId) match
-        case Some(t) if t.tenant.isEmpty && t.kind.equalsIgnoreCase("admin") && t.enabled =>
-          val enabledSuperusers =
-            sup.listSuperusers().count(x => x.kind.equalsIgnoreCase("admin") && x.enabled)
+        case Some(t) if t.isSuperuser && t.enabled =>
+          val enabledSuperusers = sup.listSuperusers().count(x => x.isSuperuser && x.enabled)
           if enabledSuperusers <= 1 then
             Some((StatusCode.BadRequest, ErrorResponse("last_superuser", floorMessage)))
           else None

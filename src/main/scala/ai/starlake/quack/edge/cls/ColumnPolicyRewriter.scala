@@ -106,7 +106,7 @@ final class ColumnPolicyRewriter(
       ctx: SchemaContext
   ): IO[Outcome] =
     if !enabled then IO.pure(Passthrough)
-    else if eff.user.tenant.isEmpty then IO.pure(Passthrough)
+    else if eff.user.isSuperuser then IO.pure(Passthrough)
     else if kind != StatementKind.Select then IO.pure(Passthrough)
     else if eff.columnPolicies.isEmpty then IO.pure(Passthrough)
     else

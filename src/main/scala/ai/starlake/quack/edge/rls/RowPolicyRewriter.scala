@@ -165,7 +165,7 @@ class RowPolicyRewriter(enabled: Boolean = true) extends LazyLogging:
       ctx: SchemaContext
   ): Outcome =
     if !enabled then Passthrough
-    else if eff.user.tenant.isEmpty then Passthrough // superuser: no row filtering
+    else if eff.user.isSuperuser then Passthrough // superuser: no row filtering
     else if kind != StatementKind.Select then Passthrough
     else if eff.rowPolicies.isEmpty then Passthrough
     else

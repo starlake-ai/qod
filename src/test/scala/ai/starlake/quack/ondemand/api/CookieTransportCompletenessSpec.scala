@@ -26,8 +26,12 @@ class CookieTransportCompletenessSpec extends AnyFlatSpec with Matchers:
       .filter(m => classOf[sttp.tapir.Endpoint[?, ?, ?, ?, ?]].isAssignableFrom(m.getReturnType))
       .map(m => m.getName -> m.invoke(module).asInstanceOf[AnyEndpoint])
 
+  /** Plus the security audit, added by hand as `ModuleSurfaces.coreApiSegments` adds it: it is
+    * internal (only the console and the qod CLI call it), so it stays out of `EndpointModules.all`
+    * and the OpenAPI document, yet it takes its token like any other endpoint.
+    */
   private val allEndpoints: List[(String, AnyEndpoint)] =
-    EndpointModules.all.flatMap(endpointsOf)
+    EndpointModules.all.flatMap(endpointsOf) :+ ("securityAudit" -> SecurityAuditEndpoints.audit)
 
   private def basicInputs(ep: AnyEndpoint) =
     ep.securityInput.asVectorOfBasicInputs() ++ ep.input.asVectorOfBasicInputs()

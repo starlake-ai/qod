@@ -488,6 +488,55 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
     finally h.shutdown()
   }
 
+  it should "match the profile allowlist on whole segments, never across an encoded slash" in {
+    // A `%2F` decodes to `/` in the joined path, so `auth%2Fwhoami` once read as the allowlisted
+    // `/api/auth/whoami`, while the router sees one segment `auth/whoami`, which a module route
+    // shaped `/api/{x}` serves. The SSO ticket path (config-gated) and the console page list too.
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(
+      fix.store,
+      moduleEndpoints = ManagerRestSecuritySpec.captureRoutes,
+      slIntegration = true
+    )
+    try
+      val bob = bobOf(h)
+      List(
+        "GET"  -> "/api/auth%2Fwhoami",
+        "GET"  -> "/api/auth%2fwhoami",
+        "POST" -> "/api/auth%2Flogout",
+        "GET"  -> "/api/profile%2Fusage",
+        "POST" -> "/api/auth%2Fpat%2Flist",
+        "POST" -> "/api/auth%2Fsso%2Fticket",
+        "GET"  -> "/api/console%2Fpages"
+      ).foreach { (method, path) =>
+        val r = send(h, method, path, Some(bob))
+        withClue(s"$method $path (tenant user) body: ${r.body()}") {
+          r.statusCode() shouldBe 403
+          errorCode(r.body()) should contain("admin_required")
+        }
+      }
+      // The route answers an admin, so the 403s above are the guard's.
+      val admitted = send(h, "GET", "/api/auth%2Fwhoami", Some(h.superuserSession()))
+      withClue(s"GET /api/auth%2Fwhoami (superuser) body: ${admitted.body()}") {
+        admitted.statusCode() shouldBe 200
+      }
+      admitted.body() shouldBe "module:auth/whoami"
+      // Controls: the plain allowlisted paths still reach their handlers.
+      val whoami = get(h.httpClient, s"${h.baseUrl}/api/auth/whoami", apiKey = Some(bob))
+      withClue(s"GET /api/auth/whoami body: ${whoami.body()}") {
+        whoami.statusCode() shouldBe 200
+      }
+      List("POST" -> "/api/auth/sso/ticket", "GET" -> "/api/console/pages").foreach {
+        (method, path) =>
+          val r = send(h, method, path, Some(bob))
+          withClue(s"$method $path (tenant user) body: ${r.body()}") {
+            r.statusCode() should not be 401
+            errorCode(r.body()) should not contain "admin_required"
+          }
+      }
+    finally h.shutdown()
+  }
+
   it should "match the profile allowlist exactly, never by prefix" in {
     val fix = SecurityFixtures.freshStore()
     val h   = ManagerServerHarness.boot(fix.store)
@@ -895,6 +944,42 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
     finally h.shutdown()
   }
 
+  it should "match the exact public paths on whole segments, never across an encoded slash" in {
+    val fix = SecurityFixtures.freshStore()
+    val h   = ManagerServerHarness.boot(fix.store)
+    try
+      // A `%2F` decodes to `/` in the joined path, so `auth%2Flogin` once read as the public
+      // `/api/auth/login`, while the router sees one segment `auth/login`, which a module route
+      // shaped `/api/{x}` would serve with no credential. The guard's 401 is bare and bodyless.
+      List(
+        "POST" -> "/api/auth%2Flogin",
+        "POST" -> "/api/auth%2flogin",
+        "POST" -> "/%61pi/auth%2Flogin",
+        "POST" -> "/api/auth%2Fchange-password",
+        "GET"  -> "/api/config%2Fclient",
+        "GET"  -> "/api/auth/oidc%2Fstart",
+        "GET"  -> "/api/auth/login/",
+        "GET"  -> "/api/config/client/"
+      ).foreach { (method, path) =>
+        val resp = send(h, method, path, None)
+        withClue(s"$method $path (no credential) body: ${resp.body()}") {
+          resp.statusCode() shouldBe 401
+          resp.body() shouldBe ""
+        }
+      }
+      // Controls: every exact public path as written still reaches past the guard, so whatever
+      // answers it is not the guard's bare 401.
+      ai.starlake.quack.ondemand.ManagerServer.PublicApiPaths.toList.sorted.foreach { path =>
+        List("GET", "POST").foreach { method =>
+          val resp = send(h, method, path, None)
+          withClue(s"$method $path (no credential) body: ${resp.body()}") {
+            (resp.statusCode() == 401 && resp.body().isEmpty) shouldBe false
+          }
+        }
+      }
+    finally h.shutdown()
+  }
+
   it should "keep POST /api/fleet/heartbeat behind the guard outside fleet mode" in {
     val fix = SecurityFixtures.freshStore()
     // The harness boots runtimeType=local: the heartbeat is public at the guard only when
@@ -1076,7 +1161,8 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
 
   /** A harness whose PAT routes run on a throwaway Postgres database (`qodstate_pat` has an FK to
     * `qodstate_user`), dropped afterwards; cancelled when Postgres is unreachable. For the security
-    * audit, which is outside `EndpointModules.all` and so outside SuperuserPatCompletenessSpec.
+    * audit, which is outside `EndpointModules.all` (SuperuserPatCompletenessSpec's walk adds it by
+    * hand, for the guard only; these cases pin the handler's answers).
     */
   private def withAuditPatHarness(body: ManagerServerHarness.Harness => Unit): Unit =
     import ai.starlake.quack.ondemand.state.testkit.TestPostgres
@@ -1908,3 +1994,21 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
       post(h.httpClient, login, inString).statusCode() shouldBe 401
     finally h.shutdown()
   }
+
+object ManagerRestSecuritySpec:
+
+  /** A module route shaped `/api/{x}`, for GET and POST: what a `%2F` spelling of an allowlisted
+    * path routes to, as one segment.
+    */
+  val captureRoutes: List[sttp.tapir.server.ServerEndpoint[Any, IO]] =
+    import sttp.tapir.*
+    List(
+      endpoint.get
+        .in("api" / path[String]("x"))
+        .out(stringBody)
+        .serverLogicSuccess[IO](x => IO.pure(s"module:$x")),
+      endpoint.post
+        .in("api" / path[String]("x"))
+        .out(stringBody)
+        .serverLogicSuccess[IO](x => IO.pure(s"module:$x"))
+    )

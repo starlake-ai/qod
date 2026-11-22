@@ -31,8 +31,8 @@ object NodePrincipal:
   val Unbound: NodePrincipal =
     NodePrincipal("", "", None, superuser = false, system = false)
 
-  /** The principal of a statement run under `effectiveSet`: its user (a superuser when the user has
-    * no tenant), RoutedExecutor's system caller, or [[Unbound]].
+  /** The principal of a statement run under `effectiveSet`: its user (a superuser exactly when
+    * `RbacUser.isSuperuser` holds), RoutedExecutor's system caller, or [[Unbound]].
     */
   def of(effectiveSet: Option[EffectiveSet]): NodePrincipal = effectiveSet match
     case Some(e) if e.system => System
@@ -41,7 +41,7 @@ object NodePrincipal:
         e.user.id,
         e.user.username,
         e.user.tenant,
-        superuser = e.user.tenant.isEmpty,
+        superuser = e.user.isSuperuser,
         system = false
       )
     case None => Unbound

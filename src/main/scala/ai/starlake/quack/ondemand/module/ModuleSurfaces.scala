@@ -14,16 +14,19 @@ final case class ResolvedConsolePage(
   def path: String = s"/ui/x/$module/$id"
 
 /** The platform surfaces of the loaded modules (issue #274), validated once at boot after every
-  * module's start(). A Left aborts the boot, naming the module and the item.
+  * module's start(). A Left aborts the boot, naming the module and the item. `publicPrefixes` are
+  * every module's public path prefixes as validated, the values the server is given: a getter is
+  * read once, so a second read can never hand the guard a prefix nobody checked.
   */
 final case class ModuleSurfaces(
     permissions: List[DeclaredPermission],
     staffPrefixes: Set[String],
-    pages: List[ResolvedConsolePage]
+    pages: List[ResolvedConsolePage],
+    publicPrefixes: Set[String]
 )
 
 object ModuleSurfaces:
-  val Empty: ModuleSurfaces = ModuleSurfaces(Nil, Set.empty, Nil)
+  val Empty: ModuleSurfaces = ModuleSurfaces(Nil, Set.empty, Nil, Set.empty)
 
   /** First segments after `api` that core reserves for routes of its own to come (the platform API
     * and the console page list), on top of those its endpoints already hold.
@@ -100,22 +103,64 @@ object ModuleSurfaces:
         "[A-Za-z0-9._-], none empty, '.' or '..'"
     )
 
+  /** Why a module may not declare `prefix` public, if it may not. Every module, with or without a
+    * platform surface: segments over [A-Za-z0-9._-], none empty, `.` or `..` (a trailing `/`
+    * included), and then either `/api/<first>/<more>` with `<first>` neither a core API segment
+    * (the guard would admit core routes with no credential) nor another loaded module's name, or a
+    * path at or under one of the module's own static mounts other than the root one (outside `/api`
+    * the guard admits everything anyway). Not `/api/<module name>/` alone: a module's routes need
+    * not lie under its name (the fixture module `test-module` serves `/api/hosted-test/`).
+    */
+  private def publicPrefixRefusal(
+      prefix: String,
+      mounts: List[StaticMount],
+      coreApiSegments: Set[String],
+      otherModules: Set[String]
+  ): Option[String] =
+    def refusal(why: String) = Some(s"public path prefix '$prefix' $why")
+    plainSegments(prefix) match
+      case None =>
+        refusal(
+          "must be an absolute path of segments over [A-Za-z0-9._-], none empty, '.' or '..'"
+        )
+      case Some("api" :: first :: rest) =>
+        if rest.isEmpty then refusal(s"must lie under '/api/$first/', not at it")
+        else if coreApiSegments.contains(first) then
+          refusal(s"lies under the core API segment '/api/$first/'")
+        else if otherModules.contains(first) then
+          refusal(s"lies under '/api/$first/', the name of another loaded module")
+        else None
+      case Some("api" :: Nil) => refusal("would cover every /api route")
+      case Some(segs)         =>
+        val covered = mounts.exists { sm =>
+          val ms = sm.urlPrefix.split('/').toList.filter(_.nonEmpty)
+          ms.nonEmpty && segs.startsWith(ms)
+        }
+        if covered then None
+        else
+          refusal(
+            "must lie under '/api/<segment>/' or under one of the module's static mounts (a " +
+              "root mount (/) covers none)"
+          )
+
   /** What one module declares, read once. */
   private final case class Declared(
       module: ManagerModule,
       permissions: List[PlatformPermission],
       staffPrefixes: Set[String],
       pages: List[ConsolePage],
-      mounts: List[StaticMount]
+      mounts: List[StaticMount],
+      publicPrefixes: Set[String]
   ):
     def hasSurface: Boolean = permissions.nonEmpty || staffPrefixes.nonEmpty || pages.nonEmpty
 
-  /** `coreApiSegments`: the first segments after `api` that core serves or reserves. The REST guard
-    * leaves the URL tenant check of a staff caller on a staff prefix to the module, trusting that
-    * the prefix lies under `/api/<module name>/`; a module named after a core segment would make
-    * such a prefix cover core routes, so a module with any platform surface may not take one. Such
-    * a module's name must also match [a-z0-9-]+ and be unique among them; a module with no surface
-    * is not checked. Each module's surfaces are read once, and the result is built from those same
+  /** `coreApiSegments`: the first segments after `api` that core serves or reserves. Every module's
+    * public path prefixes are checked first (see [[publicPrefixRefusal]]). The REST guard leaves
+    * the URL tenant check of a staff caller on a staff prefix to the module, trusting that the
+    * prefix lies under `/api/<module name>/`; a module named after a core segment would make such a
+    * prefix cover core routes, so a module with any platform surface may not take one. Such a
+    * module's name must also match [a-z0-9-]+ and be unique among them; a module with no surface is
+    * not checked. Each module's surfaces are read once, and the result is built from those same
     * values.
     */
   def validate(
@@ -123,7 +168,14 @@ object ModuleSurfaces:
       coreApiSegments: Set[String]
   ): Either[String, ModuleSurfaces] =
     val declared = modules.map(m =>
-      Declared(m, m.permissions, m.staffPathPrefixes, m.consolePages, m.staticMounts)
+      Declared(
+        m,
+        m.permissions,
+        m.staffPathPrefixes,
+        m.consolePages,
+        m.staticMounts,
+        m.publicPathPrefixes
+      )
     )
     val errs     = List.newBuilder[String]
     val seen     = scala.collection.mutable.Set.empty[String]
@@ -131,6 +183,14 @@ object ModuleSurfaces:
     val perms    = List.newBuilder[DeclaredPermission]
     val prefixes = Set.newBuilder[String]
     val pages    = List.newBuilder[ResolvedConsolePage]
+    declared.zipWithIndex.foreach { (d, i) =>
+      val others = declared.zipWithIndex.collect { case (o, j) if j != i => o.module.name }.toSet
+      d.publicPrefixes.toList.sorted.foreach { pre =>
+        publicPrefixRefusal(pre, d.mounts, coreApiSegments, others).foreach(r =>
+          errs += s"module ${d.module.name}: $r"
+        )
+      }
+    }
     declared.filter(_.hasSurface).foreach { d =>
       val name                   = d.module.name
       def err(msg: String): Unit = errs += s"module $name: $msg"
@@ -167,4 +227,12 @@ object ModuleSurfaces:
     }
     val all = errs.result()
     if all.nonEmpty then Left(all.mkString("; "))
-    else Right(ModuleSurfaces(perms.result(), prefixes.result(), pages.result()))
+    else
+      Right(
+        ModuleSurfaces(
+          perms.result(),
+          prefixes.result(),
+          pages.result(),
+          declared.flatMap(_.publicPrefixes).toSet
+        )
+      )

@@ -131,6 +131,43 @@ class StaffGuardSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers:
     }
   }
 
+  it should "match its allowlist on whole segments, never across an encoded slash" in
+    withHarness(moduleEndpoints = ManagerRestSecuritySpec.captureRoutes) { h =>
+      // `auth%2Fwhoami` reads as `/api/auth/whoami` in the joined path, while the router sees one
+      // segment `auth/whoami`, which the module route `/api/{x}` serves.
+      val staff = h.staffSession(StaffName, StaffPerms)
+      List(
+        "/api/auth%2Fwhoami",
+        "/api/auth%2Fpat%2Flist",
+        "/api/console%2Fpages"
+      ).foreach { path =>
+        val r = get(h.httpClient, s"${h.baseUrl}$path", apiKey = Some(staff))
+        withClue(s"GET $path (staff): ${describe(r)}")(adminRequired(r) shouldBe true)
+      }
+      val logout = post(h.httpClient, s"${h.baseUrl}/api/auth%2Flogout", "{}", Some(staff))
+      withClue(s"POST /api/auth%2Flogout (staff): ${describe(logout)}") {
+        adminRequired(logout) shouldBe true
+      }
+      // The route answers a superuser, so the 403s above are the guard's.
+      val admitted =
+        get(h.httpClient, s"${h.baseUrl}/api/auth%2Fwhoami", apiKey = Some(h.superuserSession()))
+      withClue(s"GET /api/auth%2Fwhoami (superuser): ${describe(admitted)}") {
+        admitted.statusCode() shouldBe 200
+      }
+      admitted.body() shouldBe "module:auth/whoami"
+      // Controls: the plain paths still reach their handlers.
+      val whoami = get(h.httpClient, s"${h.baseUrl}/api/auth/whoami", apiKey = Some(staff))
+      withClue(s"GET /api/auth/whoami (staff): ${describe(whoami)}") {
+        whoami.statusCode() shouldBe 200
+      }
+      val pages =
+        get(h.httpClient, s"${h.baseUrl}${ManagerServer.ConsolePagesPath}", apiKey = Some(staff))
+      withClue(s"GET ${ManagerServer.ConsolePagesPath} (staff): ${describe(pages)}") {
+        adminRequired(pages) shouldBe false
+        pages.statusCode() should not be 401
+      }
+    }
+
   it should "be refused its S3 credentials, profile pools, usage, statements and undrop" in
     withHarness() { h =>
       val staff   = h.staffSession(StaffName, StaffPerms)

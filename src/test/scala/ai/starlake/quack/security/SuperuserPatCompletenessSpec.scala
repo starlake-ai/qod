@@ -96,7 +96,8 @@ class SuperuserPatCompletenessSpec
           "listPools",
           "listTenants",
           "whoami",
-          "serviceProviderConfig"
+          "serviceProviderConfig",
+          "securityAudit"
         )
         guarded.map(_._1) should not contain "login"
         val refused = guarded.flatMap { (name, ep) =>
@@ -187,9 +188,14 @@ private[security] object SuperuserPatCompletenessSpec:
       .filter(m => classOf[sttp.tapir.Endpoint[?, ?, ?, ?, ?]].isAssignableFrom(m.getReturnType))
       .map(m => m.getName -> m.invoke(module).asInstanceOf[AnyEndpoint])
 
-  /** Every endpoint of [[EndpointModules.all]], by its val's name. */
+  /** Every endpoint of [[EndpointModules.all]], by its val's name, plus the security audit, added
+    * by hand as `ModuleSurfaces.coreApiSegments` adds it: it is internal (only the console and the
+    * qod CLI call it), so it stays out of `EndpointModules.all`, the OpenAPI document and the CLI
+    * parity gate, yet the guard serves it like any other route and the walks must reach it.
+    */
   val allEndpoints: List[(String, AnyEndpoint)] =
-    EndpointModules.all.flatMap(endpointsOf)
+    EndpointModules.all.flatMap(endpointsOf) :+
+      ("securityAudit" -> ai.starlake.quack.ondemand.api.SecurityAuditEndpoints.audit)
 
   private val CaptureRe = "\\{([^}]+)\\}".r
 

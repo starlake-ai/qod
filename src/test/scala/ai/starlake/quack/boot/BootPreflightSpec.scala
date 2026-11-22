@@ -22,6 +22,20 @@ import scala.util.Try
   */
 class BootPreflightSpec extends AnyFlatSpec with Matchers:
 
+  "checkAdminKind" should "accept admin in any case with surrounding spaces" in {
+    BootPreflight.checkAdminKind("admin") shouldBe Right(())
+    BootPreflight.checkAdminKind(" Admin ") shouldBe Right(())
+  }
+
+  it should "refuse every other kind, naming the setting and the value" in {
+    for raw <- List("user", "staff", "root", "") do
+      BootPreflight.checkAdminKind(raw) match
+        case Left(msg) =>
+          msg should include("QOD_ADMIN_KIND")
+          msg should include(s"'$raw'")
+        case Right(()) => fail(s"expected Left for '$raw'")
+  }
+
   "checkLockoutSmtp" should "refuse lockout enabled with no SMTP host configured" in {
     val result = BootPreflight.checkLockoutSmtp(lockoutEnabled = true, smtpHost = None)
     result match
@@ -148,15 +162,15 @@ class BootPreflightSpec extends AnyFlatSpec with Matchers:
       store.close()
   }
 
-  it should "store the configured admin.kind as the seeded row's kind" in withFreshDb { url =>
+  it should "store the normalized admin.kind as the seeded row's kind" in withFreshDb { url =>
     val userStore = new UserStore(url, TestPostgres.pgUser, TestPostgres.pgPass)
     val store     = new PostgresControlPlaneStore(url, TestPostgres.pgUser, TestPostgres.pgPass)
     try
       BootPreflight.seedAdminUsers(
         userStore,
-        AdminConfig(username = "ops", password = "admin", kind = "user")
+        AdminConfig(username = "ops", password = "admin", kind = " Admin ")
       )
-      store.findUser(None, "ops").get.kind shouldBe "user"
+      store.findUser(None, "ops").get.kind shouldBe "admin"
     finally
       userStore.close()
       store.close()
@@ -184,6 +198,9 @@ class BootPreflightSpec extends AnyFlatSpec with Matchers:
             "UPDATE qodstate_user SET failed_attempts = 3 WHERE username = 'root'"
           )
         val before = row()
+        // A kind other than the first boot's, so that an unchanged row proves the kind was not
+        // rewritten. seedAdminUsers is called directly: the boot check refusing a kind other than
+        // admin (BootPreflight.checkAdminKind) is Main's, run before it.
         BootPreflight.seedAdminUsers(
           userStore,
           AdminConfig(username = "root", password = "second-pw", kind = "user"),

@@ -174,26 +174,64 @@ final class ManagerServer(
     try Option(java.net.URI.create(issuerUrl.trim).getHost).getOrElse("")
     catch case _: Exception => ""
 
+  /** The public prefixes modules declared, each beside its segments, split once: every segment
+    * after the leading `/` as written, empty ones included, less one trailing empty one.
+    */
+  private val modulePublicSegments: Set[(String, Vector[String])] =
+    modulePublicPrefixes.map { p =>
+      val split = p.split("/", -1).toVector.drop(1)
+      p -> (if split.lastOption.contains("") then split.init else split)
+    }
+
   /** A public path a module declared. It takes a body limit of its own,
     * `restLimits.maxModulePublicBodyBytes`: a provider's webhook does not fit the core public
     * routes' limit, and no core route lives there.
+    *
+    * On whole segments, as the router reads them (see [[underStaffPrefix]]): `%2F` inside a segment
+    * decodes to `/`, so `ping%2Fx` reads as `ping/x` in the joined path, under a prefix ending in
+    * `ping`, while the router sees one segment `ping/x` and serves a route capturing it with no
+    * credential. The joined path's test stays too, so that the segments only ever narrow it: on a
+    * path with no encoded `/` it implies theirs, and the answer is the one it always was.
     */
-  private def isModulePublic(path: String): Boolean =
-    modulePublicPrefixes.exists(p => path == p || path.startsWith(p + "/"))
+  private def isModulePublic(path: String, segments: Vector[String]): Boolean =
+    modulePublicSegments.exists((p, prefix) =>
+      (path == p || path.startsWith(p + "/")) && segments.startsWith(prefix)
+    )
+
+  /** Whether the request is exactly one of `paths`, split once at construction. On whole segments,
+    * as the router reads them (see [[isModulePublic]]): `auth%2Flogin` reads as `/api/auth/login`
+    * in the joined path while the router sees one segment `auth/login`, which a module route shaped
+    * `/api/{x}` or `/api/auth/{x}` would serve with no credential. The joined path's test stays
+    * too, so that a trailing `/` still matches none.
+    */
+  private def isExactly(
+      paths: Map[String, Vector[String]],
+      path: String,
+      segments: Vector[String]
+  ): Boolean =
+    paths.get(path).contains(segments)
+
+  private val publicApiSegments: Map[String, Vector[String]] =
+    ManagerServer.segmentsOf(ManagerServer.PublicApiPaths)
+  private val ssoRedeemSegments: Map[String, Vector[String]] =
+    ManagerServer.segmentsOf(Set("/api/auth/sso/redeem"))
+  private val fleetHeartbeatSegments: Map[String, Vector[String]] =
+    ManagerServer.segmentsOf(Set("/api/fleet/heartbeat"))
 
   /** Path is unauthenticated - the UI needs these before login. */
-  private def isPublicApi(path: String): Boolean =
-    ManagerServer.PublicApiPaths.contains(path) ||
+  private def isPublicApi(path: String, segments: Vector[String]): Boolean =
+    isExactly(publicApiSegments, path, segments) ||
       // Starlake SSO redeem: the ticket is the credential (public server-to-server call).
       // Gated on the integration flag, not just on the route being unmounted when off: with
       // SL_ENABLED=false an anonymous POST here must fall through to the same 401 (with its
       // audit row) that an unrecognized path got before this feature existed, not silently
       // become "public" ahead of the route ever being wired.
-      (cfg.auth.management.slIntegrationOn && path == "/api/auth/sso/redeem") ||
+      (cfg.auth.management.slIntegrationOn && isExactly(ssoRedeemSegments, path, segments)) ||
       // Fleet heartbeat (qod fleet join): the handler validates X-Fleet-Token itself. Gated on the
       // runtime so the path stays 401 at the guard everywhere else.
-      (FleetConfig.isFleet(cfg.runtimeType) && path == "/api/fleet/heartbeat") ||
-      isModulePublic(path)
+      (FleetConfig.isFleet(cfg.runtimeType) &&
+        isExactly(fleetHeartbeatSegments, path, segments)) ||
+      isModulePublic(path, segments)
 
   /** Paths a NON-ADMIN session may reach: the self-service profile surface. Everything else on
     * `/api` but [[isBranchApi]] answers `403 admin_required` for such sessions, so that no other
@@ -201,17 +239,28 @@ final class ManagerServer(
     *
     * Exact equality, never a prefix test: SPI modules mount their own path prefixes under `/api`
     * (and core keeps adding siblings under `/api/auth`), and a prefix match would silently hand
-    * every one of them to regular users.
+    * every one of them to regular users. On whole segments (see [[isExactly]]): `auth%2Fwhoami`
+    * reads as `/api/auth/whoami` in the joined path and routes as one segment, to a module route
+    * shaped `/api/{x}`.
     */
-  private def isProfileApi(path: String): Boolean =
-    ManagerServer.ProfileApiPaths.contains(path) ||
+  private def isProfileApi(path: String, segments: Vector[String]): Boolean =
+    isExactly(profileApiSegments, path, segments) ||
       // Starlake SSO ticket mint: any valid session may hand its own grant to
       // Starlake, admin or not -- the minted grant mirrors the session's own
       // admin-ness, it grants nothing new. Gated on the integration flag: with
       // SL_ENABLED=false a non-admin session must still get 403 admin_required here
       // exactly as before this feature existed, not a silent profile-allowlist grant
       // ahead of the route ever being wired.
-      (cfg.auth.management.slIntegrationOn && path == "/api/auth/sso/ticket")
+      (cfg.auth.management.slIntegrationOn && isExactly(ssoTicketSegments, path, segments))
+
+  private val profileApiSegments: Map[String, Vector[String]] =
+    ManagerServer.segmentsOf(ManagerServer.ProfileApiPaths)
+  private val ssoTicketSegments: Map[String, Vector[String]] =
+    ManagerServer.segmentsOf(Set("/api/auth/sso/ticket"))
+  private val staffProfileSegments: Map[String, Vector[String]] =
+    ManagerServer.segmentsOf(ManagerServer.StaffProfilePaths)
+  private val logoutSegments: Map[String, Vector[String]] =
+    ManagerServer.segmentsOf(Set("/api/auth/logout"))
 
   /** The staff prefixes modules declared, each split into segments once. An empty one (`""` or
     * `"/"`) is dropped: it would cover every path.
@@ -233,11 +282,11 @@ final class ManagerServer(
     * console page list and the paths modules declare for staff. Everything else is
     * `403 admin_required`, so a module route written for superusers stays closed to staff, and so
     * do the branch routes: staff hold no pool. An explicit list: a profile path added later stays
-    * closed to staff until someone adds it there.
+    * closed to staff until someone adds it there. On whole segments, like every allowlist here.
     */
   private def isStaffApi(method: Method, path: String, segments: Vector[String]): Boolean =
-    ManagerServer.StaffProfilePaths.contains(path) ||
-      ManagerServer.isConsolePages(method, path) || underStaffPrefix(segments)
+    isExactly(staffProfileSegments, path, segments) ||
+      ManagerServer.isConsolePages(method, path, segments) || underStaffPrefix(segments)
 
   /** The branch routes a NON-ADMIN session may reach, and the only paths whose tenant the guard
     * leaves to the handler: any principal who may connect may branch, in its own tenant, which
@@ -427,7 +476,7 @@ final class ManagerServer(
       val branchApi = isBranchApi(req.method, segments, req.uri.path.endsWithSlash)
       if ManagerServer.holdsDotSegment(segments) then OptionT.none[IO, Response[IO]]
       else if !path.startsWith("/api/") && path != "/api" then routes(req)
-      else if isPublicApi(path) then
+      else if isPublicApi(path, segments) then
         // No credential has been checked: see BoundedBody.asksChunked.
         if BoundedBody.asksChunked(req) then
           OptionT.pure[IO](
@@ -439,7 +488,7 @@ final class ManagerServer(
           )
         else
           val maxBytes =
-            if isModulePublic(path) then limits.maxModulePublicBodyBytes
+            if isModulePublic(path, segments) then limits.maxModulePublicBodyBytes
             else limits.maxPublicBodyBytes
           withBoundedBody(req, maxBytes)(routes)
       else
@@ -479,8 +528,8 @@ final class ManagerServer(
             sessionAdmin ||
               (staffSession && isStaffApi(req.method, path, segments)) ||
               (nonAdminSession &&
-                (isProfileApi(path) || branchApi ||
-                  ManagerServer.isConsolePages(req.method, path)))
+                (isProfileApi(path, segments) || branchApi ||
+                  ManagerServer.isConsolePages(req.method, path, segments)))
           // A session of a disabled tenant's user (every tenant it holds disabled) is refused
           // everything but signing out, until a superuser enables the tenant. A PAT of one already
           // resolves to nothing (PatAuthenticator).
@@ -494,7 +543,7 @@ final class ManagerServer(
           // the insert throw and the attacker would erase their own trail.
           // Shared by both denial arms below.
           val safePath = path.filter(c => c >= ' ' && c != 0x7f).take(200)
-          if disabledTenant.isDefined && path != "/api/auth/logout" then
+          if disabledTenant.isDefined && !isExactly(logoutSegments, path, segments) then
             val username = resolved.map(_.profile.username).getOrElse("unknown")
             auditDenial("disabled:" + username)(
               audit.restAs(
@@ -1280,11 +1329,16 @@ final class ManagerServer(
 
 object ManagerServer extends com.typesafe.scalalogging.LazyLogging:
 
+  /** Each of `paths` beside its segments: every one after the leading `/`, as written. */
+  private[ondemand] def segmentsOf(paths: Set[String]): Map[String, Vector[String]] =
+    paths.map(p => p -> p.split("/", -1).toVector.drop(1)).toMap
+
   /** The core `/api` paths the guard admits with no credential: the UI needs these before login.
-    * Exact paths, never prefixes. The config-gated public paths (Starlake SSO redeem, the fleet
-    * heartbeat) and a module's public prefixes are decided in `isPublicApi`.
+    * Exact paths, never prefixes, matched on whole segments. The config-gated public paths
+    * (Starlake SSO redeem, the fleet heartbeat) and a module's public prefixes are decided in
+    * `isPublicApi`.
     */
-  private[ondemand] val PublicApiPaths: Set[String] = Set(
+  private[quack] val PublicApiPaths: Set[String] = Set(
     "/api/auth/login",
     "/api/auth/change-password",
     "/api/auth/forgot-password",
@@ -1353,9 +1407,15 @@ object ManagerServer extends com.typesafe.scalalogging.LazyLogging:
   private[quack] def isStaffSession(s: SessionTokenStore.Session): Boolean =
     s.profile.tenant.isEmpty && s.profile.role.equalsIgnoreCase(UserKind.Staff)
 
-  /** A read of the console page list: `GET` only. */
-  private[ondemand] def isConsolePages(method: Method, path: String): Boolean =
-    method == Method.GET && path == ConsolePagesPath
+  private val ConsolePagesSegments: Map[String, Vector[String]] = segmentsOf(Set(ConsolePagesPath))
+
+  /** A read of the console page list: `GET` only, on whole segments (see `isExactly`). */
+  private[ondemand] def isConsolePages(
+      method: Method,
+      path: String,
+      segments: Vector[String]
+  ): Boolean =
+    method == Method.GET && ConsolePagesSegments.get(path).contains(segments)
 
   /** The branch routes a NON-ADMIN session may reach (see `isBranchApi`), as a method and a path
     * template split into segments. A `{name}` segment matches any non-empty segment; every other

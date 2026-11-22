@@ -48,6 +48,9 @@
   `SELECT tenant, username, kind FROM qodstate_user WHERE tenant IS NOT NULL AND lower(kind) = 'staff'`
   must return nothing. Change the kind of any such row first (`qod user update --kind user`, or an
   `UPDATE` of the row).
+- A `QOD_ADMIN_KIND` other than `admin` (any case, surrounding spaces allowed) now refuses boot,
+  naming the setting: the seeded accounts have no tenant, so only kind `admin` makes them
+  superusers.
 - A tenant-less account whose kind is not `admin` (one seeded with `QOD_ADMIN_KIND=user`, one
   created with `qod user create --superuser` on an earlier release, which sent kind `user`, or a
   superuser demoted earlier) loses data access with this release. Its refusal reads like an
@@ -89,6 +92,19 @@
   the reason at WARN. A superuser's session already open when its row is demoted, disabled or
   deleted is refused on its next statement on the replica that made the change, and on another
   replica once that one has seen the change, through its NOTIFY or its periodic snapshot refresh.
+- **A module's public path prefix, and the core's exact public paths, are matched on whole path
+  segments.** They were matched on the decoded path, where an encoded `/` (`%2F`) inside a segment
+  reads as a separator, so `/api/hosted-test/ping%2Fx/secret` passed as under the public prefix
+  `/api/hosted-test/ping`, and `/api/auth%2Flogin` as the public `/api/auth/login`, each reaching
+  a module route capturing that segment (such as `/api/hosted-test/{id}/secret` or `/api/{x}`)
+  with no credential. An encoded `/` can no longer carry an anonymous request onto a public path;
+  every other path is answered as before. The allowlists of signed-in non-admin and staff callers,
+  and the disabled-tenant logout exception, are now matched the same way: `GET /api/auth%2Fwhoami`
+  from such a session reached a module route shaped `/api/{x}`. Boot now also refuses a module
+  public prefix that is empty or not absolute; holds a segment that is empty (a trailing `/`
+  included), `.`, `..` or not made of `[A-Za-z0-9._-]`; is `/api` itself or one segment under it
+  (such as `/api/webhook`); lies under a core API segment or under another loaded module's name;
+  or, outside `/api`, lies under none of the module's own static mounts (a root mount covers none).
 
 ### Changed
 
