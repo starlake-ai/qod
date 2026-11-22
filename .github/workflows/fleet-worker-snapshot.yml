@@ -6,7 +6,7 @@ name: fleet-worker-snapshot
 #
 # The worker image is the fleet server for the fleet backend when servers
 # are containers (`qod fleet join` + a DuckDB CLI, one quack node per
-# container). It's built from docker/fleet-worker/Dockerfile and versioned
+# container). It's built from deploy/docker/fleet-worker/Dockerfile and versioned
 # in lockstep with the manager image (same version.sbt) so operators get
 # matched tags.
 #
@@ -31,7 +31,7 @@ on:
   push:
     branches: [main]
     paths:
-      - 'docker/fleet-worker/**'
+      - 'deploy/docker/fleet-worker/**'
       - 'cli/**'
       - 'version.sbt'
       - 'project/Versions.scala'
@@ -133,7 +133,7 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: ./docker/fleet-worker/Dockerfile
+          file: ./deploy/docker/fleet-worker/Dockerfile
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=image,name=${{ env.REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true,push=true

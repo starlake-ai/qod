@@ -17,7 +17,7 @@
 # The DuckDB CLI only serves the build: it pre-installs the node's extensions. The image ships
 # libduckdb and qod-node, no CLI.
 #
-# Build: docker build -t starlakeai/quack-on-demand-node:local -f docker/quack-node/Dockerfile .
+# Build: docker build -t starlakeai/quack-on-demand-node:local -f deploy/docker/quack-node/Dockerfile .
 
 FROM debian:bookworm-slim AS duckdb
 
@@ -103,7 +103,7 @@ ENV QOD_NODE_BIN=/opt/qod-node/bin/qod-node
 
 # The local spawn script is the single source of truth across local + K8s.
 COPY scripts/spawn-quack-node.sh           /app/scripts/spawn-quack-node.sh
-COPY docker/quack-node/entrypoint.sh       /usr/local/bin/quack-entrypoint
+COPY deploy/docker/quack-node/entrypoint.sh       /usr/local/bin/quack-entrypoint
 RUN chmod +x /app/scripts/spawn-quack-node.sh /usr/local/bin/quack-entrypoint
 
 # Non-root with a writable HOME for DuckDB's extension cache. Re-use the

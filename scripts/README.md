@@ -27,7 +27,7 @@ Everything else lives in a subfolder by audience.
 | Scripts | Purpose |
 |---|---|
 | `run-docker.sh` / `stop-docker.sh` | Run the single container image against an **external** Postgres (`docker run --rm`), then stop it. Same `QOD_VERSION` contract as `run-jar.sh`. |
-| `run-docker-compose.sh` / `stop-docker-compose.sh` | Bring up the full bundled stack from `docker-compose.yml` (Postgres, object store, optional observability and Starflow profiles, demo seeding through the in-image loaders), then drain it down (`NUKE=1` also wipes host state). |
+| `run-docker-compose.sh` / `stop-docker-compose.sh` | Bring up the full bundled stack from `deploy/docker/docker-compose.yml` (Postgres, object store, optional observability and Starflow profiles, demo seeding through the in-image loaders), then drain it down (`NUKE=1` also wipes host state). |
 | `_docker-common.sh` | Shared proxy and loopback helpers sourced by both launchers. |
 
 ## `release/`: maintainer release tooling

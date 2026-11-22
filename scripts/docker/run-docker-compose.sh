@@ -146,7 +146,7 @@ if [[ "$NUKE" == "1" ]]; then
   # otherwise containers in skipped profiles linger. Always include the
   # known opt-in profiles so a teardown is exhaustive regardless of which
   # combination was used last time.
-  docker compose -f docker-compose.yml \
+  docker compose --project-directory "$REPO_DIR" -f deploy/docker/docker-compose.yml \
     --profile seaweedfs --profile observability --profile starflow \
     down --remove-orphans 2>/dev/null || true
   # ./rustfs is a legacy leftover from the 2026-09-10..09-11 RustFS-as-
@@ -235,7 +235,7 @@ fi
 # case never reaches here because it implied LOAD_TPC=1 above.
 AUTO_BUMP_PG_PORT="${AUTO_BUMP_PG_PORT:-true}"
 WAIT_TIMEOUT="${WAIT_TIMEOUT:-90}"
-COMPOSE_FILE="docker-compose.yml"
+COMPOSE_FILE="deploy/docker/docker-compose.yml"
 
 # ---- Preflight ----
 command -v docker >/dev/null 2>&1 || {
@@ -464,15 +464,15 @@ fi
 case "$IMAGE_SOURCE" in
   build)
     echo "QOD_VERSION=BUILD: starting stack with 'docker compose up -d --build'..."
-    docker compose -f "$COMPOSE_FILE" ${COMPOSE_PROFILES[@]+"${COMPOSE_PROFILES[@]}"} up -d --build
+    docker compose --project-directory "$REPO_DIR" -f "$COMPOSE_FILE" ${COMPOSE_PROFILES[@]+"${COMPOSE_PROFILES[@]}"} up -d --build
     ;;
   local)
     if docker image inspect "starlakeai/quack-on-demand:$QOD_VERSION" >/dev/null 2>&1; then
       echo "QOD_VERSION=LOCAL: reusing starlakeai/quack-on-demand:$QOD_VERSION; starting stack..."
-      docker compose -f "$COMPOSE_FILE" ${COMPOSE_PROFILES[@]+"${COMPOSE_PROFILES[@]}"} up -d
+      docker compose --project-directory "$REPO_DIR" -f "$COMPOSE_FILE" ${COMPOSE_PROFILES[@]+"${COMPOSE_PROFILES[@]}"} up -d
     else
       echo "QOD_VERSION=LOCAL: starlakeai/quack-on-demand:$QOD_VERSION not found; building via 'up -d --build'..."
-      docker compose -f "$COMPOSE_FILE" ${COMPOSE_PROFILES[@]+"${COMPOSE_PROFILES[@]}"} up -d --build
+      docker compose --project-directory "$REPO_DIR" -f "$COMPOSE_FILE" ${COMPOSE_PROFILES[@]+"${COMPOSE_PROFILES[@]}"} up -d --build
     fi
     ;;
   *)
@@ -484,13 +484,13 @@ case "$IMAGE_SOURCE" in
       _pull_services=()
       while IFS= read -r _svc; do
         [[ "$_svc" == "starflow" ]] || _pull_services+=("$_svc")
-      done < <(docker compose -f "$COMPOSE_FILE" "${COMPOSE_PROFILES[@]}" config --services)
-      docker compose -f "$COMPOSE_FILE" "${COMPOSE_PROFILES[@]}" pull "${_pull_services[@]}"
+      done < <(docker compose --project-directory "$REPO_DIR" -f "$COMPOSE_FILE" "${COMPOSE_PROFILES[@]}" config --services)
+      docker compose --project-directory "$REPO_DIR" -f "$COMPOSE_FILE" "${COMPOSE_PROFILES[@]}" pull "${_pull_services[@]}"
     else
-      docker compose -f "$COMPOSE_FILE" ${COMPOSE_PROFILES[@]+"${COMPOSE_PROFILES[@]}"} pull
+      docker compose --project-directory "$REPO_DIR" -f "$COMPOSE_FILE" ${COMPOSE_PROFILES[@]+"${COMPOSE_PROFILES[@]}"} pull
     fi
     echo "starting stack..."
-    docker compose -f "$COMPOSE_FILE" ${COMPOSE_PROFILES[@]+"${COMPOSE_PROFILES[@]}"} up -d
+    docker compose --project-directory "$REPO_DIR" -f "$COMPOSE_FILE" ${COMPOSE_PROFILES[@]+"${COMPOSE_PROFILES[@]}"} up -d
     ;;
 esac
 
@@ -513,7 +513,7 @@ until code="$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:${MANAGER
   if (( $(date +%s) > deadline )); then
     echo
     echo "ERROR: manager did not respond within ${WAIT_TIMEOUT}s." >&2
-    echo "       Check 'docker compose -f $COMPOSE_FILE logs quack'." >&2
+    echo "       Check 'docker compose --project-directory . -f $COMPOSE_FILE logs quack'." >&2
     exit 1
   fi
   echo -n "."
@@ -622,12 +622,12 @@ if [[ "$_want_tpch" == "1" || "$_want_tpcds" == "1" || "$_want_ssb" == "1" ]]; t
   [[ "$_want_tpcds" == "1" ]] && demo_dbs+=( globex_tpcds )
   for demo_db in "${demo_dbs[@]}"; do
     echo "ensuring demo database '$demo_db' exists on the postgres container..."
-    docker compose -f "$COMPOSE_FILE" exec -T \
+    docker compose --project-directory "$REPO_DIR" -f "$COMPOSE_FILE" exec -T \
       -e PGPASSWORD="$pg_pass" \
       postgres psql -U "$pg_user" -d postgres -v ON_ERROR_STOP=1 -tAc \
         "SELECT format('CREATE DATABASE %I', '$demo_db') \
          WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = '$demo_db')" \
-      | docker compose -f "$COMPOSE_FILE" exec -T \
+      | docker compose --project-directory "$REPO_DIR" -f "$COMPOSE_FILE" exec -T \
           -e PGPASSWORD="$pg_pass" \
           postgres psql -U "$pg_user" -d postgres -v ON_ERROR_STOP=1
   done
@@ -638,7 +638,7 @@ if [[ "$_want_tpch" == "1" || "$_want_tpcds" == "1" || "$_want_ssb" == "1" ]]; t
   # quack in the Dockerfile, so anchor DuckDB's spill dir there instead.
   if [[ "$_want_tpch" == "1" ]]; then
     echo "seeding TPC-H (db=acme_tpch, schema=tpch1, SF=$LOAD_TPCH) via docker compose exec quack ..."
-    docker compose -f "$COMPOSE_FILE" exec \
+    docker compose --project-directory "$REPO_DIR" -f "$COMPOSE_FILE" exec \
       -e PG_HOST=postgres \
       -e PG_PORT=5432 \
       -e PG_USER="$pg_user" \
@@ -654,7 +654,7 @@ if [[ "$_want_tpch" == "1" || "$_want_tpcds" == "1" || "$_want_ssb" == "1" ]]; t
 
   if [[ "$_want_tpcds" == "1" ]]; then
     echo "seeding TPC-DS (db=globex_tpcds, schema=tpcds1, SF=$LOAD_TPCDS) via docker compose exec quack ..."
-    docker compose -f "$COMPOSE_FILE" exec \
+    docker compose --project-directory "$REPO_DIR" -f "$COMPOSE_FILE" exec \
       -e PG_HOST=postgres \
       -e PG_PORT=5432 \
       -e PG_USER="$pg_user" \
@@ -670,7 +670,7 @@ if [[ "$_want_tpch" == "1" || "$_want_tpcds" == "1" || "$_want_ssb" == "1" ]]; t
 
   if [[ "$_want_ssb" == "1" ]]; then
     echo "seeding SSB (db=acme_tpch, schema=ssb1, SF=$LOAD_SSB) via docker compose exec quack ..."
-    docker compose -f "$COMPOSE_FILE" exec \
+    docker compose --project-directory "$REPO_DIR" -f "$COMPOSE_FILE" exec \
       -e PG_HOST=postgres \
       -e PG_PORT=5432 \
       -e PG_USER="$pg_user" \
@@ -721,7 +721,7 @@ if _has_profile starflow; then
   starflow_state="ready"
   until curl -sf -o /dev/null "$starflow_url/api/v1/health" 2>/dev/null; do
     if (( $(date +%s) > deadline )); then
-      starflow_state="not ready after ${WAIT_TIMEOUT}s; check 'docker compose -f $COMPOSE_FILE logs starflow'"
+      starflow_state="not ready after ${WAIT_TIMEOUT}s; check 'docker compose --project-directory . -f $COMPOSE_FILE logs starflow'"
       break
     fi
     echo -n "."
@@ -755,6 +755,6 @@ done
 
 cat <<EOM
 
-stop with:  docker compose -f $COMPOSE_FILE${profile_flags} down
-logs with:  docker compose -f $COMPOSE_FILE logs -f quack
+stop with:  docker compose --project-directory . -f $COMPOSE_FILE${profile_flags} down
+logs with:  docker compose --project-directory . -f $COMPOSE_FILE logs -f quack
 EOM

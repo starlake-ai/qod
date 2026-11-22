@@ -152,7 +152,7 @@ object MetricsEndpoint:
     *
     * It is under the 5 s interval at which this repository's own Prometheus configurations scrape
     * (`observability/prometheus.yml`, `observability/prometheus-compose.yml` and
-    * `charts/quack-on-demand/local-stack-k8s/prometheus.yaml`). A scrape is stamped when it ended,
+    * `deploy/charts/quack-on-demand/local-stack-k8s/prometheus.yaml`). A scrape is stamped when it ended,
     * so the next one finds it the interval minus the time it took old, and a ttl of 5 s repeated
     * half of the samples (measured: 4 of 7 were new).
     */

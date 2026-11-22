@@ -80,7 +80,7 @@ NODE_HUB_IMAGE="${NODE_HUB_IMAGE:-starlakeai/quack-on-demand-node:latest-snapsho
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHART_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-REPO_DIR="$(cd "$CHART_DIR/../.." && pwd)"
+REPO_DIR="$(cd "$CHART_DIR/../../.." && pwd)"
 
 # ---- 1. kind cluster ------------------------------------------------------
 #
@@ -138,7 +138,7 @@ ensure_local_image() {
 if [[ "$BUILD" == "1" ]]; then
   echo "[2/5] BUILD=1: docker build manager + Quack node from $REPO_DIR..."
   ( cd "$REPO_DIR" && docker build -t "$IMAGE"      . )
-  ( cd "$REPO_DIR" && docker build -t "$NODE_IMAGE" -f docker/quack-node/Dockerfile . )
+  ( cd "$REPO_DIR" && docker build -t "$NODE_IMAGE" -f deploy/docker/quack-node/Dockerfile . )
 else
   echo "[2/5] BUILD=0: ensuring local images (pull from Docker Hub if missing)..."
   ensure_local_image "$IMAGE"      "$MGR_HUB_IMAGE"

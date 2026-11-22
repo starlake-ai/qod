@@ -88,6 +88,16 @@
   greyed out for them. Residual: an admin of several tenants, one of them disabled, can still
   manage that one through the management API.
 
+- **Deployment files moved under `deploy/`.** The Helm chart is now at
+  `deploy/charts/quack-on-demand/` (kind rig: `deploy/charts/quack-on-demand/local-stack-k8s/`),
+  the image Dockerfiles at `deploy/docker/{quack-node,fleet-worker,starflow}/`, and the compose
+  files at `deploy/docker/docker-compose.yml` and `deploy/docker/docker-compose.fleet.yml`. The
+  manager's `Dockerfile` stays at the root. `scripts/docker/run-docker-compose.sh` and
+  `stop-docker-compose.sh` are unchanged to use. Without them, run Compose from the repository
+  root as `docker compose --project-directory . -f deploy/docker/docker-compose.yml ...`: the
+  flag keeps the bind mounts (`./pgdata`, `./ducklake`, ...), `.env` and the project name at the
+  root, so an existing stack keeps its containers and data. The published OCI chart
+  (`oci://ghcr.io/starlake-ai/charts/quack-on-demand`) and the images are unchanged.
 - **Deleting a tenant or a database asks for its name to be typed, in the CLI and in the
   console.** `qod tenant delete` and `qod database delete`, run on a terminal, print what goes
   with the delete and send nothing unless the name is typed back (surrounding spaces aside, case

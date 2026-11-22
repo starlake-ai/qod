@@ -36,7 +36,7 @@ The bundled `run-local-stack-k8s.sh` script handles everything: creates a kind c
 git clone https://github.com/starlake-ai/quack-on-demand
 cd quack-on-demand
 
-./charts/quack-on-demand/local-stack-k8s/run-local-stack-k8s.sh
+./deploy/charts/quack-on-demand/local-stack-k8s/run-local-stack-k8s.sh
 # NUKE=1            wipe the namespace before reinstalling
 # LOAD_TPCH=1       seed TPC-H into acme/acme_tpch at SF=1
 # LOAD_TPCDS=1      seed TPC-DS into globex/globex_tpcds at SF=1
@@ -52,7 +52,7 @@ When the script returns, your `kubectl` context is `kind-qod-test`, the manager 
 Point your `kubectl` context at the cluster (and make sure `postgres.host` resolves from inside it), then install from this checkout:
 
 ```bash
-helm install qod charts/quack-on-demand \
+helm install qod deploy/charts/quack-on-demand \
   --namespace qod --create-namespace \
   --set postgres.host=postgres.example.svc \
   --set postgres.user=qod \
@@ -67,7 +67,7 @@ helm install qod charts/quack-on-demand \
 Or package it locally and host on your own OCI registry:
 
 ```bash
-helm package charts/quack-on-demand -d /tmp
+helm package deploy/charts/quack-on-demand -d /tmp
 helm push /tmp/quack-on-demand-*.tgz oci://your-registry.example.com/charts
 ```
 
@@ -175,17 +175,17 @@ and falls back to the manager-wide config above when unset. See
 
 The chart's `quackNode.image` value points at the DuckDB Quack server image - a **different artifact** from the manager image. The manager spawns one pod per Quack node and references this image in the pod spec.
 
-The default is `starlakeai/quack-on-demand-node:latest-snapshot`, the moving alias the `quack-node-snapshot` GitHub Action publishes on every push to `main` that touches `docker/quack-node/**`. Since 0.6.1 every release also publishes the node image in lockstep with the manager, so pin the release tag matching your manager version for reproducible deploys:
+The default is `starlakeai/quack-on-demand-node:latest-snapshot`, the moving alias the `quack-node-snapshot` GitHub Action publishes on every push to `main` that touches `deploy/docker/quack-node/**`. Since 0.6.1 every release also publishes the node image in lockstep with the manager, so pin the release tag matching your manager version for reproducible deploys:
 
 ```bash
-helm upgrade qod charts/quack-on-demand \
+helm upgrade qod deploy/charts/quack-on-demand \
   --set quackNode.image=starlakeai/quack-on-demand-node:0.6.1
 ```
 
 Override only when you need to point at a private registry or a custom build:
 
 ```bash
-helm upgrade qod charts/quack-on-demand \
+helm upgrade qod deploy/charts/quack-on-demand \
   --set quackNode.image=registry.example.com/quack-on-demand-node:<tag>
 ```
 
