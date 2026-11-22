@@ -643,7 +643,7 @@ qod pool set-resources --tenant acme --db acme_tpch --pool bi --cpu 2 --memory 8
 qod pool set-pod-template --tenant acme --db acme_tpch --pool bi --file pod-template.yaml
 ```
 
-The local backend ignores cpu/memory/template; use database or pool `initSql` (`SET memory_limit='...'`) for local memory control. The Helm chart's `resources` block sizes the MANAGER container, not node pods; use `qod pool set-resources` for node-pod sizing.
+On the local and fleet runtimes a pool's cpu and memory become each node's DuckDB `threads` (cpu rounded up) and `memory_limit`, set before the database's and pool's `initSql`, so a `SET threads` / `SET memory_limit` there still wins; a pool that sets neither keeps DuckDB's defaults (all cores, 80% of the host's memory locally). DuckDB enforces it, not the kernel. The local backend ignores the pod template. The Helm chart's `resources` block sizes the MANAGER container, not node pods; use `qod pool set-resources` for node-pod sizing.
 
 `pool/setResources` is mutation-gated as of 2026-08-13, like `pool/create` and `pool/scale`: a module gate may refuse it, and the refusal surfaces as **HTTP 429 `quota_exceeded`** with the reason in the body. Superuser callers (a superuser session or PAT) bypass the gate, as everywhere. Zero-module (plain OSS) boots have no gates registered, so nothing changes there.
 

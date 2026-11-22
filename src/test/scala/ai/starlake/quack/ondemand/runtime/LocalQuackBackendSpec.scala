@@ -446,6 +446,59 @@ class LocalQuackBackendSpec extends AnyFlatSpec with Matchers with org.scalatest
       )
     finally backend.stop(key, "node-limits").unsafeRunSync()
 
+  // Decision D6: a pool's cpu and memory size its local nodes as they size fleet nodes, through the
+  // same SETs (NodeResourceSql) under the same name the spawn script runs before the tenant's
+  // initSql. A metastore entry of that name replaces nothing. The checks read only the resourceSql
+  // value: a failing `should include` on the dump would print the whole environment.
+  private def resourceSqlSeen(
+      nodeId: String,
+      port: Int,
+      cpu: Option[String],
+      memory: Option[String]
+  ): String =
+    val capture = java.io.File.createTempFile(s"env-capture-$nodeId-", ".txt")
+    capture.deleteOnExit()
+    val backend = new LocalQuackBackend(
+      min = port,
+      max = port + 1,
+      nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      commandFor = (_, _, _) => envDumpCmd(capture.getAbsolutePath, 5),
+      nodeFiles = ai.starlake.quack.NodeFilesConfig()
+    )
+    val key  = PoolKey("t", "t_default", "p")
+    val spec = NodeSpec(
+      key,
+      nodeId,
+      Role.Dual,
+      metastore = Map("pgHost" -> "h", "resourceSql" -> "SET threads = 99;"),
+      s3 = Map.empty,
+      cpu = cpu,
+      memory = memory
+    )
+    backend.start(spec).unsafeRunSync()
+    try
+      val deadline = System.currentTimeMillis() + 3000
+      while capture.length() == 0 && System.currentTimeMillis() < deadline do Thread.sleep(50)
+      val out = java.nio.file.Files.readString(capture.toPath)
+      withClue("the metastore's resourceSql in the node's environment")(
+        out.contains("threads = 99") shouldBe false
+      )
+      // The value runs from its `resourceSql=` line to the next line naming another variable.
+      val lines = out.linesIterator.toVector
+      val at    = lines.indexWhere(_.startsWith("resourceSql="))
+      withClue("no resourceSql in the node's environment")(at should be >= 0)
+      val rest = lines.drop(at + 1).takeWhile(l => !l.matches("^[A-Za-z_][A-Za-z0-9_]*=.*"))
+      (lines(at).stripPrefix("resourceSql=") +: rest).mkString("\n")
+    finally backend.stop(key, nodeId).unsafeRunSync()
+
+  it should "hand the node its pool's cpu and memory as the resourceSql SETs" in:
+    resourceSqlSeen("node-resources", 23120, Some("2"), Some("4Gi")) shouldBe
+      "SET threads = 2;\nSET memory_limit = '4096MiB';\n"
+
+  it should "hand the node an empty resourceSql when its pool sets neither cpu nor memory" in:
+    resourceSqlSeen("node-no-resources", 23122, None, None) shouldBe ""
+
   // SEC-1: a tenant-db's metastore is tenant-admin input. Only TenantDb.NodeEnvKeys of it may reach
   // the spawn script's environment: BASH_ENV (bash expands it before running the script), PATH or
   // QOD_NODE_BIN would run commands as the manager's user, and a stale lockdownSql

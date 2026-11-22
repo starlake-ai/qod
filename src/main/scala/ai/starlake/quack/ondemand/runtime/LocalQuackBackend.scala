@@ -2,6 +2,7 @@ package ai.starlake.quack.ondemand.runtime
 
 import java.util.Locale
 import ai.starlake.quack.model.{NodeSpec, PoolKey, RunningNode}
+import ai.starlake.quack.ondemand.fleet.NodeResourceSql
 import cats.effect.IO
 import com.typesafe.scalalogging.LazyLogging
 
@@ -133,6 +134,10 @@ final class LocalQuackBackend(
     nodeFiles.env.foreach { case (k, v) => env.put(k, v) }
     // The decide limits, both, always, after the metastore overlay, for the same reason.
     nodeAuthzLimits.env.foreach { case (k, v) => env.put(k, v) }
+    // The pool's cpu and memory as DuckDB SETs, as a fleet node gets them (decision D6): always,
+    // empty when the pool sets neither, after the overlay, so neither a variable this process
+    // inherited nor a metastore entry decides them.
+    env.put(NodeResourceSql.EnvVar, NodeResourceSql.render(spec.cpu, spec.memory))
     val secretsDir =
       try NodeSecretFiles.writePrivateDir(secrets)
       catch
