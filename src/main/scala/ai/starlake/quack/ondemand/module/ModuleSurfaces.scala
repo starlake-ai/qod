@@ -42,10 +42,14 @@ object ModuleSurfaces:
 
   /** The first path segments after `api` that core serves or reserves, as Main hands them to
     * [[validate]]. Every core endpoint ManagerServer serves under /api is in EndpointModules
-    * (DocEndpoints.all); /data/v1 lies outside /api.
+    * (DocEndpoints.all) except the undocumented security audit, added by hand; /data/v1 lies
+    * outside /api.
     */
   def coreApiSegments: Set[String] =
-    apiSegments(ai.starlake.quack.docs.DocEndpoints.all) ++ ReservedApiSegments
+    apiSegments(
+      ai.starlake.quack.docs.DocEndpoints.all :+
+        ai.starlake.quack.ondemand.api.SecurityAuditEndpoints.audit
+    ) ++ ReservedApiSegments
 
   private val PageId     = "[a-z0-9-]+".r
   private val ModuleName = "[a-z0-9-]+".r

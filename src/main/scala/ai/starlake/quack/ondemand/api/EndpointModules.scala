@@ -30,7 +30,6 @@ object EndpointModules:
     BranchEndpoints,
     FleetEndpoints,
     PlatformEndpoints,
-    SecurityAuditEndpoints,
     // Served under /data/v1 by RestEdgeRoutes, mounted ahead of ManagerServer's own routes and
     // never among its API routes: registered here for the OpenAPI document only.
     ai.starlake.quack.edge.rest.RestEdgeEndpoints
