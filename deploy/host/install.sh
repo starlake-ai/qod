@@ -35,9 +35,20 @@ SERVICE_USER="${QOD_HOST_USER:-qod}"
 PYTHON="${PYTHON:-python3}"
 # What a systemd service gets as PATH, so the download-only run sees the Java the unit will see.
 SERVICE_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-# The variables of qod.env that change what a start downloads, or where it looks for it.
+# The variables of qod.env that change what a start downloads, where it looks for it, or how it
+# reaches it (SSL_CERT_FILE: the CA bundle a TLS-re-signing proxy needs).
 FETCH_KEYS="JAVA_BIN JAVA_HOME JAR_CACHE_DIR DUCKDB_VERSION DUCKDB_CACHE_DIR XDG_CACHE_HOME
-HTTP_PROXY HTTPS_PROXY http_proxy https_proxy NO_PROXY no_proxy"
+HTTP_PROXY HTTPS_PROXY http_proxy https_proxy NO_PROXY no_proxy SSL_CERT_FILE"
+# Run as the service user by as_service_user: reads the environment file argv[1] (KEY=value
+# entries, NUL-separated, never evaluated), deletes it, and runs argv[2:] with exactly that
+# environment. The values never sit on a command line, where any local user could read them.
+LAUNCH='import os, sys
+path = sys.argv[1]
+with open(path, "rb") as f:
+    data = f.read()
+os.unlink(path)
+env = dict(os.fsdecode(e).split("=", 1) for e in data.split(b"\0") if e)
+os.execvpe(sys.argv[2], sys.argv[2:], env)'
 
 die() {
   echo "install.sh: $*" >&2
@@ -127,26 +138,40 @@ user_home() {
 }
 
 # Run "$@" as the service user in the environment its unit gives it: HOME, the service PATH and
-# the download-relevant keys of qod.env, nothing else of this shell.
+# the download-relevant keys of qod.env, nothing else of this shell. Python $1 starts "${@:2}"
+# (LAUNCH above). The environment goes through a file only the service user reads, never through
+# a command line: qod.env is 0600, and a proxy URL in it can carry a password (#282).
 as_service_user() {
-  local key value
-  local cmd=(env -i "HOME=$(user_home)" "PATH=$SERVICE_PATH")
-  for key in $FETCH_KEYS; do
-    value="$(qod_env_value "$key")"
-    if [ -n "$value" ]; then
-      cmd+=("$key=$value")
-    fi
-  done
-  cmd+=("$@")
+  local python="$1" key value
+  shift
+  envdir="$(mktemp -d "${TMPDIR:-/tmp}/qod-install.XXXXXX")"
+  (
+    umask 077
+    printf '%s\0' "HOME=$(user_home)" "PATH=$SERVICE_PATH" >"$envdir/env"
+    for key in $FETCH_KEYS; do
+      value="$(qod_env_value "$key")"
+      if [ -n "$value" ]; then
+        printf '%s\0' "$key=$value" >>"$envdir/env"
+      fi
+    done
+  )
+  local run=("$python" -I -c "$LAUNCH" "$envdir/env" "$@")
+  local status=0
   if [ "$(id -un)" = "$SERVICE_USER" ]; then
-    "${cmd[@]}"
-  elif command -v runuser >/dev/null 2>&1; then
-    runuser -u "$SERVICE_USER" -- "${cmd[@]}"
-  elif command -v sudo >/dev/null 2>&1; then
-    sudo -u "$SERVICE_USER" -- "${cmd[@]}"
+    "${run[@]}" || status=$?
   else
-    die "neither runuser nor sudo is installed, so nothing can run as $SERVICE_USER"
+    chown -R -- "$SERVICE_USER" "$envdir"
+    if command -v runuser >/dev/null 2>&1; then
+      runuser -u "$SERVICE_USER" -- "${run[@]}" || status=$?
+    elif command -v sudo >/dev/null 2>&1; then
+      sudo -u "$SERVICE_USER" -- "${run[@]}" || status=$?
+    else
+      die "neither runuser nor sudo is installed, so nothing can run as $SERVICE_USER"
+    fi
   fi
+  rm -rf -- "$envdir"
+  envdir=""
+  return "$status"
 }
 
 ensure_user() {
@@ -172,7 +197,11 @@ fi
 dir="$PREFIX/versions/$VERSION"
 marker="$dir/.qod-installed"
 created=""
+envdir=""
 cleanup() {
+  if [ -n "$envdir" ]; then
+    rm -rf -- "$envdir"
+  fi
   if [ -n "$created" ]; then
     rm -rf "$dir"
   fi
@@ -208,7 +237,7 @@ else
 fi
 
 echo "caching what qod $VERSION runs, as $SERVICE_USER"
-as_service_user "$dir/bin/qod" start --version "$VERSION" --download-only ||
+as_service_user "$dir/bin/python" "$dir/bin/qod" start --version "$VERSION" --download-only ||
   die "qod $VERSION could not cache what it runs (see above)${created:+; nothing was kept}"
 
 if [ -n "$created" ]; then
