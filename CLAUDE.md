@@ -1057,8 +1057,9 @@ is the credential; new must differ; clears the flag). The auth queries MUST proj
 `QOD_AUTH_DB_SYSTEM_QUERY` / `QOD_AUTH_DB_TENANT_QUERY` fails boot and every login.
 
 **Regular-user profile sessions.** The manager UI is not admin-exclusive: a tenant-scoped
-`kind=user` principal can log in through their tenant (the blank/system login and OIDC SSO
-stay admin-only). `AuthHandlers.mintSessionFor` accepts a DB-mode `Tenant(t)` login from any
+`kind=user` principal can log in through their tenant (the blank/system login, by password or
+system OIDC, serves only tenant-scoped admins, superusers and staff, and a tenant's OIDC SSO only
+its admins). `AuthHandlers.mintSessionFor` accepts a DB-mode `Tenant(t)` login from any
 principal holding a grant on `t`, not just an admin, and mints a non-admin, profile-only
 session (`LoginResponse.admin = false`). `ManagerServer.apiKeyGuard` demotes such sessions (and
 a non-admin's PATs) to a fixed allowlist (`isProfileApi`: `/api/auth/whoami`,
@@ -1194,7 +1195,9 @@ it all (`403 superuser_required` otherwise): REST `GET /api/platform/permission/
 `GET /api/platform/role/list`, `POST /api/platform/role/create|update|delete`,
 `GET /api/platform/staff/list`, and `user/create` / `user/update` with `kind: "staff"` and
 `platformRoles` (omitted on update keeps the set, `[]` clears it, a kind change away from staff drops
-it, `admin` to `staff` meets the `last_superuser` guard); CLI `qod platform permission list`,
+it, `admin` to `staff` meets the `last_superuser` guard, and a `user/create` naming an existing
+superuser with another kind is `409 name_taken`, nothing written, as the create upserts and would
+otherwise demote it past that guard); CLI `qod platform permission list`,
 `qod platform role list|create|update|delete`, `qod platform staff list`, `qod user create|update
 --kind staff --platform-role NAME` / `--clear-platform-roles`; the console's Settings > Staff page.
 No MCP tool (`McpCoverageSpec` exclusion).
@@ -1212,6 +1215,12 @@ owner's permissions unless it has `dropAdmin`, which collapses it to none. Staff
 bare `/ui/` login (`LoginRealm.System`: password, or system OIDC under `identitySource=oidc`); a
 tenant login never binds a staff row, and an identity holding an admin grant signs in as that admin.
 The session's role is `staff`, `LoginResponse.staff` and whoami's `staff` / `permissions` say so.
+Under system OIDC a staff user's QoD user name must equal the IdP's `preferred_username`: a row
+matched only by verified email signs in, then every request answers 401, as the live check looks the
+row up by name (it fails closed). Only staff sessions are checked live: an admin session whose row is
+demoted to staff keeps its REST superuser rights until its JWT expires (the known session revocation
+gap). Staff is read from a tenant-less row only: a session or PAT naming a tenant is never staff,
+whatever its role or kind reads (`ManagerServer.isStaffSession`, `PatAuthenticator.sessionOf`).
 
 **Guard.** `ManagerServer.apiKeyGuard` gives a staff session or PAT its own allowlist, everything
 else `403 admin_required`: `StaffProfilePaths` (whoami, logout, its own PATs; an explicit list, so
