@@ -8,6 +8,7 @@
 #   cosign verify starlakeai/quack-on-demand:<tag> \
 #     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
 #     --certificate-identity-regexp '^https://github.com/starlake-ai/(qod|quack-on-demand)/\.github/workflows/(release|snapshot)\.yml@'
+# (the node image's snapshots are signed by quack-node-snapshot.yml: `(release|quack-node-snapshot)`).
 set -euo pipefail
 ref="${1:?usage: sign-image.sh IMAGE:TAG}"
 repo="${ref%:*}"
