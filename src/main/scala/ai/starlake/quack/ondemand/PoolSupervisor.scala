@@ -3471,12 +3471,7 @@ final class PoolSupervisor(
               // Pool names are unique within a tenant (qodstate_pool UNIQUE (tenant_id, name)). The
               // edge resolves (tenant, pool) -> PoolKey at handshake, so the same name in two
               // tenant-dbs under one tenant would make that lookup ambiguous.
-              IO.raiseError(
-                new IllegalStateException(
-                  s"pool '${key.pool}' already exists under tenant '${key.tenant}' " +
-                    "in a different tenant-db; pool names must be unique per tenant"
-                )
-              )
+              IO.raiseError(new PoolSupervisor.PoolNameTaken(key))
             case Some(td) =>
               val merged   = effectiveMetastoreFor(td)
               val kindWire = td.kind.wireValue
@@ -5842,6 +5837,16 @@ object PoolSupervisor:
 
   /** A new pool whose name reads the same as another pool's of its database once `_` becomes `-`.
     */
+  /** A new pool whose name another database of its tenant already gives a pool: pool names are
+    * unique per tenant (`qodstate_pool` UNIQUE (tenant_id, name)), since the edge resolves (tenant,
+    * pool) at handshake. Answered 409 `pool_name_taken`, nothing written.
+    */
+  final class PoolNameTaken(val key: PoolKey)
+      extends IllegalStateException(
+        s"pool '${key.pool}' already exists under tenant '${key.tenant}' in another database; " +
+          "pool names are unique per tenant: choose another name"
+      )
+
   final class PoolReadsAlike(val key: PoolKey, val other: String)
       extends IllegalStateException(
         s"pool '${key.pool}' reads the same as pool '$other' of database '${key.tenantDb}' once " +

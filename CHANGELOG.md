@@ -227,6 +227,14 @@
 
 ### Fixed
 
+- `pool/create` with a pool name another database of the tenant already uses answers `409
+  pool_name_taken`, naming the pool, instead of `500 start_failed`. Pool names are unique per
+  tenant; nothing is written.
+- A node that dies while it runs a statement (an OOM kill, a crash) no longer reaches the client as
+  `INVALID_ARGUMENT ... permanent failure: HTTP/1.1 header parser received no bytes`. A connection
+  the node closes with no answer is a lost node, as a refused connect is: a lone read is retried on
+  another node of the pool (or answers `UNAVAILABLE`, retryable), and any other statement answers
+  that its outcome is unknown.
 - **`deploy/host/install.sh` hands `SSL_CERT_FILE` of `/etc/qod/qod.env` to its download run**
   (#280), so a proxy that re-signs TLS with a company CA no longer fails the download of the jar,
   the Java runtime and DuckDB. The file replaces the default CAs, so it must hold the public ones
