@@ -4250,9 +4250,28 @@ final class PoolSupervisor(
               val clearBefore                        = existedBefore && wasStaff && !staff
               val platformWrite: Option[Set[String]] =
                 platformIds.toOption.filter(ids => staff && (ids.nonEmpty || !wasStaff))
+              // An upsert never moves a superuser to another kind: that would demote it and
+              // replace its password past user/update's self and last-superuser guards. Refused
+              // before anything is written.
+              val keepsSuperuser: Either[SupervisorError, Unit] =
+                val demotes = existedBefore && resolvedTenantId.isEmpty &&
+                  prior.exists(
+                    _.kind.trim.equalsIgnoreCase(ai.starlake.quack.ondemand.state.UserKind.Admin)
+                  ) &&
+                  kind != ai.starlake.quack.ondemand.state.UserKind.Admin
+                if demotes then
+                  Left(
+                    SupervisorError.NameTaken(
+                      s"a superuser named '$username' already exists; demote it with user/update"
+                    )
+                  )
+                else Right(())
               // Names are resolved before anything is written: a refused membership leaves
               // no user row behind.
-              resolveMemberships(resolvedTenantId, memberships, applyDefaults = !existedBefore)
+              keepsSuperuser
+                .flatMap(_ =>
+                  resolveMemberships(resolvedTenantId, memberships, applyDefaults = !existedBefore)
+                )
                 .flatMap { resolved =>
                   prior
                     .filter(_ => clearBefore)
@@ -4377,7 +4396,7 @@ final class PoolSupervisor(
               Left(
                 SupervisorError.InvalidMembership(
                   "memberships_not_applicable",
-                  "roles and groups do not apply to a superuser"
+                  "roles and groups do not apply to a tenant-less account"
                 )
               )
             else Right((Nil, Nil))

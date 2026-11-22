@@ -59,7 +59,8 @@ package ai.starlake.quack.ondemand
   *     unqualified names in (`TenantDb.defaultDatabaseError`); REST 400
   *     `default_database_mismatch`.
   *   - [[ai.starlake.quack.ondemand.SupervisorError.NameTaken NameTaken]]: a platform role's name
-  *     (compared ignoring case) is already taken; REST 409 `name_taken`.
+  *     (compared ignoring case) is already taken, or a user create names a superuser and another
+  *     kind, which would demote it; REST 409 `name_taken`.
   */
 enum SupervisorError(val message: String):
   case NotFound(msg: String)                        extends SupervisorError(msg)

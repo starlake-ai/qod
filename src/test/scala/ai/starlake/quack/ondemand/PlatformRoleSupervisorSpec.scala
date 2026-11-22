@@ -424,8 +424,9 @@ class PlatformRoleSupervisorSpec extends AnyFlatSpec with Matchers:
       s.updateUserPassword(root.id, None, Some("staff"), us).unsafeRunSync().isRight shouldBe true
       s.platformRoleNamesOf(root.id) shouldBe Nil
       s.staffPrincipal("root").map(_.permissions) shouldBe Some(Set.empty)
+      // A tenant-less `user` row: an upsert never moves an `admin` row to another kind.
       val op = s
-        .createUser(None, "op", "pw-123456", "admin", us, noMemberships)
+        .createUser(None, "op", "pw-123456", "user", us, noMemberships)
         .unsafeRunSync()
         .toOption
         .get

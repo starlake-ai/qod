@@ -235,6 +235,14 @@ class PatAuthenticatorSpec extends AnyFlatSpec with Matchers:
       auth.sessionOf(token).map(_.profile.role) shouldBe Some("staff")
     }
 
+  "a tenant row whose kind reads Staff" should "not get a staff session from its PAT" in
+    withFreshDb { (_, users, pats) =>
+      // A legacy free-text kind: 0061's CHECK compares `staff` exactly, so `Staff` on a tenant
+      // row passes it.
+      val (_, token) = seed(users, pats, Some("t-acme"), "tx", "Staff")
+      authOf(users, pats).sessionOf(token).map(_.profile.role) shouldBe Some("user")
+    }
+
   it should "get no permissions from the default lookup, another row of the name, or dropAdmin" in
     withFreshDb { (_, users, pats) =>
       val (uid, token) = seed(users, pats, None, "sam", "staff")

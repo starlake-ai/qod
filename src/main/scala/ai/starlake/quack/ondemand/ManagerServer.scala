@@ -470,8 +470,7 @@ final class ManagerServer(
         OptionT.liftF(resolveCredential(provided)).flatMap { resolved =>
           val sessionAdmin = resolved.exists(_.profile.role.equalsIgnoreCase("admin"))
           // A staff session or PAT (issue #274): its own allowlist, never the tenant user's.
-          val staffSession =
-            resolved.exists(_.profile.role.equalsIgnoreCase(UserKind.Staff))
+          val staffSession    = resolved.exists(ManagerServer.isStaffSession)
           val tokenScope      = resolved.map(_.scope)
           val nonAdminSession = resolved.isDefined && !sessionAdmin && !staffSession
 
@@ -1347,6 +1346,12 @@ object ManagerServer extends com.typesafe.scalalogging.LazyLogging:
 
   /** The console's module page list, which every signed-in caller may read (issue #274). */
   val ConsolePagesPath: String = "/api/console/pages"
+
+  /** Whether the guard treats `s` as a staff caller (issue #274): its role reads `staff` and it
+    * names no tenant, as no staff row has one.
+    */
+  private[quack] def isStaffSession(s: SessionTokenStore.Session): Boolean =
+    s.profile.tenant.isEmpty && s.profile.role.equalsIgnoreCase(UserKind.Staff)
 
   /** A read of the console page list: `GET` only. */
   private[ondemand] def isConsolePages(method: Method, path: String): Boolean =

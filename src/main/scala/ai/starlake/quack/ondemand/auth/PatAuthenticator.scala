@@ -140,7 +140,9 @@ final class PatAuthenticator(
           username = p.user.username,
           role =
             if p.isAdmin then "admin"
-            else if p.user.kind.equalsIgnoreCase(UserKind.Staff) then UserKind.Staff
+            // A staff row has no tenant: a tenant row whose free-text kind reads `staff` is not one.
+            else if p.user.tenant.isEmpty && p.user.kind.equalsIgnoreCase(UserKind.Staff) then
+              UserKind.Staff
             else "user",
           groups = Set.empty,
           claims = Map.empty,

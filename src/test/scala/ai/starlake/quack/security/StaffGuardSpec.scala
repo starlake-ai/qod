@@ -150,6 +150,28 @@ class StaffGuardSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers:
         withClue(s"$path: ${describe(r)}")(adminRequired(r) shouldBe true)
     }
 
+  "ManagerServer.isStaffSession" should "need a tenant-less session, whatever the role's case" in {
+    def session(role: String, tenant: Option[String]) =
+      ai.starlake.quack.ondemand.api.SessionTokenStore.Session(
+        profile = ai.starlake.quack.edge.auth.AuthenticatedProfile(
+          StaffName,
+          role,
+          Set.empty,
+          Map.empty,
+          "pat",
+          tenant
+        ),
+        scope = SessionScope.NoAccess,
+        createdAt = java.time.Instant.now(),
+        readOnly = false
+      )
+    ManagerServer.isStaffSession(session("staff", None)) shouldBe true
+    ManagerServer.isStaffSession(session("Staff", None)) shouldBe true
+    ManagerServer.isStaffSession(session("Staff", Some("acme"))) shouldBe false
+    ManagerServer.isStaffSession(session("staff", Some("acme"))) shouldBe false
+    ManagerServer.isStaffSession(session("user", None)) shouldBe false
+  }
+
   "ManagerServer.StaffProfilePaths" should
     "be exactly whoami, logout and the caller's own PATs" in {
       ManagerServer.StaffProfilePaths shouldBe Set(

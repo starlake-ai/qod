@@ -91,6 +91,11 @@ class PlatformRestSpec extends AnyFlatSpec with Matchers with SecurityHttpHelper
     withClue(s"create role $name: $out")(out.isRight shouldBe true)
 
   private def withPostgresHandlers(test: (UserHandlers, PlatformHandlers) => Unit): Unit =
+    withPostgresStores((users, platform, _) => test(users, platform))
+
+  private def withPostgresStores(
+      test: (UserHandlers, PlatformHandlers, UserStore) => Unit
+  ): Unit =
     TestPostgres.ensureReachable()
     val dbName                                   = s"qodplr_test_${System.nanoTime()}"
     var store: Option[PostgresControlPlaneStore] = None
@@ -118,7 +123,7 @@ class PlatformRestSpec extends AnyFlatSpec with Matchers with SecurityHttpHelper
         .unsafeRunSync()
         .fold(e => fail(s"seed superuser: $e"), identity)
       val userHandlers = new UserHandlers(sup, us)
-      test(userHandlers, new PlatformHandlers(sup, userHandlers))
+      test(userHandlers, new PlatformHandlers(sup, userHandlers), us)
     finally
       users.foreach(u => Try(u.close()))
       store.foreach(s => Try(s.close()))
@@ -304,6 +309,52 @@ class PlatformRestSpec extends AnyFlatSpec with Matchers with SecurityHttpHelper
       val rows = list.getOrElse(fail(s"refused: $list")).users
       rows.find(_.username == "sam").map(_.platformRoles) shouldBe Some(List("support"))
       rows.find(_.username == "boss").map(_.platformRoles) shouldBe Some(Nil)
+    }
+
+  it should "refuse a non-admin account over a superuser's name with 409 name_taken" in
+    withPostgresStores { (users, _, us) =>
+      val bossId     = us.userIdOf(None, "boss").getOrElse(fail("no seeded superuser"))
+      val hashBefore = us.passwordHashById(bossId)
+      hashBefore shouldBe defined
+      for kind <- List("staff", "user", " Staff ") do
+        val out = users
+          .createUser(
+            decodeAs[UserCreateRequest](
+              s"""{"username":"boss","password":"other-password-1","kind":"$kind"}"""
+            ),
+            Root
+          )(asSuperuser)
+          .unsafeRunSync()
+        withClue(s"create kind '$kind' over the superuser boss: $out") {
+          out.left.map(_._1.code) shouldBe Left(409)
+          out.left.map(_._2.error) shouldBe Left("name_taken")
+        }
+        withClue(s"boss after the refused kind '$kind'") {
+          us.userById(bossId).map(_.kind) shouldBe Some("admin")
+          us.passwordHashById(bossId) shouldBe hashBefore
+        }
+    }
+
+  it should "still upsert a staff user over an existing staff row" in
+    withPostgresStores { (users, _, us) =>
+      def create(password: String) =
+        users
+          .createUser(
+            decodeAs[UserCreateRequest](
+              s"""{"username":"sam","password":"$password","kind":"staff"}"""
+            ),
+            Root
+          )(asSuperuser)
+          .unsafeRunSync()
+      val first = create("sam-password-1")
+      val id    = first.getOrElse(fail(s"refused: $first")).id
+      val hash1 = us.passwordHashById(id)
+      val again = create("sam-password-2")
+      withClue(s"upsert over the staff row: $again") {
+        again.map(_.id) shouldBe Right(id)
+        again.map(_.kind) shouldBe Right("staff")
+      }
+      us.passwordHashById(id) should not be hash1
     }
 
   it should "refuse platformRoles on a tenant user with invalid_kind" in withHarness() { (h, _) =>
