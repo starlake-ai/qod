@@ -109,6 +109,15 @@
   segment under it (such as `/api/webhook`); lies under a core API segment or under another loaded
   module's name; or, outside `/api`, lies under none of the module's own static mounts (a root
   mount covers none).
+- **`deploy/host/install.sh` no longer puts the values of `/etc/qod/qod.env` on a command line**
+  (#282). Its download run got them as arguments of `env` under `runuser` (or `sudo`), which
+  waits for the whole download, so any local user could read a proxy password in `HTTPS_PROXY`
+  with `ps` while it ran, though `qod.env` is mode 0600. They now go through a file only the
+  service user reads, deleted once read. `qod start --download-only` likewise hands DuckDB the
+  proxy on its standard input instead of `-cmd`, with a proxy URL's user and password as
+  `http_proxy_username` / `http_proxy_password`, which DuckDB sends to the proxy. It used to get
+  them inside `http_proxy`, which DuckDB refuses (`Failed to parse http_proxy ... into a host and
+  port`), so a proxy URL holding a user and password failed every extension download.
 
 ### Changed
 
@@ -128,6 +137,14 @@
 - **Module pages in the admin console.** A module's page appears in a Platform section, at
   `/ui/x/<module>/<page>`, for superusers and for staff holding its permission, inside the console's
   layout and session (console page contract 1).
+
+### Fixed
+
+- **`deploy/host/install.sh` hands `SSL_CERT_FILE` of `/etc/qod/qod.env` to its download run**
+  (#280), so a proxy that re-signs TLS with a company CA no longer fails the download of the jar,
+  the Java runtime and DuckDB. The file replaces the default CAs, so it must hold the public ones
+  too, and must be readable by the service user; `deploy/host/README.md`, "What needs the
+  network", says which download reads what.
 
 ## 0.14.1
 

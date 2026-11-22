@@ -652,15 +652,29 @@ def ensure_duckdb_cli(
 NODE_EXTENSIONS = ("quack", "httpfs", "avro", "ducklake", "postgres", "aws", "azure", "iceberg")
 
 
-def _duckdb_proxy_sql(environ) -> str | None:
-    """`SET http_proxy` for the proxy the environment names, as the spawn script writes it: DuckDB
-    reads no proxy variable for an INSTALL."""
+def _sql_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _duckdb_proxy_sql(environ) -> list[str]:
+    """The `SET`s of the proxy the environment names: DuckDB reads no proxy variable for an
+    INSTALL. Its host and port go in `http_proxy`, and the user and password of a URL holding them
+    in `http_proxy_username` / `http_proxy_password`, which DuckDB sends as the proxy's Basic
+    credentials (it reads no credentials inside `http_proxy`)."""
+    from urllib.parse import unquote, urlsplit
+
     names = ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy")
     url = next((environ.get(k) for k in names if environ.get(k)), "")
     if not url:
-        return None
-    hostport = url.removeprefix("http://").removeprefix("https://").rstrip("/")
-    return "SET http_proxy = '" + hostport.replace("'", "''") + "'"
+        return []
+    parts = urlsplit(url if "://" in url else "http://" + url)
+    userinfo, _, hostport = parts.netloc.rpartition("@")
+    statements = [f"SET http_proxy = {_sql_literal(hostport)}"]
+    if userinfo:
+        user, _, password = userinfo.partition(":")
+        statements.append(f"SET http_proxy_username = {_sql_literal(unquote(user))}")
+        statements.append(f"SET http_proxy_password = {_sql_literal(unquote(password))}")
+    return statements
 
 
 def ensure_node_extensions(
@@ -673,15 +687,17 @@ def ensure_node_extensions(
     nodes and the jar run) into this user's DuckDB extension directory, the one the nodes and the
     manager read, and return that directory. One process per extension, so a failure names it; an
     extension already there is not downloaded again. DuckDB checks each extension's signature when
-    a node loads it."""
+    a node loads it. The SQL goes on stdin, never on the command line, where any local user could
+    read a proxy password (#282)."""
     environ = os.environ if environ is None else environ
     exe = str(duckdb_bin / ("duckdb.exe" if os_name == "win32" else "duckdb"))
     env = {**environ, "DUCKDB_AGENT_MODE": "0"}
     proxy = _duckdb_proxy_sql(environ)
-    prefix = [exe, "-batch", "-noheader", "-list", *(["-cmd", proxy] if proxy else []), ":memory:"]
+    argv = [exe, "-batch", "-bail", "-noheader", "-list", ":memory:"]
 
     def sql(statement: str) -> str:
-        proc = run([*prefix, "-c", statement], capture_output=True, text=True, env=env, timeout=600)
+        script = "".join(f"{s};\n" for s in [*proxy, statement])
+        proc = run(argv, input=script, capture_output=True, text=True, env=env, timeout=600)
         if proc.returncode != 0:
             lines = (proc.stderr or proc.stdout or "").strip().splitlines()
             raise RuntimeError(f"{statement} failed: {lines[0] if lines else f'exit {proc.returncode}'}")

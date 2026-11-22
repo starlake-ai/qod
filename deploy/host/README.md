@@ -128,7 +128,24 @@ Only `install.sh`: PyPI for the CLI (with `--wheel`, for its dependencies only),
 host has none, GitHub for DuckDB, the DuckDB extension repository for the extensions. `switch.sh`
 and every start of an installed version use the cache. Behind a proxy, set `HTTPS_PROXY` in
 `/etc/qod/qod.env` (install.sh hands it to the download run) and in root's environment for
-pip.
+pip. A proxy URL may carry a user and password (`http://user:password@proxy:3128`, special
+characters percent-encoded): install.sh passes the download run's environment through a file
+only the service user reads, deleted once read, never on a command line, and DuckDB gets the
+credentials as `http_proxy_username` / `http_proxy_password` on its standard input.
+
+A proxy that re-signs TLS with a company CA also needs `SSL_CERT_FILE` in `/etc/qod/qod.env`
+(and `PIP_CERT` in root's environment for pip). The file replaces the default list of CAs, so it
+must hold the public CAs as well as the company's (for example the system bundle with the
+company CA added), and the service user must be able to read it (for example mode 0644), since
+the download run reads it as that user. What reads it:
+
+- the manager jar and its `.sha256`, the Java runtime (Adoptium's API, then the package it
+  names) and DuckDB: the CLI fetches them with httpx, which trusts `SSL_CERT_FILE`;
+- the DuckDB extensions: DuckDB fetches them from `http://extensions.duckdb.org`, plain HTTP
+  through the proxy, with no TLS to re-sign, and checks each extension's signature when a node
+  loads it. It reads the proxy from `HTTPS_PROXY` (or `HTTP_PROXY`), not the CA bundle.
+
+No option turns a certificate check off.
 
 Not covered by the cache: an extension that a database's or a pool's initSql installs (it is
 downloaded when a node first starts), and a different `DUCKDB_VERSION` or Java set in

@@ -106,11 +106,12 @@ def test_cached_release_hint_survives_a_corrupt_or_unwritable_cache(respx_mock, 
 
 
 class _FakeDuckdb:
-    """A stand-in for subprocess.run over the duckdb CLI: records each statement, answers the
-    install_path query, fails the statements named in `failing`."""
+    """A stand-in for subprocess.run over the duckdb CLI: records each argv and each script read
+    on stdin, answers the install_path query, fails the statements named in `failing`."""
 
     def __init__(self, failing=()):
         self.argvs = []
+        self.scripts = []
         self.agent_mode_off = []
         self.failing = set(failing)
 
@@ -118,8 +119,9 @@ class _FakeDuckdb:
         import subprocess
 
         self.argvs.append(argv)
+        self.scripts.append(kwargs["input"].splitlines())
         self.agent_mode_off.append(kwargs["env"].get("DUCKDB_AGENT_MODE") == "0")
-        statement = argv[-1]
+        statement = self.scripts[-1][-1].removesuffix(";")
         if statement in self.failing:
             return subprocess.CompletedProcess(argv, 1, "", "HTTP Error: Failed to download\nmore")
         out = "/home/qod/.duckdb/extensions/v2.0.0/linux_amd64/quack.duckdb_extension\n"
@@ -131,12 +133,14 @@ def test_ensure_node_extensions_installs_each_one_with_the_provisioned_cli(tmp_p
 
     fake = _FakeDuckdb()
     got = launcher.ensure_node_extensions(tmp_path / "bin", os_name="linux", run=fake, environ={})
-    statements = [argv[-1] for argv in fake.argvs]
+    statements = [script[-1].removesuffix(";") for script in fake.scripts]
     assert statements[:-1] == [f"INSTALL {name}" for name in launcher.NODE_EXTENSIONS]
     assert {"quack", "httpfs", "avro", "ducklake", "postgres"} <= set(launcher.NODE_EXTENSIONS)
     assert all(argv[0] == str(tmp_path / "bin" / "duckdb") for argv in fake.argvs)
     assert all(fake.agent_mode_off)
-    assert all("-cmd" not in argv for argv in fake.argvs)
+    flags = ["-batch", "-bail", "-noheader", "-list", ":memory:"]
+    assert all(argv[1:] == flags for argv in fake.argvs)
+    assert all(len(script) == 1 for script in fake.scripts)
     assert got.as_posix() == "/home/qod/.duckdb/extensions/v2.0.0/linux_amd64"
 
 
@@ -146,9 +150,37 @@ def test_ensure_node_extensions_sets_the_proxy_duckdb_reads(tmp_path):
     fake = _FakeDuckdb()
     environ = {"HTTPS_PROXY": "http://proxy.internal:3128/"}
     launcher.ensure_node_extensions(tmp_path, os_name="linux", run=fake, environ=environ)
+    proxy = ["SET http_proxy = 'proxy.internal:3128';"]
+    assert all(script[:-1] == proxy for script in fake.scripts)
+
+
+def test_ensure_node_extensions_hands_proxy_credentials_on_stdin_only(tmp_path):
+    # #282: a proxy password never goes on duckdb's command line, and DuckDB gets it in the
+    # settings it sends as the proxy's credentials.
+    from qod_cli import launcher
+
+    fake = _FakeDuckdb()
+    environ = {"HTTP_PROXY": "http://zqx%40user:zqx%3A'pass@[::1]:3128"}
+    launcher.ensure_node_extensions(tmp_path, os_name="linux", run=fake, environ=environ)
     assert all(
-        argv[argv.index("-cmd") + 1] == "SET http_proxy = 'proxy.internal:3128'" for argv in fake.argvs
+        script[:-1]
+        == [
+            "SET http_proxy = '[::1]:3128';",
+            "SET http_proxy_username = 'zqx@user';",
+            "SET http_proxy_password = 'zqx:''pass';",
+        ]
+        for script in fake.scripts
     )
+    assert not any("zqx" in arg for argv in fake.argvs for arg in argv)
+
+
+def test_duckdb_proxy_sql_reads_a_url_with_no_scheme():
+    from qod_cli import launcher
+
+    assert launcher._duckdb_proxy_sql({"https_proxy": "proxy.internal:3128"}) == [
+        "SET http_proxy = 'proxy.internal:3128'"
+    ]
+    assert launcher._duckdb_proxy_sql({}) == []
 
 
 def test_ensure_node_extensions_names_the_one_that_failed(tmp_path):

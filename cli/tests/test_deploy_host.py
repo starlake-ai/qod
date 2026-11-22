@@ -4,6 +4,7 @@ creates a user or touches /opt, /etc or systemd."""
 
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -18,12 +19,15 @@ INSTALL = HOST / "install.sh"
 SWITCH = HOST / "switch.sh"
 UNIT = HOST / "qod-manager.service"
 
-# A venv whose pip "installs" a qod that reports its version and logs each start to $HOME/calls.log
-# with which variables reached it (booleans or test values only, never an environment dump).
+# A venv (whose python is the real interpreter, as install.sh runs its launcher with it) whose pip
+# "installs" a qod that reports its version and logs each start to $HOME/calls.log with which
+# variables reached it (booleans or test values only, never an environment dump), and the command
+# line of every process during that start to $HOME/ps.log.
 FAKE_PYTHON = r"""#!/bin/sh
 [ "$1" = "-m" ] && [ "$2" = "venv" ] || exit 9
 dir="$3"
 mkdir -p "$dir/bin"
+ln -s "$REAL_PYTHON" "$dir/bin/python"
 cat >"$dir/bin/pip" <<'PIP'
 #!/bin/sh
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -38,7 +42,8 @@ done
 cat >"$here/qod" <<QOD
 #!/bin/sh
 if [ "\$1" = "--version" ]; then echo "qod $v"; exit 0; fi
-echo "\$* proxy=\${HTTPS_PROXY:-} pg=\${QOD_PG_PASSWORD:+set} leak=\${LEAK:+set}" >>"\$HOME/calls.log"
+echo "\$* proxy=\${HTTPS_PROXY:-} cert=\${SSL_CERT_FILE:-} pg=\${QOD_PG_PASSWORD:+set} leak=\${LEAK:+set}" >>"\$HOME/calls.log"
+ps -eo args >>"\$HOME/ps.log"
 [ "$v" = "8.8.8" ] && { echo "could not download the jar" >&2; exit 1; }
 exit 0
 QOD
@@ -49,6 +54,19 @@ chmod +x "$dir/bin/pip"
 
 FAKE_SYSTEMCTL = """#!/bin/sh
 echo "$*" >>"$SYSTEMCTL_LOG"
+"""
+
+# runuser as install.sh calls it (-u USER -- COMMAND...), run as this user. Like the real one it
+# stays the waiting parent of COMMAND, so its own command line is visible for the whole run.
+FAKE_RUNUSER = """#!/bin/sh
+[ "$1" = "-u" ] && [ "$3" = "--" ] || exit 9
+echo "$2" >>"$RUNUSER_LOG"
+shift 3
+"$@"
+"""
+
+FAKE_CHOWN = """#!/bin/sh
+echo "$*" >>"$RUNUSER_LOG"
 """
 
 
@@ -66,6 +84,8 @@ def host(tmp_path):
     home.mkdir()
     etc = tmp_path / "etc"
     etc.mkdir()
+    tmp = tmp_path / "tmp"
+    tmp.mkdir()
     (etc / "qod.env").write_text(
         'QOD_PG_PASSWORD=not-for-the-download\nHTTPS_PROXY="http://proxy.internal:3128"\n'
     )
@@ -76,6 +96,8 @@ def host(tmp_path):
         "QOD_HOST_USER": subprocess.run(["id", "-un"], capture_output=True, text=True).stdout.strip(),
         "QOD_HOST_HOME": str(home),
         "PYTHON": str(python),
+        "REAL_PYTHON": sys.executable,
+        "TMPDIR": str(tmp),
         "SYSTEMCTL": str(systemctl),
         "SYSTEMCTL_LOG": str(tmp_path / "systemctl.log"),
         "LEAK": "1",
@@ -83,14 +105,33 @@ def host(tmp_path):
 
     class Host:
         prefix = tmp_path / "opt"
+        env_file = etc / "qod.env"
+        tmpdir = tmp
+        processes = home / "ps.log"
         pin = etc / "version.env"
         calls = home / "calls.log"
         restarts = tmp_path / "systemctl.log"
 
-        def run(self, script, *args):
-            return subprocess.run(
-                ["bash", str(script), *args], env=env, capture_output=True, text=True, timeout=60
-            )
+        runuser_log = tmp_path / "runuser.log"
+
+        def run(self, script, *args, other_user=False):
+            run_env = env
+            if other_user:
+                # Another service user, reached through runuser (faked, with chown, as no test
+                # runs as root): what a root install does.
+                as_root = tmp_path / "as-root"
+                as_root.mkdir(exist_ok=True)
+                for name, body in (("runuser", FAKE_RUNUSER), ("chown", FAKE_CHOWN)):
+                    (as_root / name).write_text(body)
+                    (as_root / name).chmod(0o755)
+                run_env = {
+                    **env,
+                    "PATH": f"{as_root}{os.pathsep}{env['PATH']}",
+                    "QOD_HOST_USER": "root",
+                    "RUNUSER_LOG": str(self.runuser_log),
+                }
+            argv = ["bash", str(script), *args]
+            return subprocess.run(argv, env=run_env, capture_output=True, text=True, timeout=60)
 
         def lines(self, path):
             return path.read_text().splitlines() if path.exists() else []
@@ -117,8 +158,41 @@ def test_install_installs_caches_and_pins_the_first_version(host):
     assert host.pin.read_text() == "QOD_VERSION=1.2.3\n"
     # As the service user, with the download-relevant keys of qod.env and nothing else.
     assert host.lines(host.calls) == [
-        "start --version 1.2.3 --download-only proxy=http://proxy.internal:3128 pg= leak="
+        "start --version 1.2.3 --download-only proxy=http://proxy.internal:3128 cert= pg= leak="
     ]
+
+
+@pytest.mark.parametrize("other_user", [False, True], ids=["same-user", "runuser"])
+def test_install_keeps_qod_env_values_off_every_command_line(host, other_user):
+    # #282: a proxy URL with a password, and #280: a CA bundle for a proxy re-signing TLS.
+    # Made at run time, so that no command line holding this test's source can match it.
+    password = "pw-" + secrets.token_hex(12)
+    proxy = f"http://alice:{password}@proxy.internal:3128"
+    host.env_file.write_text(
+        f"QOD_PG_PASSWORD=not-for-the-download\nHTTPS_PROXY={proxy}\n"
+        "SSL_CERT_FILE='/etc/ssl/certs/company-and-public.pem'\n"
+    )
+    result = host.run(INSTALL, "1.2.3", other_user=other_user)
+    assert result.returncode == 0, result.stderr
+    if other_user:
+        (chown, user) = host.lines(host.runuser_log)
+        assert chown.startswith(f"-R -- root {host.tmpdir}/qod-install.") and user == "root"
+    # The download run gets both values in its environment...
+    assert host.lines(host.calls) == [
+        f"start --version 1.2.3 --download-only proxy={proxy}"
+        " cert=/etc/ssl/certs/company-and-public.pem pg= leak="
+    ]
+    # ...no process held the password on its command line while it ran...
+    snapshot = host.processes.read_text()
+    assert "--download-only" in snapshot
+    assert password not in snapshot
+    # ...and the file that carried them is gone.
+    assert list(host.tmpdir.iterdir()) == []
+
+
+def test_install_removes_the_environment_file_when_the_download_fails(host):
+    assert host.run(INSTALL, "8.8.8").returncode != 0
+    assert list(host.tmpdir.iterdir()) == []
 
 
 def test_install_again_only_checks_the_cache_and_leaves_other_versions(host):
@@ -179,8 +253,8 @@ def test_switch_and_switch_back(host):
     assert host.lines(host.restarts) == ["restart qod-manager", "restart qod-manager"]
     # Each switch checked the cache of the version it moved to first.
     assert host.lines(host.calls)[-2:] == [
-        "start --version 1.2.4 --download-only proxy=http://proxy.internal:3128 pg= leak=",
-        "start --version 1.2.3 --download-only proxy=http://proxy.internal:3128 pg= leak=",
+        "start --version 1.2.4 --download-only proxy=http://proxy.internal:3128 cert= pg= leak=",
+        "start --version 1.2.3 --download-only proxy=http://proxy.internal:3128 cert= pg= leak=",
     ]
 
 
@@ -272,7 +346,7 @@ def test_install_with_a_wheel_installs_a_copy_of_it_and_nothing_from_the_index(h
     assert (version_dir / ".qod-installed").is_file()
     assert host.pin.read_text() == "QOD_VERSION=1.2.3\n"
     assert host.lines(host.calls) == [
-        "start --version 1.2.3 --download-only proxy=http://proxy.internal:3128 pg= leak="
+        "start --version 1.2.3 --download-only proxy=http://proxy.internal:3128 cert= pg= leak="
     ]
 
 
