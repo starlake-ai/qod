@@ -760,6 +760,7 @@ jobs:
             -t "${{ env.WORKER_REGISTRY_IMAGE }}:${minor}" \
             -t "${{ env.WORKER_REGISTRY_IMAGE }}:${major}" \
             -t "${{ env.WORKER_REGISTRY_IMAGE }}:latest" \
+            --sbom=true --provenance=mode=max \
             -f deploy/docker/worker-alias.Dockerfile --push deploy/docker
 
       - name: Inspect manifest

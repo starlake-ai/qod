@@ -300,6 +300,7 @@ jobs:
             --build-arg "BASE=${{ env.REGISTRY_IMAGE }}:${version}" \
             -t "starlakeai/quack-on-demand-worker:${version}" \
             -t "starlakeai/quack-on-demand-worker:latest-snapshot" \
+            --sbom=true --provenance=mode=max \
             -f deploy/docker/worker-alias.Dockerfile --push deploy/docker
 
       - name: Install cosign
