@@ -2581,7 +2581,8 @@ loads. One container per server (normally one per host):
 
 - Run the manager and every server at the same version. `starlakeai/quack-on-demand-worker` is a
   deprecated alias of the image in its worker role.
-- Healthchecks: `qod healthcheck worker` (the join runs and its last heartbeat was accepted) and
+- Healthchecks: `qod healthcheck worker` (the join runs and keeps heartbeating, whatever the manager
+  answers, so a manager outage never restarts the workers) and
   `qod healthcheck manager` (`/ready` answers 200), each with a `timeout:`.
 - `QOD_FLEET_NAME` and `QOD_FLEET_ADVERTISE_HOST` are required: a container's hostname changes on every
   recreate (each would join as a new server) and its own IP is a bridge address the manager cannot reach.

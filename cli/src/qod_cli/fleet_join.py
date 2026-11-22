@@ -42,8 +42,11 @@ STDERR_TAIL = 20
 # the node would never restart. The cause is usually the last thing the node wrote, so the end is kept.
 ERROR_REPORT_CHARS = 8192
 PIDFILE = "node.pid"
-# The last accepted heartbeat, for `qod healthcheck worker`: {"at": <epoch s>, "pid": <join pid>,
-# "intervalSec": <the manager's heartbeatSec>}, rewritten after each accepted heartbeat.
+# The join loop's last heartbeat, for `qod healthcheck worker`: {"at": <epoch s of the attempt>,
+# "acceptedAt": <epoch s of the last one the manager accepted, or null>, "pid": <join pid>,
+# "intervalSec": <the wait before the next attempt>}, rewritten after every attempt, answered or not.
+# The worker's health is the loop's, not the manager's: restarting a worker while the manager is
+# down or hung fixes nothing and kills its node.
 HEARTBEAT_FILE = "heartbeat.json"
 # The spill folders a node of this server can leave in its spill directory: the spawn script's
 # per-node folder and qod-node's leaf under a superuser's temp_directory (the same patterns as
@@ -452,23 +455,24 @@ def _pid_alive(pid: int) -> bool:
 
 def worker_health(state_dir: Path, *, now: float | None = None,
                   pid_alive: Callable[[int], bool] = _pid_alive) -> str | None:
-    """None when the join process recorded in `state_dir` lives and its last heartbeat was accepted
-    recently, else why not. Recently: within three heartbeat intervals, and never less than 30 s,
-    so one slow manager answer does not make a worker unhealthy."""
+    """None when the join process recorded in `state_dir` lives and its heartbeat loop ran recently,
+    whatever the manager answered, else why not. Recently: within three waits plus the 10 s request
+    timeout each, and never less than 60 s. A manager that is down, hung or refusing leaves its
+    workers healthy: restarting them fixes nothing and kills their nodes."""
     path = Path(state_dir) / HEARTBEAT_FILE
     try:
         rec = json.loads(path.read_text())
         at, pid, interval = float(rec["at"]), int(rec["pid"]), float(rec.get("intervalSec", 5))
     except FileNotFoundError:
-        return f"no accepted heartbeat yet ({path} is missing)"
+        return f"no heartbeat yet ({path} is missing)"
     except (OSError, ValueError, KeyError, TypeError) as exc:
         return f"cannot read {path}: {exc}"
     if pid <= 1 or not pid_alive(pid):
         return f"the join process (pid {pid}) is not running"
     age = (time.time() if now is None else now) - at
-    limit = max(30.0, 3 * interval)
+    limit = max(60.0, 3 * (interval + 10))
     if age > limit:
-        return f"last accepted heartbeat {age:.0f}s ago (limit {limit:.0f}s)"
+        return f"the join loop has not heartbeated for {age:.0f}s (limit {limit:.0f}s)"
     return None
 
 
@@ -506,6 +510,8 @@ class FleetMember:
         self.next_restart_at: float | None = None
         # (pool, field, key) of each assignment key already named as dropped, so it is named once.
         self.dropped_keys: set[tuple[str, str, str]] = set()
+        # Wall-clock time of the last heartbeat the manager accepted, None before the first.
+        self.last_accepted_at: float | None = None
         self.state_dir.mkdir(parents=True, exist_ok=True)
 
     # ---- pidfile ----
@@ -739,6 +745,12 @@ class FleetMember:
             self.failures = 0
 
     def run_once(self) -> float:
+        """One heartbeat, then its record for `qod healthcheck worker`; returns the wait before the next."""
+        interval = self._heartbeat()
+        self._write_heartbeat(interval)
+        return interval
+
+    def _heartbeat(self) -> float:
         cpus, mem = self.capacity()
         body = {"name": self.name, "advertiseHost": self.advertise_host, "nodePort": self.node_port,
                 "qodVersion": __version__, "os": f"{sys.platform}-{platform.machine()}",
@@ -777,7 +789,7 @@ class FleetMember:
         try:
             reply = r.json()
             interval = float(reply.get("heartbeatSec", 5))
-            self._write_heartbeat(interval)
+            self.last_accepted_at = time.time()
             self._note_approval(reply.get("approval"))
             self._reconcile(reply.get("assignment"))
             return interval
@@ -821,11 +833,12 @@ class FleetMember:
         return self.state_dir / HEARTBEAT_FILE
 
     def _write_heartbeat(self, interval: float) -> None:
-        """Record the accepted heartbeat for `qod healthcheck worker`, written aside and renamed into
+        """Record the heartbeat attempt for `qod healthcheck worker`, written aside and renamed into
         place so a reader never sees half a file. A failed write is no reason to stop heartbeating."""
         tmp = self.heartbeat_file.with_name(f".{HEARTBEAT_FILE}.{os.getpid()}")
         try:
-            tmp.write_text(json.dumps({"at": time.time(), "pid": os.getpid(), "intervalSec": interval}))
+            tmp.write_text(json.dumps({"at": time.time(), "acceptedAt": self.last_accepted_at,
+                                       "pid": os.getpid(), "intervalSec": interval}))
             os.replace(tmp, self.heartbeat_file)
         except OSError as exc:
             sys.stderr.write(f"qod fleet join: could not record the heartbeat in {self.heartbeat_file}: {exc}\n")
