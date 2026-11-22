@@ -90,6 +90,15 @@
   A column covered by both a wildcard mask and a named mask can now also be refused when it is
   read through a derived table or a CTE, or by a correlated subquery whose unqualified column
   binds to the outer table; give such a column one mask.
+- **Column policies hold for a column named like a SQL keyword.** A mask or deny on a column
+  named `current_date`, `current_time`, `current_timestamp`, `current` or `current_timezone` (a
+  CSV or Parquet header can create one) did not apply: the policy rewriter read the bare name as
+  the keyword, while DuckDB reads the column, so its raw value reached the client. Such a name is
+  now read as DuckDB binds it: the column when the select's own FROM has it, so its mask or deny
+  applies in every clause, and the function otherwise. A column named `current_user`,
+  `session_user`, `user`, `current_role`, `current_schema`, `current_catalog`, `localtime` or
+  `localtimestamp`, read bare in a subquery whose own FROM does not have it, is now the function,
+  as DuckDB reads it, instead of a refusal.
 - **A tenant-less account that is not a superuser no longer reaches data.** A superuser demoted to
   `kind user` left the management plane but still connected to every pool as a superuser, over
   FlightSQL and the native front door (`superuser=true` and the password) and through a personal
