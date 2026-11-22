@@ -22,6 +22,25 @@
   deleted is refused on its next statement on the replica that made the change, and on another
   replica once that one has seen the change, through its NOTIFY or its periodic snapshot refresh.
 
+### Changed
+
+- `qod user create --superuser` now creates an account of kind `admin`. Earlier releases created
+  kind `user`, which was never a superuser.
+
+### Added
+
+- **Platform staff roles for modules.** A superuser can create tenant-less `staff` users and give
+  them platform roles, named bundles of the permissions that manager modules declare
+  (`qod platform permission list`, `qod platform role create`, `qod user create --kind staff
+  --platform-role NAME`, the console's Settings > Staff page). A staff user signs in through the
+  system login and reaches only the module routes its permissions allow: no tenant, pool, node or
+  user in core, and no data. Revoking a role or disabling the user takes effect on the next
+  request. Modules declare `permissions`, `staffPathPrefixes` and `consolePages` and check a caller
+  with `ManagerContext.platformCallerOf`; the manager refuses to boot on a malformed declaration.
+- **Module pages in the admin console.** A module's page appears in a Platform section, at
+  `/ui/x/<module>/<page>`, for superusers and for staff holding its permission, inside the console's
+  layout and session (console page contract 1).
+
 ## 0.14.1
 
 ### Upgrading
