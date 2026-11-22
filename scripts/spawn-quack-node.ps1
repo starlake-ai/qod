@@ -675,16 +675,31 @@ try { $ownerTicks = (Get-Process -Id $PID).StartTime.Ticks.ToString() } catch {}
 
 # DuckDB does NOT honour HTTP_PROXY/HTTPS_PROXY for `INSTALL <extension>`
 # downloads - those go through libcurl via the SQL `SET http_proxy=...`
-# setting only. Emit the SET line only when a proxy env var is present.
+# setting only. Emit the SET lines only when a proxy env var is present.
+# http_proxy takes "host:port" only (a user and password there are refused at the first HTTP
+# request, in an error quoting them to whoever ran the statement); a URL's user and password go
+# in http_proxy_username / http_proxy_password, percent-decoded (#287). Mirrors spawn-quack-node.sh.
 $proxyUrl = $null
 foreach ($n in 'HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY', 'https_proxy') {
   $v = [Environment]::GetEnvironmentVariable($n)
   if (-not [string]::IsNullOrEmpty($v)) { $proxyUrl = $v; break }
 }
-$proxySql = ''
+$proxySql = @()
 if (-not [string]::IsNullOrEmpty($proxyUrl)) {
-  $hostPort = $proxyUrl -replace '^https?://', '' -replace '/$', ''
-  $proxySql = "SET http_proxy = '$hostPort';"
+  $proxyAuthority = $proxyUrl
+  $schemeEnd = $proxyAuthority.IndexOf('://')
+  if ($schemeEnd -ge 0) { $proxyAuthority = $proxyAuthority.Substring($schemeEnd + 3) }
+  $proxyAuthority = ($proxyAuthority -split '[/?#]', 2)[0]
+  $at = $proxyAuthority.LastIndexOf('@')
+  $proxySql += "SET http_proxy = '$(Sql-Quote $proxyAuthority.Substring($at + 1))';"
+  if ($at -gt 0) {
+    $userInfo = $proxyAuthority.Substring(0, $at)
+    $colon = $userInfo.IndexOf(':')
+    $proxyUser = if ($colon -ge 0) { $userInfo.Substring(0, $colon) } else { $userInfo }
+    $proxyPassword = if ($colon -ge 0) { $userInfo.Substring($colon + 1) } else { '' }
+    $proxySql += "SET http_proxy_username = '$(Sql-Quote ([uri]::UnescapeDataString($proxyUser)))';"
+    $proxySql += "SET http_proxy_password = '$(Sql-Quote ([uri]::UnescapeDataString($proxyPassword)))';"
+  }
 }
 
 $encrypted    = [Environment]::GetEnvironmentVariable('encrypted')
@@ -736,7 +751,7 @@ $sb = [System.Text.StringBuilder]::new()
 # The first line: this spawn's nonce, which qod-node compares with the one it reads itself and, on a
 # mismatch (or without this line), refuses to run the init SQL at all. Mirrors spawn-quack-node.sh.
 if ($initNonce -cmatch '^[0-9a-f]{32,128}$') { [void]$sb.AppendLine("-- qod:init-nonce $initNonce") }
-if (-not [string]::IsNullOrEmpty($proxySql))  { [void]$sb.AppendLine($proxySql) }
+foreach ($line in $proxySql) { [void]$sb.AppendLine($line) }
 # Before the tenant-db's initSql, so an operator's own SET still wins.
 [void]$sb.AppendLine("SET temp_directory = '$($spillDir.Replace("'", "''"))';")
 # qod-node opens the database with autoinstall_known_extensions off (decision 17): install, without

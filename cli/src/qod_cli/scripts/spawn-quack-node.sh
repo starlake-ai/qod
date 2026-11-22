@@ -509,6 +509,25 @@ fi
 # HTTP, which the manager speaks (node TLS: #27).
 NODE_BIND="${QOD_NODE_BIND:-0.0.0.0}"
 
+# $1 with each %XX decoded, as a URL's user and password are written; anything else is kept.
+percent_decode() {
+  local s="$1" out="" hex ch
+  while [[ "$s" == *%* ]]; do
+    out+="${s%%\%*}"
+    s="${s#*\%}"
+    hex="${s:0:2}"
+    if [[ "$hex" =~ ^[0-9A-Fa-f]{2}$ ]]; then
+      # shellcheck disable=SC2059 # $hex is two hex digits, checked above
+      printf -v ch "\\x$hex"
+      out+="$ch"
+      s="${s:2}"
+    else
+      out+="%"
+    fi
+  done
+  printf '%s' "$out$s"
+}
+
 # DuckDB does NOT honour the HTTP_PROXY / HTTPS_PROXY env vars for
 # `INSTALL <extension>` downloads - those have to be set via the SQL
 # `SET http_proxy=...` setting (duckdb forwards to libcurl through that
@@ -516,14 +535,29 @@ NODE_BIND="${QOD_NODE_BIND:-0.0.0.0}"
 # INSTALL hangs and the node never reaches `quack_serve`. We emit the
 # SET lines only when a proxy env var is present, so non-proxied
 # environments are unaffected.
+#
+# http_proxy takes "host:port" only. A value holding a user and password is stored as is, then
+# refused at the first HTTP request with an error that quotes it, password included, to whoever
+# ran that statement; DuckDB 2.0 also takes HTTP_PROXY, raw, as the setting's default. So the SET
+# always runs, and a URL's user and password go in http_proxy_username and http_proxy_password,
+# percent-decoded, which DuckDB sends as the proxy's Basic credentials (#287).
+# The same split as DuckDbProxy (the manager's DuckLake initializer), the .ps1 twin and the qod
+# CLI's _duckdb_proxy_sql.
 PROXY_SQL=""
 PROXY_URL="${HTTP_PROXY:-${http_proxy:-${HTTPS_PROXY:-${https_proxy:-}}}}"
 if [[ -n "$PROXY_URL" ]]; then
-  # DuckDB wants "host:port" without the scheme prefix.
-  HOSTPORT="${PROXY_URL#http://}"
-  HOSTPORT="${HOSTPORT#https://}"
-  HOSTPORT="${HOSTPORT%/}"
-  PROXY_SQL="SET http_proxy = '$HOSTPORT';"
+  proxy_authority="${PROXY_URL#*://}"
+  proxy_authority="${proxy_authority%%[/?#]*}"
+  PROXY_SQL="SET http_proxy = '$(sql_quote "${proxy_authority##*@}")';"
+  if [[ "$proxy_authority" == *@* && -n "${proxy_authority%@*}" ]]; then
+    proxy_userinfo="${proxy_authority%@*}"
+    proxy_password=""
+    if [[ "$proxy_userinfo" == *:* ]]; then
+      proxy_password="${proxy_userinfo#*:}"
+    fi
+    PROXY_SQL+=$'\n'"SET http_proxy_username = '$(sql_quote "$(percent_decode "${proxy_userinfo%%:*}")")';"
+    PROXY_SQL+=$'\n'"SET http_proxy_password = '$(sql_quote "$(percent_decode "$proxy_password")")';"
+  fi
 fi
 
 # Cgroup-aware memory_limit / threads, K8s pods only (no-op elsewhere).

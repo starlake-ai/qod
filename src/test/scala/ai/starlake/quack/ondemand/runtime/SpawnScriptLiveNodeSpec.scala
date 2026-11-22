@@ -182,6 +182,30 @@ class SpawnScriptLiveNodeSpec
     }
   }
 
+  // #287: a proxy URL's user and password reach a real node in DuckDB's own credential settings.
+  // In http_proxy, DuckDB refused the whole value, quoting it (the password) in the node's log.
+  // The INSTALLs make no request: the run's extension cache already holds every one.
+  "a node behind a proxy with credentials" should "set them apart from http_proxy" in {
+    val password = "zqx" + java.util.UUID.randomUUID().toString.take(8)
+    val proxy    = s"http://zqx%40user:$password%3A%27x@127.0.0.1:9"
+    val env = ai.starlake.quack.ondemand.DuckDbProxy.EnvKeys.map(_ -> "") :+ ("HTTP_PROXY" -> proxy)
+    withNode("", env*) { port =>
+      val log = Files.readString(tempDir.resolve("node.log"))
+      withClue("the node's log quotes the proxy password:")(log.contains(password) shouldBe false)
+      log should not include "http_proxy"
+      onNode(port, "SELECT current_setting('http_proxy')") shouldBe List("127.0.0.1:9")
+      onNode(port, "SELECT current_setting('http_proxy_username')") shouldBe List("zqx@user")
+      onNode(port, "SELECT current_setting('http_proxy_password')") shouldBe List(s"$password:'x")
+      // A request through the proxy (none listens on port 9) fails on the connection, and its
+      // error, which goes back to whoever ran the statement, names no credential.
+      val (rc, _, err) = onNodeResult(port, "SELECT * FROM read_csv('https://127.0.0.1:9/x.csv')")
+      rc should not be 0
+      withClue("the statement's error quotes the proxy password:")(
+        err.contains(password) shouldBe false
+      )
+    }
+  }
+
   // Task 20 Part C, live: a tenant admin's pool initSql reaches the node inside a marked section,
   // where qod-node runs its SET and skips its CREATE SECURE VIEW over a host file; the node serves.
   // The same SQL written by a superuser runs as written.
