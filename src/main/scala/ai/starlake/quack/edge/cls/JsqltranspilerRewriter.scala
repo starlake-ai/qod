@@ -1,6 +1,7 @@
 package ai.starlake.quack.edge.cls
 
 import ai.starlake.quack.ondemand.state.RoleColumnPolicy
+import ai.starlake.sql.IdentifierFold.same
 import ai.starlake.transpiler.JSQLColumResolver
 import ai.starlake.transpiler.schema.JdbcMetaData
 import net.sf.jsqlparser.expression.Expression
@@ -71,9 +72,7 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
     // A table the statement names outside the defaults (a federated source, another schema) is
     // registered where it is named too, so `pgfed.public.users` resolves to its own columns.
     homes.foreach { case (tableKey, (homeCatalog, homeSchema)) =>
-      if !(homeCatalog.equalsIgnoreCase(currentCatalog) && homeSchema.equalsIgnoreCase(
-          currentSchema
-        ))
+      if !(same(homeCatalog, currentCatalog) && same(homeSchema, currentSchema))
       then
         schema.get(tableKey).toList.flatten.foreach { col =>
           metaData.addTable(
@@ -168,8 +167,10 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
                       // as it found it; a covered column still in the tree afterwards would
                       // reach the node unmasked, so it denies (ResidualColumns).
                       val suspects     = ResidualColumns.suspects(sel, policies, schema)
-                      val (changed, _) = applyPolicies(sel, projectionOrigins, policies)
-                      ResidualColumns.unmasked(sel, suspects) match
+                      val applied      = new Applied()
+                      val (changed, _) =
+                        applyPolicies(sel, projectionOrigins, policies, Nil, applied)
+                      ResidualColumns.unmasked(sel, suspects, applied) match
                         case Some(reason) => Denied(reason)
                         case None => if changed then Rewritten(sel.toString) else Passthrough
                     catch case e: DenyException => Denied(e.reason)
@@ -265,26 +266,26 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
     // unknown table lands in the schema map with Nil, which the resolver also refuses
     // to register), or the name is a seeded system-schema table.
     def knownUserTable(name: String): Boolean =
-      schema.exists((k, cols) => k.equalsIgnoreCase(name) && cols.nonEmpty)
+      schema.exists((k, cols) => same(k, name) && cols.nonEmpty)
     def known(raw: String): Boolean =
       raw.split('.').toList.map(unquote).reverse match
         case Nil                => true
         case name :: Nil        => knownUserTable(name)
         case name :: q1 :: rest =>
           val sysKnown = SystemSchemaColumns.all.keys.exists { case (s, t) =>
-            s.equalsIgnoreCase(q1) && t.equalsIgnoreCase(name)
+            same(s, q1) && same(t, name)
           }
           val qualifierOk = rest match
             case Nil      => true
-            case c :: Nil => c.equalsIgnoreCase(currentCatalog)
+            case c :: Nil => same(c, currentCatalog)
             case _        => false
-          val userKnown = q1.equalsIgnoreCase(currentSchema) && knownUserTable(name) && qualifierOk
+          val userKnown = same(q1, currentSchema) && knownUserTable(name) && qualifierOk
           // Or the table is named where the caller located it (its home, beside the defaults).
           val homeKnown = knownUserTable(name) &&
             homes.exists { case (k, (hc, hs)) =>
-              k.equalsIgnoreCase(name) && hs.equalsIgnoreCase(q1) && (rest match
-                case Nil      => hc.equalsIgnoreCase(currentCatalog)
-                case c :: Nil => c.equalsIgnoreCase(hc)
+              same(k, name) && same(hs, q1) && (rest match
+                case Nil      => same(hc, currentCatalog)
+                case c :: Nil => same(c, hc)
                 case _        => false)
             }
           sysKnown || userKnown || homeKnown
@@ -302,10 +303,11 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
       sel: Select,
       origins: IndexedSeq[(String, String)],
       policies: List[RoleColumnPolicy],
-      outerScope: List[(String, String)] = Nil
+      outerScope: List[(String, String)],
+      applied: Applied
   ): (Boolean, Select) =
     val changed = new java.util.concurrent.atomic.AtomicBoolean(false)
-    val visitor = new PolicyVisitor(policies, changed)
+    val visitor = new PolicyVisitor(policies, changed, applied)
 
     // Recurse into CTE bodies first. Top-level lineage doesn't apply inside the CTE body, so pass
     // empty origins; the visitor will fall back to each Column's own (table, column) qualifier
@@ -316,7 +318,8 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
         val wi = it.next()
         Option(wi.getParenthesedStatement).foreach {
           case ps: net.sf.jsqlparser.statement.select.ParenthesedSelect =>
-            val (innerChanged, _) = applyPolicies(ps.getSelect, IndexedSeq.empty, policies)
+            val (innerChanged, _) =
+              applyPolicies(ps.getSelect, IndexedSeq.empty, policies, Nil, applied)
             if innerChanged then changed.set(true)
           case _ => ()
         }
@@ -328,13 +331,13 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
         // and its own per-column policy lookup; outer-query origins don't apply, but a set
         // operation nested in a correlated subquery still sees the enclosing scope.
         Option(sol.getSelects).foreach(_.forEach { arm =>
-          val (armChanged, _) = applyPolicies(arm, IndexedSeq.empty, policies, outerScope)
+          val (armChanged, _) = applyPolicies(arm, IndexedSeq.empty, policies, outerScope, applied)
           if armChanged then changed.set(true)
         })
       case wrap: net.sf.jsqlparser.statement.select.ParenthesedSelect =>
         // Top-level parenthesized SELECT: unwrap and recurse.
         val (innerChanged, _) =
-          applyPolicies(wrap.getSelect, IndexedSeq.empty, policies, outerScope)
+          applyPolicies(wrap.getSelect, IndexedSeq.empty, policies, outerScope, applied)
         if innerChanged then changed.set(true)
       case ps: PlainSelect =>
         // FROM-tables of this select (key -> table). Single-table case lets the visitor resolve
@@ -359,7 +362,7 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
             // Derived tables see the outer scope too: only legal for LATERAL, but
             // over-masking an illegal reference is harmless (the engine rejects it).
             val (innerChanged, _) =
-              applyPolicies(sub.getSelect, IndexedSeq.empty, policies, childScope)
+              applyPolicies(sub.getSelect, IndexedSeq.empty, policies, childScope, applied)
             if innerChanged then changed.set(true)
           case _ => ()
         }
@@ -368,7 +371,7 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
             case sub: net.sf.jsqlparser.statement.select.ParenthesedSelect =>
               derivedPolicies ++= deriveOuterPolicies(sub, policies)
               val (innerChanged, _) =
-                applyPolicies(sub.getSelect, IndexedSeq.empty, policies, childScope)
+                applyPolicies(sub.getSelect, IndexedSeq.empty, policies, childScope, applied)
               if innerChanged then changed.set(true)
             case _ => ()
           }
@@ -516,13 +519,13 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
                   case col: net.sf.jsqlparser.schema.Column =>
                     val baseTable = Option(col.getTable).map(t => unquoteName(t.getName)) match
                       case Some(key) =>
-                        innerFromTables.find(_._1.equalsIgnoreCase(key)).map(_._2).getOrElse(key)
+                        innerFromTables.find(e => same(e._1, key)).map(_._2).getOrElse(key)
                       case None =>
                         if innerFromTables.size == 1 then innerFromTables.head._2 else ""
                     val baseCol     = unquoteName(col.getColumnName)
                     val exposedName =
                       Option(si.getAlias).map(a => unquoteName(a.getName)).getOrElse(baseCol)
-                    matchingPolicy(baseTable, baseCol, policies).foreach { p =>
+                    matchingPolicy(List(baseTable -> baseCol), policies).foreach { p =>
                       buf += p.copy(tableName = subAlias, columnName = exposedName)
                     }
                   case _ => ()
@@ -531,7 +534,8 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
 
   private final class PolicyVisitor(
       policies: List[RoleColumnPolicy],
-      changed: java.util.concurrent.atomic.AtomicBoolean
+      changed: java.util.concurrent.atomic.AtomicBoolean,
+      applied: Applied
   ):
     var topLevelOverride: Option[(String, String)] = None
     var fromTables: List[(String, String)]         = Nil
@@ -548,7 +552,7 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
           // Alias or table-name qualifier - local FROM items first, then the outer scope
           // (a correlated subquery referencing the outer query's alias).
           (fromTables ::: outerTables)
-            .find(_._1.equalsIgnoreCase(key))
+            .find(e => same(e._1, key))
             .map(_._2)
             .getOrElse(key)
         case None =>
@@ -565,14 +569,23 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
     def visit(expr: Expression): Expression =
       expr match
         case col: net.sf.jsqlparser.schema.Column =>
-          val (tableName, columnName) = topLevelOverride.getOrElse {
-            (resolveTable(col), col.getColumnName)
-          }
-          matchingPolicy(tableName, columnName, allPolicies) match
+          // The resolver's lineage of a projection slot, when it has one, else the column's own
+          // binding from the FROM clauses. The resolver keys names by Java's case rules and can
+          // name another object (security review R2-I1), so once it finds a policy, the policies
+          // of the column's own binding are judged with it: a deny or a named policy there still
+          // wins. When it finds none, the column stays and the backstop judges it.
+          val bound                   = (resolveTable(col), col.getColumnName)
+          val (tableName, columnName) = topLevelOverride.getOrElse(bound)
+          val resolved                = matchingPolicy(List(tableName -> columnName), allPolicies)
+          val judged                  =
+            if resolved.isEmpty || topLevelOverride.forall(_ == bound) then resolved
+            else matchingPolicy(List(tableName -> columnName, bound), allPolicies)
+          judged match
             case Some(p) if p.action == RoleColumnPolicy.ActionDeny =>
               throw DenyException(s"column $tableName.$columnName is denied")
             case Some(p) =>
               changed.set(true)
+              applied.put(col, p)
               CCJSqlParserUtil.parseExpression(p.transformSql.get)
             case None => col
 
@@ -786,7 +799,7 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
           topLevelOverride = None
           Option(ac.getSelect).foreach { sel =>
             val (innerChanged, _) =
-              applyPolicies(sel, IndexedSeq.empty, policies, fromTables ::: outerTables)
+              applyPolicies(sel, IndexedSeq.empty, policies, fromTables ::: outerTables, applied)
             if innerChanged then changed.set(true)
           }
           topLevelOverride = saved
@@ -800,28 +813,57 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
           val saved = topLevelOverride
           topLevelOverride = None
           val (innerChanged, _) =
-            applyPolicies(ps.getSelect, IndexedSeq.empty, policies, fromTables ::: outerTables)
+            applyPolicies(
+              ps.getSelect,
+              IndexedSeq.empty,
+              policies,
+              fromTables ::: outerTables,
+              applied
+            )
           if innerChanged then changed.set(true)
           topLevelOverride = saved
           ps
 
         case other => other
 
-  /** Names are compared unquoted ([[ai.starlake.sql.QuotedIdentifier]]): the parser keeps the
-    * quotes of `"c_email"` on the column it hands the visitor, and a quoted name that matched no
-    * policy was left in place for the backstop to deny instead of being masked.
+  /** The one policy that applies to `table.column`, None when none matches (owner ruling D21,
+    * security review I1). Every matching policy is read, never the first: their order follows the
+    * roles and the order the statement names its tables, which a caller steers (a CTE the node
+    * never binds listed first). A deny wins; otherwise a policy naming the table beats a wildcard
+    * one; two different masks left are a refusal ([[JsqltranspilerRewriter.ConflictingPolicies]],
+    * thrown as a `DenyException`), never a choice. Names are compared unquoted
+    * ([[ai.starlake.sql.QuotedIdentifier]]: the parser keeps the quotes of `"c_email"` on the
+    * column it hands the visitor) and as DuckDB binds them ([[ai.starlake.sql.IdentifierFold]]).
+    *
+    * The table and column handed here come from the resolver (jsqltranspiler), which folds names
+    * with Java's case rules: for a reference to `"Clés"` it can name a CTE `"clÉs"` or a table
+    * `"clÉs"` of the statement, and the reverse. So a policy whose table or column equals the
+    * reference only under that broader fold is read too, and it can only make the outcome stricter:
+    * with the policy chosen above it, a deny wins and a different mask is a conflict.
     */
   private def matchingPolicy(
-      table: String,
-      column: String,
+      bindings: List[(String, String)],
       policies: List[RoleColumnPolicy]
   ): Option[RoleColumnPolicy] =
-    val t = unquoteName(table)
-    val c = unquoteName(column)
-    policies.find { p =>
-      (p.tableName == RoleColumnPolicy.Wildcard || p.tableName.equalsIgnoreCase(t)) &&
-      p.columnName.equalsIgnoreCase(c)
-    }
+    val names                       = bindings.map((t, c) => (unquoteName(t), unquoteName(c)))
+    val (t, c)                      = names.head
+    def covers(p: RoleColumnPolicy) = names.exists((t, c) =>
+      (p.tableName == RoleColumnPolicy.Wildcard || same(p.tableName, t)) && same(p.columnName, c)
+    )
+    def resolverMayMean(p: RoleColumnPolicy) =
+      !covers(p) && names.exists((t, c) =>
+        (p.tableName == RoleColumnPolicy.Wildcard || p.tableName.equalsIgnoreCase(t)) &&
+          p.columnName.equalsIgnoreCase(c)
+      )
+    val matched = policies.filter(covers)
+    val chosen  =
+      JsqltranspilerRewriter.decide(matched, t, c).fold(r => throw DenyException(r), identity)
+    policies.filter(resolverMayMean) match
+      case Nil   => chosen
+      case loose =>
+        JsqltranspilerRewriter
+          .strictest(chosen.toList ++ loose, t, c)
+          .fold(r => throw DenyException(r), identity)
 
   private def unquoteName(s: String): String = ai.starlake.sql.QuotedIdentifier.unquote(s)
 
@@ -854,6 +896,57 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
   * field read of that column (DuckDB's fallback when the binding `q` lacks the column), whatever
   * the binding has. The check can only add denials.
   */
+/** The policy the masking visitor replaced each column node with, by the node's identity: what
+  * [[ResidualColumns.unmasked]] holds against the policy covering the column's own binding.
+  */
+private[cls] final class Applied:
+  private val byColumn =
+    new java.util.IdentityHashMap[net.sf.jsqlparser.schema.Column, RoleColumnPolicy]()
+  def put(c: net.sf.jsqlparser.schema.Column, p: RoleColumnPolicy): Unit = byColumn.put(c, p): Unit
+  def get(c: net.sf.jsqlparser.schema.Column): Option[RoleColumnPolicy]  = Option(byColumn.get(c))
+
+object JsqltranspilerRewriter:
+
+  /** The refusal of a column two different masks cover, none of them a deny and none naming the
+    * table more closely than the other (owner ruling D21): picking one would let the order of the
+    * policies decide what the caller reads.
+    */
+  def ConflictingPolicies(table: String, column: String): String =
+    s"conflicting column policies on $table.$column"
+
+  /** The policy D21 picks among `matched`, all covering `table.column`: a deny wins, then the
+    * policies naming the table over the wildcard ones; Left(refusal) when two different masks
+    * remain.
+    */
+  private[cls] def decide(
+      matched: List[RoleColumnPolicy],
+      table: String,
+      column: String
+  ): Either[String, Option[RoleColumnPolicy]] =
+    matched.find(_.action == RoleColumnPolicy.ActionDeny) match
+      case Some(deny) => Right(Some(deny))
+      case None       =>
+        val named = matched.filter(_.tableName != RoleColumnPolicy.Wildcard)
+        strictest(if named.nonEmpty then named else matched, table, column)
+
+  /** A deny among `ps`, else their one mask; Left(refusal) when two different masks remain. */
+  private[cls] def strictest(
+      ps: List[RoleColumnPolicy],
+      table: String,
+      column: String
+  ): Either[String, Option[RoleColumnPolicy]] =
+    ps.find(_.action == RoleColumnPolicy.ActionDeny) match
+      case Some(deny) => Right(Some(deny))
+      case None       =>
+        ps.distinctBy(sameOutcome) match
+          case Nil        => Right(None)
+          case one :: Nil => Right(Some(one))
+          case _          => Left(ConflictingPolicies(table, column))
+
+  /** What a policy does to a column: two policies alike here give the same answer. */
+  private[cls] def sameOutcome(p: RoleColumnPolicy): (String, Option[String]) =
+    (p.action, p.transformSql.map(_.trim))
+
 private[cls] object ResidualColumns:
   import scala.jdk.CollectionConverters._
   import ai.starlake.acl.parser.AstChildren
@@ -866,10 +959,15 @@ private[cls] object ResidualColumns:
     SetOperationList
   }
 
+  /** `required`: for each noted column, what D21 makes of the policies covering its own binding
+    * (`JsqltranspilerRewriter.decide`), Left(refusal) for a conflict.
+    */
   final class Suspects private[ResidualColumns] (
       val columns: java.util.Set[Column],
       val unwalkable: Option[String],
-      val refusal: Option[String]
+      val refusal: Option[String],
+      val required: java.util.IdentityHashMap[Column, Either[String, Option[RoleColumnPolicy]]] =
+        new java.util.IdentityHashMap()
   )
 
   /** One source a select reads: the lowercased names it is referenced by, its base table (None for
@@ -935,7 +1033,9 @@ private[cls] object ResidualColumns:
 
   private def unquote(s: String): String = ai.starlake.sql.QuotedIdentifier.unquote(s)
 
-  private def lower(s: String): String = s.toLowerCase(java.util.Locale.ROOT)
+  // DuckDB's identifier fold (ASCII letters only, ai.starlake.sql.IdentifierFold): every CTE,
+  // alias and column name of the scan is compared as DuckDB binds it (security review C1).
+  private def lower(s: String): String = ai.starlake.sql.IdentifierFold.fold(s)
 
   /** The output column names of a query, lowercased, when every one can be read: a column projects
     * its name, an aliased item its alias; an unaliased expression projects its own text, which no
@@ -1176,16 +1276,14 @@ private[cls] object ResidualColumns:
       Option(t.getAlias).map(a => lower(unquote(a.getName)) -> unquote(t.getName))
     }
     def columnsOf(table: String): Option[List[String]] =
-      schema.find(_._1.equalsIgnoreCase(table)).map(_._2).filter(_.nonEmpty)
+      schema.find(e => same(e._1, table)).map(_._2).filter(_.nonEmpty)
     def isPolicyTable(table: String, byName: List[RoleColumnPolicy] = policies): Boolean =
-      byName.exists(p =>
-        p.tableName == RoleColumnPolicy.Wildcard || p.tableName.equalsIgnoreCase(table)
-      )
+      byName.exists(p => p.tableName == RoleColumnPolicy.Wildcard || same(p.tableName, table))
 
     /** Whether `src` has the column: Some(true / false) when known, None when it cannot be told. */
     def has(src: Source, name: String): Option[Boolean] =
       src.table match
-        case Some(t) => columnsOf(t).map(_.exists(_.equalsIgnoreCase(name)))
+        case Some(t) => columnsOf(t).map(_.exists(same(_, name)))
         case None    => src.outputs.map(_.contains(lower(name)))
 
     /** Innermost-first binding of an unqualified `name`. */
@@ -1205,7 +1303,7 @@ private[cls] object ResidualColumns:
 
     /** Whether the bare name `name` binds to a covered column. */
     private def nameCovered(name: String, scopes: List[Scope]): Boolean =
-      val byName = policies.filter(_.columnName.equalsIgnoreCase(name))
+      val byName = policies.filter(p => same(p.columnName, name))
       byName.nonEmpty &&
       (byName.exists(_.tableName == RoleColumnPolicy.Wildcard) ||
         unqualifiedCovered(name, scopes, byName))
@@ -1228,7 +1326,7 @@ private[cls] object ResidualColumns:
 
     def covered(col: Column, scopes: List[Scope]): Boolean =
       val name   = unquote(Option(col.getColumnName).getOrElse(""))
-      val byName = policies.filter(_.columnName.equalsIgnoreCase(name))
+      val byName = policies.filter(p => same(p.columnName, name))
       Option(col.getTable).flatMap(t => Option(t.getName)).map(unquote) match
         case Some(q) =>
           // The qualifier may itself be a column and `name` one of its fields (`c_email.x`,
@@ -1245,6 +1343,38 @@ private[cls] object ResidualColumns:
               case named => qualifiedCovered(name, named, byName)
           }
         case None => nameCovered(name, scopes)
+
+    /** The policies covering `col` where DuckDB binds it, as [[covered]] finds its binding: the
+      * wildcard ones on its name, and those naming a table it may bind to, innermost scope first. A
+      * qualifier that is itself a covered column (a struct field read) adds nothing here:
+      * [[covered]] notes the reference and the visitor cannot mask it.
+      */
+    def coveringPolicies(col: Column, scopes: List[Scope]): List[RoleColumnPolicy] =
+      val name                           = unquote(Option(col.getColumnName).getOrElse(""))
+      val byName                         = policies.filter(p => same(p.columnName, name))
+      val wildcard                       = byName.filter(_.tableName == RoleColumnPolicy.Wildcard)
+      def onTables(tables: List[String]) =
+        byName.filter(p =>
+          p.tableName != RoleColumnPolicy.Wildcard && tables.exists(same(_, p.tableName))
+        )
+      @scala.annotation.tailrec
+      def innermost(scopes: List[Scope], seen: List[String]): List[String] =
+        scopes match
+          case Nil           => seen
+          case scope :: rest =>
+            val candidates = scope.filter(src => !has(src, name).contains(false))
+            val tables     = candidates.flatMap(_.table)
+            if tables.exists(isPolicyTable(_, byName)) ||
+              scope.exists(src => has(src, name).contains(true))
+            then seen ++ tables
+            else innermost(rest, seen ++ tables)
+      val tables = Option(col.getTable).flatMap(t => Option(t.getName)).map(unquote) match
+        case Some(q) =>
+          scopes.map(_.filter(_.names.contains(lower(q)))).filter(_.nonEmpty) match
+            case Nil   => aliases.collect { case (a, t) if a == lower(q) => t } :+ q
+            case named => innermost(named, Nil)
+        case None => innermost(scopes, Nil)
+      wildcard ++ onTables(tables)
 
   /** DuckDB's method call `x.f(args)` is `f(x, args)`; JSqlParser holds it as a function with the
     * multi-part name `[.., x, f]` and no node for `x`, so the masking visitor never saw the column
@@ -1305,7 +1435,18 @@ private[cls] object ResidualColumns:
     val noted = java.util.Collections.newSetFromMap(
       new java.util.IdentityHashMap[Column, java.lang.Boolean]()
     )
-    before.columns.collect { case (c, scopes) if covered(c, scopes) => c }.foreach(noted.add(_))
+    val required =
+      new java.util.IdentityHashMap[Column, Either[String, Option[RoleColumnPolicy]]]()
+    before.columns.collect { case (c, scopes) if covered(c, scopes) => c -> scopes }.foreach {
+      (c, scopes) =>
+        noted.add(c)
+        val name = unquote(Option(c.getColumnName).getOrElse(""))
+        val tab  = Option(c.getTable).flatMap(t => Option(t.getName)).map(unquote).getOrElse("")
+        required.put(
+          c,
+          JsqltranspilerRewriter.decide(coverage.coveringPolicies(c, scopes), tab, name)
+        ): Unit
+    }
     // Reads with no column node to mask, refused where a policy table is in scope.
     def policyTable(table: String): Boolean       = isPolicyTable(table, policies)
     def policyScope(scopes: List[Scope]): Boolean =
@@ -1327,9 +1468,9 @@ private[cls] object ResidualColumns:
           case (Some(l), Some(r)) =>
             (l intersect r).exists(name =>
               policies.exists(p =>
-                p.columnName.equalsIgnoreCase(name) &&
+                same(p.columnName, name) &&
                   (p.tableName == RoleColumnPolicy.Wildcard ||
-                    sides.exists(_.table.exists(_.equalsIgnoreCase(p.tableName))))
+                    sides.exists(_.table.exists(same(_, p.tableName))))
               )
             )
           case _ => true
@@ -1367,12 +1508,12 @@ private[cls] object ResidualColumns:
         "a table referenced as a column (the whole row as a struct) cannot be masked under " +
           "column policies; name the columns instead"
     }
-    new Suspects(noted, before.unknown, formRefusal.orElse(wholeRowRefusal))
+    new Suspects(noted, before.unknown, formRefusal.orElse(wholeRowRefusal), required)
 
   /** Some(deny reason) when a noted reference is still in `sel` after the rewrite, or the statement
     * holds a node the walk cannot follow.
     */
-  def unmasked(sel: AnyRef, suspects: Suspects): Option[String] =
+  def unmasked(sel: AnyRef, suspects: Suspects, applied: Applied): Option[String] =
     val after = scan(sel)
     suspects.unwalkable.orElse(after.unknown) match
       case Some(cls) => Some(s"column policy rewrite cannot walk a $cls node")
@@ -1385,3 +1526,29 @@ private[cls] object ResidualColumns:
             s"column ${c.getFullyQualifiedName} is in a position the column policy rewrite " +
               "cannot mask; select it directly instead"
           )
+          .orElse(weakerReplacement(suspects, applied))
+
+  /** Some(refusal) when the visitor replaced a noted column with a policy other than the one
+    * covering the column's own binding (owner ruling D21: a deny wins, a named policy beats a
+    * wildcard one): the visitor judged it partly on the resolver's lineage, which keys names by
+    * Java's case rules (security review R2-I1), so this check holds it to DuckDB's binding alone.
+    */
+  private def weakerReplacement(suspects: Suspects, applied: Applied): Option[String] =
+    suspects.columns.asScala.iterator
+      .flatMap(c => applied.get(c).map(c -> _))
+      .flatMap { (c, used) =>
+        Option(suspects.required.get(c)).flatMap {
+          case Left(refusal)                                             => Some(refusal)
+          case Right(Some(p)) if p.action == RoleColumnPolicy.ActionDeny =>
+            Some(s"column ${c.getFullyQualifiedName} is denied")
+          case Right(Some(p))
+              if JsqltranspilerRewriter
+                .sameOutcome(p) != JsqltranspilerRewriter.sameOutcome(used) =>
+            Some(
+              s"column ${c.getFullyQualifiedName} would be masked by another policy than the one " +
+                "covering it (deny, fail-closed)"
+            )
+          case _ => None
+        }
+      }
+      .nextOption()

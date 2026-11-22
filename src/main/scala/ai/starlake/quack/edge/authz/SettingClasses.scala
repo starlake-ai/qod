@@ -33,7 +33,7 @@ object SettingClasses:
   lazy val all: Map[String, SettingClass] = parse(ClassificationTables.read(Resource))
 
   /** The class of setting (or alias) `name`, case-insensitively, or None. */
-  def of(name: String): Option[SettingClass] = all.get(name.toLowerCase(Locale.ROOT))
+  def of(name: String): Option[SettingClass] = all.get(ai.starlake.sql.IdentifierFold.fold(name))
 
   /** The rows (`name`, `class`) of `text`. Throws IllegalArgumentException naming the line of an
     * unknown class or a setting classified twice.

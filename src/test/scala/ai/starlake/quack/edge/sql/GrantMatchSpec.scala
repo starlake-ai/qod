@@ -96,3 +96,24 @@ class GrantMatchSpec extends AnyFlatSpec with Matchers:
     GrantMatch.hasWildcardAll(List(p("*", "*", "*", "RW"))) shouldBe false
     GrantMatch.hasWildcardAll(List(p("acme_lake", "*", "*", "ALL"))) shouldBe false
   }
+
+  // DuckDB folds ASCII letters only: "Clés" and "clÉs" are two tables one schema can hold, and a
+  // grant on one must not cover the other (security review C1 audit). ASCII case still folds.
+  "covers" should "compare names as DuckDB does, folding ASCII letters only" in {
+    val onCles = List(p("acme_lake", "main", "Clés", "RO"))
+    def reads(cat: String, sch: String, tab: String, sessions: Set[String] = Set.empty) =
+      GrantMatch.covers(onCles, sessions, cat, sch, tab, Verb.Read)
+    reads("acme_lake", "main", "Clés") shouldBe true
+    reads("ACME_LAKE", "MAIN", "CLéS") shouldBe true
+    reads("acme_lake", "main", "clÉs") shouldBe false
+    reads("acme_lake", "main", "CLÉS") shouldBe false
+    // The Kelvin sign and the long s fold to ASCII letters in Java, never in DuckDB.
+    val onSecret = List(p("acme_lake", "main", "secret", "RO"), p("*", "kpi", "*", "RO"))
+    GrantMatch.covers(onSecret, Set.empty, "acme_lake", "main", "ſecret", Verb.Read) shouldBe
+      false
+    GrantMatch.covers(onSecret, Set("acme_lake"), "acme_lake", "Kpi", "t", Verb.Read) shouldBe
+      false
+    GrantMatch.covers(onSecret, Set("acme_lake"), "acme_lake", "KPI", "t", Verb.Read) shouldBe true
+    GrantMatch.catalogMatch("*", "acme_lÁke", Set("acme_láke")) shouldBe false
+    GrantMatch.catalogMatch("*", "ACME_láke", Set("acme_láke")) shouldBe true
+  }

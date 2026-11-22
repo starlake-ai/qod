@@ -4,6 +4,39 @@
 
 ### Upgrading
 
+- **Before upgrading, check every stored column policy, row policy and grant whose names hold a
+  non-ASCII letter.** Names now match as DuckDB binds them (below). A column policy or row policy
+  spelled with another case of a non-ASCII letter than its table's or column's (`"CLÉS"` for the
+  table `"Clés"`) no longer masks, denies or filters from the first boot of this release: the
+  column goes out raw and every row is visible (it fails open). A grant so spelled no longer
+  grants (it fails closed). Run this query against the control-plane database (`qod` by default)
+  before upgrading; it lists every such row (every name holding a non-ASCII character, correctly
+  spelled ones too), and respell each one that does not name its object exactly as stored, ASCII
+  case aside:
+
+  ```sql
+  SELECT kind, tenant_id, role, catalog_name, schema_name, table_name, column_name FROM (
+    SELECT 'grant' AS kind, r.tenant_id, r.name AS role, p.catalog_name, p.schema_name, p.table_name,
+           NULL AS column_name
+      FROM qodstate_role_permission p JOIN qodstate_role r ON r.id = p.role_id
+    UNION ALL
+    SELECT 'column policy', r.tenant_id, r.name, c.catalog_name, c.schema_name, c.table_name,
+           c.column_name
+      FROM qodstate_role_column_policy c JOIN qodstate_role r ON r.id = c.role_id
+    UNION ALL
+    SELECT 'row policy', r.tenant_id, r.name, w.catalog_name, w.schema_name, w.table_name, NULL
+      FROM qodstate_role_row_policy w JOIN qodstate_role r ON r.id = w.role_id
+  ) AS rows
+  WHERE octet_length(concat(catalog_name, schema_name, table_name, column_name))
+     <> char_length(concat(catalog_name, schema_name, table_name, column_name))
+  ORDER BY tenant_id, role, kind;
+  ```
+
+  After the upgrade, boot prints the same rows as `WARN: tenant '...' role '...': the grant |
+  column policy | row policy on ... names a non-ASCII letter that has another case` (stderr).
+- An OPA tenant whose Rego compares table, schema, catalog or column names holding a non-ASCII
+  uppercase letter: update it to the new folding (below) before upgrading. A deny rule written
+  against the old lowercased form stops matching, and so allows.
 - **This release is one way.** Rolling back from it needs a restore of the control-plane database
   backup taken before the upgrade: an older manager reads every staff user as a superuser, with
   full data access. The release gate records that, so an older release with the gate refuses to
@@ -25,6 +58,29 @@
 
 ### Security
 
+- **Names compare as DuckDB binds them, folding ASCII letters only.** DuckDB folds identifier case
+  for `A`-`Z` only, so `"Clés"` and `"clÉs"` are two tables one schema can hold. The gateway folded
+  every cased letter, so a name holding a non-ASCII letter could be matched to the wrong object:
+  a holder of column or row policies could read a masked column unmasked, or copy masked values
+  or filtered rows into a table of their own, and a grant could cover a second table spelled
+  with another case. CTE scoping, column and table bindings, grants, the `system` and `temp`
+  catalog rules, column and row policies and the metadata filter's schema checks now all compare
+  names that way. ASCII names behave exactly as before.
+  - A column policy or row policy spelled with another case of a non-ASCII letter than its
+    object's (`"CLÉS"` for the table `"Clés"`) no longer masks, denies or filters it: it fails
+    open, so check such rows before upgrading (Upgrading above). A grant so spelled no longer
+    grants (it fails closed). Boot reports each stored row whose names hold such a letter.
+  - An OPA tenant's input now carries catalog, schema, table, column and secure view names folded
+    as DuckDB folds them (`"SECRET_ÉTÉ"` arrives as `secret_ÉtÉ`, formerly `secret_été`); a Rego
+    rule written against the old lowercased form must be updated.
+- **Several column policies on one column: a deny wins, a policy naming the table beats a
+  wildcard one, and two different masks are refused.** The policy applied used to depend on the
+  order of roles and of the tables a statement named, so a weaker policy could apply in place of
+  a deny or a stronger mask. A column two different masks still cover is now refused with
+  `conflicting column policies on <table>.<column>`; give the column one mask, or a deny.
+  A column covered by both a wildcard mask and a named mask can now also be refused when it is
+  read through a derived table or a CTE, or by a correlated subquery whose unqualified column
+  binds to the outer table; give such a column one mask.
 - **A tenant-less account that is not a superuser no longer reaches data.** A superuser demoted to
   `kind user` left the management plane but still connected to every pool as a superuser, over
   FlightSQL and the native front door (`superuser=true` and the password) and through a personal
