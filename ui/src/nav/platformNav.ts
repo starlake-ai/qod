@@ -31,3 +31,9 @@ export function platformNavItems(pages: ConsolePageView[]): NavItem[] {
 export function staffNavCtx(): NavCtx {
   return { superuser: false, admin: false, telemetry: false, fleet: false, starlake: false, scope: { kind: 'all' } };
 }
+
+/** Where a caller lands, and where a page they cannot see redirects: their first page, else
+ *  their profile (spec section 8). */
+export function landingPath(pages: ConsolePageView[]): string {
+  return pages.length > 0 ? routerPath(pages[0]) : '/settings/profile';
+}

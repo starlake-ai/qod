@@ -78,8 +78,9 @@ import { defaultScope, parseScope, scopePrefix, scopeRedirect, type Scope } from
 import SidebarLayout from './nav/SidebarLayout';
 import TenantSwitcher from './nav/TenantSwitcher';
 import { NAV, visibleNav } from './nav/navModel';
-import { layoutFor, platformNavItems, routerPath, staffNavCtx } from './nav/platformNav';
+import { landingPath, layoutFor, platformNavItems, staffNavCtx } from './nav/platformNav';
 import { useConsolePages } from './modules/useConsolePages';
+import ModulePage from './modules/ModulePage';
 import { legacyRedirect } from './nav/legacy';
 import Config from './pages/Config';
 import Profile from './pages/Profile';
@@ -112,11 +113,11 @@ function StaffShell() {
   const ctx = staffNavCtx();
   const items = [...visibleNav(platformNavItems(pages), ctx), ...visibleNav(NAV, ctx)];
   if (loading) return <div className="loading">Loading pages...</div>;
-  const landing = pages.length > 0 ? routerPath(pages[0]) : '/settings/profile';
+  const landing = landingPath(pages);
   return (
     <SidebarLayout items={items} switcher={() => null}>
       <Routes>
-        <Route path="/x/:module/:page/*" element={<div className="card">Module pages arrive in the next task</div>} />
+        <Route path="/x/:module/:page/*" element={<ModulePage pages={pages} landing={landing} />} />
         <Route path="/settings/profile" element={<Profile />} />
         <Route path="*" element={<Navigate to={landing} replace />} />
       </Routes>
@@ -177,7 +178,7 @@ function Shell() {
   const [lastScope, setLastScope] = useState<Scope>(() => defaultScope(principal));
   useEffect(() => { if (urlScope) setLastScope(urlScope); }, [location.pathname]); // eslint-disable-line react-hooks/exhaustive-deps
   const scope = urlScope ?? lastScope;
-  const { pages } = useConsolePages();
+  const { pages, loading: pagesLoading } = useConsolePages();
   const navCtx = {
     superuser: isSuperuser,
     admin: role?.toLowerCase() === 'admin',
@@ -202,7 +203,12 @@ function Shell() {
         {isSuperuser && <Route path="/servers" element={<Servers />} />}
         {isSuperuser && <Route path="/settings/config" element={<Config />} />}
         {isSuperuser && <Route path="/settings/security-audit" element={<SecurityAudit />} />}
-        {isSuperuser && <Route path="/x/:module/:page/*" element={<div className="card">Module pages arrive in the next task</div>} />}
+        {isSuperuser && (
+          <Route
+            path="/x/:module/:page/*"
+            element={<ModulePage pages={pages} landing={landingPath(pages)} loading={pagesLoading} />}
+          />
+        )}
         <Route path="/settings/profile" element={<Profile />} />
         <Route path="*" element={<LegacyRedirect />} />
       </Routes>
