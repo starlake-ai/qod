@@ -67,13 +67,19 @@ class ColumnPolicyReferenceSpec extends AnyFlatSpec with Matchers:
       case ai.starlake.quack.edge.policy.GuardOutcome.Deny(_) => true
       case _                                                  => false
 
+  /** An inserted mask: [[Mask]] reading the reference it replaced, as that reference is written
+    * (owner ruling D25).
+    */
+  private val InsertedMask =
+    """left\((?:(?:"[^"]*"|\w+)\.)*(?:"[^"]*"|\w+), 3\) \|\| '\*\*\*'"""
+
   /** The rewritten text with every inserted mask removed: what is left must not name c_email,
     * except as the output alias a masked projection keeps.
     */
   private def residue(sql: String): String =
     sql
-      .replace(s"($Mask)", "")
-      .replace(Mask, "")
+      .replaceAll(s"\\($InsertedMask\\)", "")
+      .replaceAll(InsertedMask, "")
       .replaceAll("""(?i)\bAS\s+"?c_email"?""", "")
 
   // ---- rewriter level --------------------------------------------------------------------
@@ -109,7 +115,7 @@ class ColumnPolicyReferenceSpec extends AnyFlatSpec with Matchers:
       rewrite(sql) match
         case Rewritten(out) =>
           withClue(s"$sql\n -> $out\n") {
-            out should include(Mask)
+            out should include(s"left($q$c, 3) || '***'")
             residue(out).toLowerCase should not include "c_email"
           }
         case other => fail(s"$sql -> $other")

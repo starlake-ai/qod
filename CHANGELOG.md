@@ -99,6 +99,14 @@
   `session_user`, `user`, `current_role`, `current_schema`, `current_catalog`, `localtime` or
   `localtimestamp`, read bare in a subquery whose own FROM does not have it, is now the function,
   as DuckDB reads it, instead of a refusal.
+- **A mask now reads the same column as the reference it replaces.** A mask names its column
+  bare, and was spliced as stored, so in a subquery or beside another table holding a column of
+  the same name it could read that other column, part of a denied one included, or fail as
+  ambiguous. Each column the mask names is now written as the reference it replaces, qualifier and
+  quoting included, so the mask reads exactly the column the statement named. A mask that calls
+  `current_date`, `current_time` or `current_timestamp` keeps calling the function beside a column
+  of that name. A stored mask reading any column but its own is refused, as its validator refuses
+  it when it is created.
 - **A tenant-less account that is not a superuser no longer reaches data.** A superuser demoted to
   `kind user` left the management plane but still connected to every pool as a superuser, over
   FlightSQL and the native front door (`superuser=true` and the password) and through a personal

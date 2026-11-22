@@ -55,6 +55,16 @@ private[cls] object SqlValueNames:
       case Spaced(word, rest) => Reading.Aliased(word, rest)
       case _                  => Reading.Call
 
+  /** The call DuckDB makes of a SQL value name that binds no column, None for a name that is not a
+    * time keyword's: written so, the function binds no column wherever it is spliced.
+    */
+  def functionCall(name: String): Option[String] =
+    IdentifierFold.fold(name) match
+      case "current_date"      => Some("current_date()")
+      case "current_time"      => Some("get_current_time()")
+      case "current_timestamp" => Some("get_current_timestamp()")
+      case _                   => None
+
   /** Writes the time keyword as the quoted column reference DuckDB reads it as, so that JSqlParser
     * parses it as a column when the statement is printed and read again. DuckDB binds a quoted name
     * of [[Names]] exactly as the bare one, so the statement means what it meant. False for a call.

@@ -578,6 +578,47 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
           // and attributing them to an outer table would mis-key single-FROM lookups.
           if fromTables.size == 1 then fromTables.head._2 else ""
 
+    /** The mask of `p`, written to read the reference `ref` it replaces (owner ruling D25). A mask
+      * names its column bare, and spliced as stored it binds wherever DuckDB binds that bare name
+      * at `ref`'s place: the column of another FROM item, inner or beside it. So each column of the
+      * mask becomes a copy of `ref`, qualifier and quoting included, and so does a time keyword
+      * naming the column; a SQL value keyword it calls as a function becomes the function's call,
+      * which binds no column. A mask reading any other column is refused, as its validator refuses
+      * it at creation.
+      */
+    private def boundMask(p: RoleColumnPolicy, ref: net.sf.jsqlparser.schema.Column): Expression =
+      val mask = CCJSqlParserUtil.parseExpression(p.transformSql.get)
+      // A policy derived for a derived table's output keeps its base policy's id and mask.
+      val column  = unquoteName(policies.find(_.id == p.id).getOrElse(p).columnName)
+      val refusal = DenyException(
+        s"the mask of column ${ref.getFullyQualifiedName} reads another column than its own"
+      )
+      val references = ResidualColumns.references(mask)
+      references.unknown.foreach(cls =>
+        throw DenyException(s"column policy rewrite cannot walk a $cls node of a mask")
+      )
+      def bindToRef(c: net.sf.jsqlparser.schema.Column): net.sf.jsqlparser.schema.Column =
+        c.setTable(Option(ref.getTable).map(_.clone()).orNull)
+        c.setColumnName(ref.getColumnName)
+        c.setTableDelimiter(ref.getTableDelimiter)
+        c
+      references.columns.foreach { c =>
+        if !same(unquoteName(c.getColumnName), column) then throw refusal
+        bindToRef(c)
+      }
+      references.timeKeys.foreach { tk =>
+        SqlValueNames.reading(tk) match
+          case SqlValueNames.Reading.Reference(name) if same(name, column) =>
+            tk.setStringValue(bindToRef(new net.sf.jsqlparser.schema.Column()).toString)
+          case SqlValueNames.Reading.Reference(name) =>
+            SqlValueNames.functionCall(name) match
+              case Some(call) => tk.setStringValue(call)
+              case None       => throw refusal
+          case SqlValueNames.Reading.Call          => ()
+          case SqlValueNames.Reading.Aliased(_, _) => throw refusal
+      }
+      mask
+
     /** Walk `expr` and return its replacement (same instance if nothing changed). */
     // Parenthesis is deprecated in jsqlparser 5.x (ParenthesedExpressionList is the
     // replacement, matched below) but the class still exists and dropping the case
@@ -603,7 +644,7 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
             case Some(p) =>
               changed.set(true)
               applied.put(col, p)
-              CCJSqlParserUtil.parseExpression(p.transformSql.get)
+              boundMask(p, col)
             case None => col
 
         case fn: net.sf.jsqlparser.expression.Function =>
@@ -1294,6 +1335,19 @@ private[cls] object ResidualColumns:
 
   /** Every table node of `root` except column qualifiers, by identity. */
   def tablesOf(root: AnyRef): List[Table] = scan(root).tables
+
+  /** The column nodes and time keywords of an expression, and the first child of a type the walk
+    * cannot follow.
+    */
+  final case class References(
+      columns: List[Column],
+      timeKeys: List[TimeKeyExpression],
+      unknown: Option[String]
+  )
+
+  def references(root: AnyRef): References =
+    val s = scan(root)
+    References(s.columns.map(_._1), s.timeKeys.map(_._1), s.unknown)
 
   /** The scope of the select a reference sits in, the only one a SQL value name binds in. */
   private def ownScope(scopes: List[Scope]): List[Scope] = scopes.take(1)
