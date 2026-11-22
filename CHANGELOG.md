@@ -4,10 +4,36 @@
 
 ### Upgrading
 
-- Read the new boot lines `WARN: tenant '...' role '...': the grant | column policy | row policy
-  on ... names a non-ASCII letter that has another case` (stderr) and check each row: names now
-  match as DuckDB binds them (below), so a grant or policy spelled with another case of such a
-  letter than its object's stopped matching.
+- **Before upgrading, check every stored column policy, row policy and grant whose names hold a
+  non-ASCII letter.** Names now match as DuckDB binds them (below). A column policy or row policy
+  spelled with another case of a non-ASCII letter than its table's or column's (`"CLÉS"` for the
+  table `"Clés"`) no longer masks, denies or filters from the first boot of this release: the
+  column goes out raw and every row is visible (it fails open). A grant so spelled no longer
+  grants (it fails closed). Run this query against the control-plane database (`qod` by default)
+  before upgrading; it lists every such row (every name holding a non-ASCII character, correctly
+  spelled ones too), and respell each one that does not name its object exactly as stored, ASCII
+  case aside:
+
+  ```sql
+  SELECT kind, tenant_id, role, catalog_name, schema_name, table_name, column_name FROM (
+    SELECT 'grant' AS kind, r.tenant_id, r.name AS role, p.catalog_name, p.schema_name, p.table_name,
+           NULL AS column_name
+      FROM qodstate_role_permission p JOIN qodstate_role r ON r.id = p.role_id
+    UNION ALL
+    SELECT 'column policy', r.tenant_id, r.name, c.catalog_name, c.schema_name, c.table_name,
+           c.column_name
+      FROM qodstate_role_column_policy c JOIN qodstate_role r ON r.id = c.role_id
+    UNION ALL
+    SELECT 'row policy', r.tenant_id, r.name, w.catalog_name, w.schema_name, w.table_name, NULL
+      FROM qodstate_role_row_policy w JOIN qodstate_role r ON r.id = w.role_id
+  ) AS rows
+  WHERE octet_length(concat(catalog_name, schema_name, table_name, column_name))
+     <> char_length(concat(catalog_name, schema_name, table_name, column_name))
+  ORDER BY tenant_id, role, kind;
+  ```
+
+  After the upgrade, boot prints the same rows as `WARN: tenant '...' role '...': the grant |
+  column policy | row policy on ... names a non-ASCII letter that has another case` (stderr).
 - An OPA tenant whose Rego compares table, schema, catalog or column names holding a non-ASCII
   uppercase letter: update it to the new folding (below) before upgrading. A deny rule written
   against the old lowercased form stops matching, and so allows.
@@ -24,9 +50,10 @@
   also covered `"clÉs"`), the `system` and `temp` catalog rules (a catalog named `ſystem` was read
   as `system`), column and row policies and the metadata filter's schema checks now all compare
   names that way. ASCII names behave exactly as before.
-  - A grant, column policy or row policy spelled with another case of a non-ASCII letter than its
-    object's (`"CLÉS"` for the table `"Clés"`) no longer matches it; boot reports each stored row
-    whose names hold such a letter.
+  - A column policy or row policy spelled with another case of a non-ASCII letter than its
+    object's (`"CLÉS"` for the table `"Clés"`) no longer masks, denies or filters it: it fails
+    open, so check such rows before upgrading (Upgrading above). A grant so spelled no longer
+    grants (it fails closed). Boot reports each stored row whose names hold such a letter.
   - An OPA tenant's input now carries catalog, schema, table, column and secure view names folded
     as DuckDB folds them (`"SECRET_ÉTÉ"` arrives as `secret_ÉtÉ`, formerly `secret_été`); a Rego
     rule written against the old lowercased form must be updated.

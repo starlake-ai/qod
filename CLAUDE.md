@@ -1011,7 +1011,10 @@ table as the CTE and pass its masked columns raw. A broader policy match is not 
 displace a table's own deny or OR another table's row filter into its own (owner ruling D21). When
 several column policies cover one column, a deny wins, then one naming the table over a wildcard
 one, and two different masks left are refused (`conflicting column policies on <table>.<column>`,
-`JsqltranspilerRewriter.ConflictingPolicies`). Boot prints one stderr `WARN:` line per stored
+`JsqltranspilerRewriter.ConflictingPolicies`). The resolver (jsqltranspiler) keys names by Java's
+`toLowerCase()` (`İx` and a CTE `i̇x` collide), so its lineage never decides alone: the visitor
+judges a column on its own FROM binding's policies too, and `ResidualColumns.unmasked` refuses a
+column the visitor replaced with another policy than the one its DuckDB binding calls for. Boot prints one stderr `WARN:` line per stored
 grant, column policy or row policy whose names hold a non-ASCII cased letter
 (`NonAsciiPolicyNameReport`), as such a row matches only an object spelled with exactly those
 letters. The OPA input carries names folded the same way.
