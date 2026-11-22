@@ -1516,9 +1516,25 @@ class ManagerRestSecuritySpec extends AnyFlatSpec with Matchers with SecurityHtt
       // Over a core public route's 64 KiB, within the module's limit.
       post(h.httpClient, s"${h.baseUrl}/api/hosted/signup", "x" * oneMiB)
         .statusCode() should not be 413
-      val over = post(h.httpClient, s"${h.baseUrl}/api/hosted/signup", "x" * (oneMiB + 1))
-      over.statusCode() shouldBe 413
-      errorCode(over.body()) should contain("payload_too_large")
+      // Over it: the server answers 413 from the declared length, before reading the body, and
+      // closes the connection. Sent on a raw socket with no body: a client still writing a body
+      // past the socket buffers meets that close as a reset, and the JDK client then waits out
+      // its own timeout instead of reading the 413, so the case would hang on the host's buffer
+      // sizes rather than on the server.
+      val uri  = java.net.URI.create(h.baseUrl)
+      val sock = new java.net.Socket(uri.getHost, uri.getPort)
+      try
+        sock.setSoTimeout(15000)
+        sock.getOutputStream.write(
+          (s"POST /api/hosted/signup HTTP/1.1\r\nHost: l\r\nContent-Type: application/json\r\n" +
+            s"Content-Length: ${oneMiB + 1}\r\n\r\n").getBytes(UTF_8)
+        )
+        sock.getOutputStream.flush()
+        val (status, headers, body) = rawResponse(sock.getInputStream)
+        status shouldBe 413
+        headers.get("connection").map(_.toLowerCase) should contain("close")
+        errorCode(new String(body, UTF_8)) should contain("payload_too_large")
+      finally sock.close()
     finally h.shutdown()
   }
 
