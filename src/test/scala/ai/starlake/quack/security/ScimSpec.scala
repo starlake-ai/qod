@@ -109,6 +109,18 @@ class ScimSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers with B
     val r = harness.httpClient.send(b.build(), HttpResponse.BodyHandlers.ofString())
     r.statusCode() shouldBe 403
 
+  it should "take the bearer only on whole /api/scim segments" in:
+    // `scim%2Fx` is one segment `scim/x` to the router, which no SCIM route serves: the bearer is
+    // no credential there, so the guard answers 401 (it once read the joined `/api/scim/x`,
+    // admitted the bearer and let the request on to whatever route takes `/api/{x}`).
+    val smuggled = scim("GET", s"${harness.baseUrl}/api/scim%2Fx")
+    withClue(smuggled.body())(smuggled.statusCode() shouldBe 401)
+    val v2 = scim("GET", s"${harness.baseUrl}/api/scim%2Fv2/$TenantId/Users")
+    withClue(v2.body())(v2.statusCode() shouldBe 401)
+    // Control: the SCIM base URL still takes it.
+    val own = scim("GET", scimUrl("Users"))
+    withClue(own.body())(own.statusCode() shouldBe 200)
+
   it should "accept a lowercase bearer scheme (RFC 7235)" in:
     val b = HttpRequest
       .newBuilder(URI.create(scimUrl("ServiceProviderConfig")))
@@ -156,8 +168,14 @@ class ScimSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers with B
       patStore = Some(pats),
       patUserOf =
         Some((tenant, username) => users.userIdOf(tenant, username).flatMap(users.userById)),
-      patAuth =
-        Some(new PatAuthenticator(pats, users.userById, u => List(UserGrant(u.tenant, u.kind)), tenantDisabled = _ => false))
+      patAuth = Some(
+        new PatAuthenticator(
+          pats,
+          users.userById,
+          u => List(UserGrant(u.tenant, u.kind)),
+          tenantDisabled = _ => false
+        )
+      )
     )
     def listUsers(tenant: String): HttpResponse[String] =
       val b = HttpRequest
@@ -173,6 +191,18 @@ class ScimSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers with B
       // Another tenant's base URL: the PAT carries its owner's tenant scope and nothing more.
       val crossed = listUsers(GlobexTenantName)
       withClue(crossed.body())(crossed.statusCode() shouldBe 403)
+      // An encoded slash after `scim` is one segment the router reads as `scim/x`: the bearer is
+      // no credential there.
+      val smuggled = h.httpClient.send(
+        HttpRequest
+          .newBuilder(URI.create(s"${h.baseUrl}/api/scim%2Fx"))
+          .header("Authorization", s"Bearer $raw")
+          .GET()
+          .timeout(RequestTimeout)
+          .build(),
+        HttpResponse.BodyHandlers.ofString()
+      )
+      withClue(smuggled.body())(smuggled.statusCode() shouldBe 401)
     finally h.shutdown()
 
   // ---------------- users ----------------

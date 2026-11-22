@@ -261,6 +261,137 @@ class ModuleEndpointsSpec
     finally local.shutdown()
   }
 
+  "the URL tenant check" should "read whole segments, so an encoded slash cannot pick the tenant" in {
+    // Module routes made only of captures serve every request no core route takes. Matched on the
+    // joined path, `catalog%2Ftenant` read as `/api/catalog/tenant/<t>/...`, so the guard checked
+    // the path tenant `acme` and never the `?tenant=` the request also carried; `audit%2Flist` read
+    // as the exempt `/api/audit/list`; and `acme%2Fx` gave the guard `acme` and the route `acme/x`.
+    val localModule = new ManagerModule:
+      def name: String                             = "tenant-capture-module"
+      def changelogPath: Option[String]            = None
+      def start(ctx: ManagerContext): IO[Unit]     = IO.unit
+      def endpoints: List[ServerEndpoint[Any, IO]] = List(
+        endpoint.get
+          .in("api" / path[String]("x"))
+          .out(stringBody)
+          .serverLogicSuccess[IO](x => IO.pure(s"module1:$x")),
+        endpoint.get
+          .in("api" / path[String]("x") / path[String]("y") / path[String]("z"))
+          .out(stringBody)
+          .serverLogicSuccess[IO] { case (x, y, z) => IO.pure(s"module3:$x|$y|$z") },
+        endpoint.get
+          .in(
+            "api" / path[String]("w") / path[String]("x") / path[String]("y") / path[String]("z")
+          )
+          .out(stringBody)
+          .serverLogicSuccess[IO] { case (w, x, y, z) => IO.pure(s"module4:$w|$x|$y|$z") }
+      )
+      def publicPathPrefixes: Set[String]        = Set.empty
+      def onEvent(event: ManagerEvent): IO[Unit] = IO.unit
+      def stop: IO[Unit]                         = IO.unit
+
+    val fix = SecurityFixtures.freshStore()
+    SecurityFixtures.addTenantB(fix)
+    val local = ManagerServerHarness.boot(fix.store, moduleEndpoints = localModule.endpoints)
+    try
+      val alice = local.mintToken(
+        SecurityFixtures.AliceUsername,
+        SecurityFixtures.AlicePassword,
+        Some(SecurityFixtures.TenantName)
+      )
+      val victim                       = SecurityFixtures.GlobexTenantId
+      def forbidden(url: String): Unit =
+        val r = get(local.httpClient, s"${local.baseUrl}$url", apiKey = Some(alice))
+        withClue(s"GET $url (tenant admin of acme) body: ${r.body()}") {
+          r.statusCode() shouldBe 403
+          r.body() should include("tenant_forbidden")
+          r.body() should not include "module"
+        }
+
+      // All three asked before any is judged, so a failure names every one that got through.
+      val smuggled = List(
+        s"/api/catalog%2Ftenant/acme/x?tenant=$victim",
+        s"/api/audit%2Flist?tenant=$victim",
+        "/api/catalog/tenant/acme%2Fx/t"
+      ).map { url =>
+        val r = get(local.httpClient, s"${local.baseUrl}$url", apiKey = Some(alice))
+        (url, r.statusCode(), r.body())
+      }
+      withClue(smuggled.map((u, c, b) => s"GET $u -> $c $b").mkString("\n", "\n", "\n")) {
+        smuggled.map(_._2) shouldBe List(403, 403, 403)
+        smuggled.foreach((_, _, b) => b should include("tenant_forbidden"))
+      }
+
+      // Controls: the same routes answer the tenant admin when the tenant is their own, so each
+      // 403 above is the guard's tenant check.
+      val own = get(
+        local.httpClient,
+        s"${local.baseUrl}/api/catalog%2Ftenant/acme/x?tenant=acme",
+        apiKey = Some(alice)
+      )
+      withClue(s"own tenant body: ${own.body()}")(own.statusCode() shouldBe 200)
+      own.body() shouldBe "module3:catalog/tenant|acme|x"
+
+      // The plain path keeps its arm: the path tenant decides, whatever the query says.
+      forbidden(s"/api/catalog/tenant/$victim/x")
+      val plain = get(
+        local.httpClient,
+        s"${local.baseUrl}/api/catalog/tenant/acme/x?tenant=$victim",
+        apiKey = Some(alice)
+      )
+      withClue(s"plain path, own tenant body: ${plain.body()}") {
+        plain.statusCode() shouldBe 200
+      }
+      plain.body() shouldBe "module4:catalog|tenant|acme|x"
+    finally local.shutdown()
+  }
+
+  "the SCIM bearer transport" should "hold only on whole /api/scim segments" in {
+    // `scim%2Fx` is one segment `scim/x`: the joined path once read it as under `/api/scim/`, and
+    // the guard took `Authorization: Bearer` as a credential for a module route shaped `/api/{x}`.
+    val localModule = new ManagerModule:
+      def name: String                             = "scim-capture-module"
+      def changelogPath: Option[String]            = None
+      def start(ctx: ManagerContext): IO[Unit]     = IO.unit
+      def endpoints: List[ServerEndpoint[Any, IO]] = List(
+        endpoint.get
+          .in("api" / path[String]("x"))
+          .out(stringBody)
+          .serverLogicSuccess[IO](x => IO.pure(s"module:$x"))
+      )
+      def publicPathPrefixes: Set[String]        = Set.empty
+      def onEvent(event: ManagerEvent): IO[Unit] = IO.unit
+      def stop: IO[Unit]                         = IO.unit
+
+    val fix   = SecurityFixtures.freshStore()
+    val local = ManagerServerHarness.boot(fix.store, moduleEndpoints = localModule.endpoints)
+    try
+      val session                                                     = local.superuserSession()
+      def withBearer(url: String): java.net.http.HttpResponse[String] =
+        val b = java.net.http.HttpRequest
+          .newBuilder(java.net.URI.create(s"${local.baseUrl}$url"))
+          .header("Authorization", s"Bearer $session")
+          .GET()
+          .timeout(RequestTimeout)
+        local.httpClient.send(b.build(), java.net.http.HttpResponse.BodyHandlers.ofString())
+
+      val smuggled = withBearer("/api/scim%2Fx")
+      withClue(s"GET /api/scim%2Fx (bearer) body: ${smuggled.body()}") {
+        smuggled.statusCode() shouldBe 401
+      }
+      smuggled.body() should not include "module"
+      // `/api/scim` alone is not under the prefix either, as before.
+      withBearer("/api/scim").statusCode() shouldBe 401
+
+      // The route answers the same credential on X-API-Key, so the 401 is the guard's.
+      val admitted = get(local.httpClient, s"${local.baseUrl}/api/scim%2Fx", apiKey = Some(session))
+      withClue(s"GET /api/scim%2Fx (X-API-Key) body: ${admitted.body()}") {
+        admitted.statusCode() shouldBe 200
+      }
+      admitted.body() shouldBe "module:scim/x"
+    finally local.shutdown()
+  }
+
   "route collisions" should "fail server construction" in {
     val fix = SecurityFixtures.freshStore()
     val ex  = intercept[IllegalStateException] {

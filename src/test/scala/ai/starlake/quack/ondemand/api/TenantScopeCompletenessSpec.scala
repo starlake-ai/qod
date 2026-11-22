@@ -67,6 +67,10 @@ class TenantScopeCompletenessSpec extends AnyFlatSpec with Matchers:
   private def concretePath(template: String): String =
     CaptureRe.replaceAllIn(template, m => if m.group(1) == "tenant" then Sentinel else "x")
 
+  /** A concrete path's segments, as the guard reads a request: the leading `/` dropped. */
+  private def segmentsOf(path: String): Vector[String] =
+    path.dropWhile(_ == '/').split("/").toVector
+
   "the endpoint reflection" should "find a non-trivial set of endpoints" in {
     // Guards against the reflection filter silently matching nothing (which
     // would make the real assertion below vacuously pass).
@@ -93,7 +97,7 @@ class TenantScopeCompletenessSpec extends AnyFlatSpec with Matchers:
           s"$name [$template]: tenant path capture(s) ${misnamed.mkString(", ")} must be named exactly 'tenant'"
         )
       else if captures.contains("tenant") then
-        val resolved = TenantScopeGuard.extractTenant(concretePath(pathTpl), None)
+        val resolved = TenantScopeGuard.extractTenant(segmentsOf(concretePath(pathTpl)), None)
         if resolved.contains(Sentinel) then None
         else
           Some(

@@ -499,9 +499,10 @@ final class ManagerServer(
         // SCIM clients (Okta, Entra) can only send Authorization: Bearer, so for the
         // SCIM prefix the bearer value is admitted exactly like an X-API-Key header
         // (a session or a PAT). Scoped to /api/scim/ on purpose: nothing else should
-        // gain a third credential transport.
+        // gain a third credential transport. On whole segments, as the router reads them:
+        // `/api/scim%2Fx` is the one segment `scim/x`, under no SCIM route.
         val bearerToken =
-          if path.startsWith("/api/scim/") then
+          if segments.length > 2 && segments.startsWith(ManagerServer.ScimSegments) then
             req.headers
               .get(CIString("Authorization"))
               .map(_.head.value)
@@ -665,7 +666,7 @@ final class ManagerServer(
               if branchApi || staffOnStaffPrefix then None
               else
                 TenantScopeGuard
-                  .extractTenant(path, queryTenant)
+                  .extractTenant(segments, queryTenant)
                   .map(t => canonicalTenantIdOf(t).getOrElse(t))
             (tokenScope, pathTenant) match
               case (Some(scope), Some(t))
@@ -1328,6 +1329,11 @@ final class ManagerServer(
       .build
 
 object ManagerServer extends com.typesafe.scalalogging.LazyLogging:
+
+  /** The SCIM prefix `/api/scim/`, on whole segments: the guard takes `Authorization: Bearer` as a
+    * credential only for a request with at least one segment past it.
+    */
+  private val ScimSegments: Vector[String] = Vector("api", "scim")
 
   /** Each of `paths` beside its segments: every one after the leading `/`, as written. */
   private[ondemand] def segmentsOf(paths: Set[String]): Map[String, Vector[String]] =

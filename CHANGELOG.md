@@ -100,11 +100,15 @@
   with no credential. An encoded `/` can no longer carry an anonymous request onto a public path;
   every other path is answered as before. The allowlists of signed-in non-admin and staff callers,
   and the disabled-tenant logout exception, are now matched the same way: `GET /api/auth%2Fwhoami`
-  from such a session reached a module route shaped `/api/{x}`. Boot now also refuses a module
-  public prefix that is empty or not absolute; holds a segment that is empty (a trailing `/`
-  included), `.`, `..` or not made of `[A-Za-z0-9._-]`; is `/api` itself or one segment under it
-  (such as `/api/webhook`); lies under a core API segment or under another loaded module's name;
-  or, outside `/api`, lies under none of the module's own static mounts (a root mount covers none).
+  from such a session reached a module route shaped `/api/{x}`. The URL tenant check and the SCIM
+  bearer transport are now matched the same way: `/api/catalog%2Ftenant/<own>/x?tenant=<other>` was
+  checked against `<own>` and never the `?tenant=` it carried, and `Authorization: Bearer` was taken
+  as a credential on `/api/scim%2Fx`, each reaching a module route made of captures. Boot now also
+  refuses a module public prefix that is empty or not absolute; holds a segment that is empty (a
+  trailing `/` included), `.`, `..` or not made of `[A-Za-z0-9._-]`; is `/api` itself or one
+  segment under it (such as `/api/webhook`); lies under a core API segment or under another loaded
+  module's name; or, outside `/api`, lies under none of the module's own static mounts (a root
+  mount covers none).
 
 ### Changed
 
