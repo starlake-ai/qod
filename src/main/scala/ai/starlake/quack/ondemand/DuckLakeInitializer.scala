@@ -131,10 +131,9 @@ object DuckLakeInitializer extends LazyLogging:
     try
       val stmt = conn.createStatement()
       try
-        // Proxy passthrough so INSTALL works behind corporate firewalls.
-        // Mirrors spawn-quack-node.sh's SET http_proxy handling. Source is
-        // a sanitized env var (host:port), interpolated into a DuckDB
-        // string literal via the same escape helper as ATTACH.
+        // Proxy passthrough so INSTALL works behind corporate firewalls: host:port in
+        // http_proxy and a URL's user and password in their own settings ([[DuckDbProxy]]),
+        // the same split as spawn-quack-node.sh.
         //
         // Extension INSTALL/LOAD and the proxy/storage SET statements touch
         // only this DuckDB connection's own state -- no shared Postgres
@@ -142,9 +141,7 @@ object DuckLakeInitializer extends LazyLogging:
         // below (and its CREATE TABLE __ducklake_metadata) races across
         // initializers, so the lock is taken just around it. Extensions must
         // still be loaded on THIS connection before the ATTACH runs.
-        proxyHostPort.foreach { hp =>
-          stmt.execute(s"SET http_proxy = ${duckdbLiteral(hp)}")
-        }
+        DuckDbProxy.fromEnv(sys.env.get).foreach(sql => stmt.execute(sql))
         stmt.execute(ext.loadSql("ducklake"))
         stmt.execute(ext.loadSql("postgres_scanner"))
         storageSqlFor(dataPath, ext).foreach(stmt.execute)
@@ -382,15 +379,6 @@ object DuckLakeInitializer extends LazyLogging:
       }
       List(install) ++ secret.toList
     else Nil
-
-  private def proxyHostPort: Option[String] =
-    List("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy").iterator
-      .flatMap(sys.env.get)
-      .map(_.trim)
-      .find(_.nonEmpty)
-      .map { url =>
-        url.stripPrefix("http://").stripPrefix("https://").stripSuffix("/")
-      }
 
   /** DuckDB SQL string literal: wrap in single quotes, double any embedded `'`. */
   private[ondemand] def duckdbLiteral(v: String): String =

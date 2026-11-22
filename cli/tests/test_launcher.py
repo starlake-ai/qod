@@ -174,6 +174,26 @@ def test_ensure_node_extensions_hands_proxy_credentials_on_stdin_only(tmp_path):
     assert not any("zqx" in arg for argv in fake.argvs for arg in argv)
 
 
+# The URLs of the manager's SpawnScriptProxySpec / DuckDbProxySpec (#287): the CLI, both spawn
+# scripts and the manager's DuckLake initializer split a proxy URL alike.
+@pytest.mark.parametrize(
+    "url, expected",
+    [
+        ("http://a:b@c@h:3", ["SET http_proxy = 'h:3'", "SET http_proxy_username = 'a'",
+                              "SET http_proxy_password = 'b@c'"]),
+        ("https://u@h:1/path?x#y", ["SET http_proxy = 'h:1'", "SET http_proxy_username = 'u'",
+                                    "SET http_proxy_password = ''"]),
+        ("http://@h:2", ["SET http_proxy = 'h:2'"]),
+        ("http://u:caf%C3%A9+%zz%4@h:4", ["SET http_proxy = 'h:4'", "SET http_proxy_username = 'u'",
+                                          "SET http_proxy_password = 'café+%zz%4'"]),
+    ],
+)
+def test_duckdb_proxy_sql_splits_like_the_spawn_scripts(url, expected):
+    from qod_cli import launcher
+
+    assert launcher._duckdb_proxy_sql({"HTTP_PROXY": url}) == expected
+
+
 def test_duckdb_proxy_sql_reads_a_url_with_no_scheme():
     from qod_cli import launcher
 

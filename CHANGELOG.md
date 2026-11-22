@@ -109,6 +109,14 @@
   segment under it (such as `/api/webhook`); lies under a core API segment or under another loaded
   module's name; or, outside `/api`, lies under none of the module's own static mounts (a root
   mount covers none).
+- **A proxy URL's password no longer reaches a statement's error** (#287). Nodes and the
+  manager's DuckLake initializer put a proxy URL holding a user and password
+  (`HTTPS_PROXY=http://user:password@proxy:3128`) in DuckDB's `http_proxy` whole. DuckDB stores
+  that, then refuses it at the first HTTP request with an error quoting the value, so a statement
+  that read over HTTPS or S3 answered whoever ran it with the proxy password, and every request
+  through the proxy failed. Both spawn scripts and the initializer now set `http_proxy` to the host and port
+  and the user and password, percent-decoded, in `http_proxy_username` / `http_proxy_password`,
+  which DuckDB sends as the proxy's credentials. Restart every node to apply it.
 - **`deploy/host/install.sh` no longer puts the values of `/etc/qod/qod.env` on a command line**
   (#282). Its download run got them as arguments of `env` under `runuser` (or `sudo`), which
   waits for the whole download, so any local user could read a proxy password in `HTTPS_PROXY`
