@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useState } from 'react';
 import { useAuth } from '../auth/AuthContext';
+import { profileSectionsFor } from './profileSections';
 import { api, ApiError, errorMessage } from '../api/client';
 import type { UsageDayEntry, StatementHistoryEntry } from '../api/types';
 import { PatSection } from '../components/PatSection';
@@ -34,7 +35,8 @@ function mergeDays(days: UsageDayEntry[][]): UsageDayEntry[] {
 }
 
 export default function Profile() {
-  const { username, tenant, role, superuser } = useAuth();
+  const { username, tenant, role, superuser, staff } = useAuth();
+  const sections = profileSectionsFor(staff);
 
   // ---- change password ----
   const [currentPassword, setCurrentPassword] = useState('');
@@ -78,6 +80,7 @@ export default function Profile() {
   const [statsLoading, setStatsLoading] = useState(true);
 
   useEffect(() => {
+    if (!sections.usage) { setStatsLoading(false); return; }
     setStatsLoading(true);
     setStatsErr('');
     Promise.all([api.profileUsage(30), api.profileStatements(50)])
@@ -165,10 +168,12 @@ export default function Profile() {
 
       <PatSection />
 
-      <S3CredentialsSection />
+      {sections.s3 && <S3CredentialsSection />}
 
-      {!superuser && <RecoverTablesSection />}
+      {sections.recoverable && !superuser && <RecoverTablesSection />}
 
+      {sections.usage && (
+        <>
       <div className="card" style={{ marginBottom: 16 }}>
         <div className="card-title">Usage (last 30 days)</div>
         {statsErr && <p className="login-err">{statsErr}</p>}
@@ -242,6 +247,8 @@ export default function Profile() {
           activity, not a full history.
         </p>
       </div>
+        </>
+      )}
     </>
   );
 }

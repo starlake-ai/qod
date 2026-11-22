@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { layoutFor, platformNavItems } from './platformNav';
+import { layoutFor, platformNavItems, staffNavCtx } from './platformNav';
+import { NAV, visibleNav } from './navModel';
 
 describe('layoutFor', () => {
   it('maps whoami roles to layouts', () => {
@@ -23,5 +24,12 @@ describe('platformNavItems', () => {
   });
   it('is empty with no pages', () => {
     expect(platformNavItems([])).toEqual([]);
+  });
+});
+
+describe('staffNavCtx', () => {
+  it('leaves staff only the profile entry of the base nav', () => {
+    const ids = visibleNav(NAV, staffNavCtx()).flatMap(i => [i.id, ...i.children.map(c => c.id)]);
+    expect(ids).toEqual(['settings', 'profile']);
   });
 });

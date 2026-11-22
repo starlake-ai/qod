@@ -78,7 +78,7 @@ import { defaultScope, parseScope, scopePrefix, scopeRedirect, type Scope } from
 import SidebarLayout from './nav/SidebarLayout';
 import TenantSwitcher from './nav/TenantSwitcher';
 import { NAV, visibleNav } from './nav/navModel';
-import { layoutFor, platformNavItems, routerPath } from './nav/platformNav';
+import { layoutFor, platformNavItems, routerPath, staffNavCtx } from './nav/platformNav';
 import { useConsolePages } from './modules/useConsolePages';
 import { legacyRedirect } from './nav/legacy';
 import Config from './pages/Config';
@@ -108,12 +108,8 @@ function ProfileShell() {
 // Platform staff session (issue #274): no tenant scope, only the module pages the staff roles
 // grant, plus the caller's own profile.
 function StaffShell() {
-  const { starlakeUrl, telemetryEnabled, fleetEnabled } = useAuth();
   const { pages, loading } = useConsolePages();
-  const ctx = {
-    superuser: false, admin: false, telemetry: telemetryEnabled, fleet: fleetEnabled,
-    starlake: !!starlakeUrl, scope: { kind: 'all' } as Scope,
-  };
+  const ctx = staffNavCtx();
   const items = [...visibleNav(platformNavItems(pages), ctx), ...visibleNav(NAV, ctx)];
   if (loading) return <div className="loading">Loading pages...</div>;
   const landing = pages.length > 0 ? routerPath(pages[0]) : '/settings/profile';
