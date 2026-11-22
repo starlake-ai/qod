@@ -126,7 +126,9 @@ the `statement` rule with this input:
 }}
 ```
 
-- `accesses` are the objects of the bound plan, lowercase, sorted: tables and views read or written,
+- `accesses` are the objects of the bound plan, sorted, their names folded as DuckDB folds them: the
+  ASCII letters `A`-`Z` lowercased and every other character kept, so `"SECRET_ÉTÉ"` arrives as
+  `secret_ÉtÉ`; compare names in Rego the same way. They are tables and views read or written,
   and schemas, sequences, indexes, types created, dropped or altered. `kind` is `table`, `view`,
   `secure_view`, `schema`, `sequence`, `index`, `macro`, `type` or `trigger`; a schema-wide access
   (`kind: schema`) has `table: "*"`. `columns` lists the columns read: empty for a write or DDL, and

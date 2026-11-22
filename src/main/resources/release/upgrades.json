@@ -118,7 +118,10 @@
       "rollback_without_restore": true,
       "rollback_blocked_by": [],
       "notes": "https://github.com/starlake-ai/quack-on-demand/blob/v0.14.2/CHANGELOG.md",
-      "steps": []
+      "steps": [
+        { "when": "before", "boot_refuses_until_done": false, "text": "On an OPA tenant whose Rego compares catalog, schema, table or column names holding a non-ASCII uppercase letter, update the rules to the new input: names arrive folded as DuckDB folds them, ASCII letters only, and a deny rule written against the old lowercased form stops matching." },
+        { "when": "after", "boot_refuses_until_done": false, "text": "Check each boot WARN line about a grant, column policy or row policy that names a non-ASCII letter that has another case: names now match as DuckDB binds them, so a row spelled with another case of such a letter than its object's stopped matching." }
+      ]
     }
   ]
 }

@@ -742,6 +742,12 @@ object Main extends IOApp with LazyLogging:
       // A defaultDatabase naming another catalog than the database's own, stored before writes
       // refused one: ignored (the policy steps qualify with the session path), reported per row.
       ai.starlake.quack.ondemand.DefaultDatabaseReport.report(snap.tenantDbs)
+      // Grants and policies naming a non-ASCII cased letter: they now match as DuckDB binds names
+      // (ASCII letters folded only), so each is reported for an operator to check (ruling D21).
+      scala.util
+        .Try(ai.starlake.quack.ondemand.rbac.NonAsciiPolicyNameReport.report(store))
+        .failed
+        .foreach(e => logger.warn(s"non-ASCII policy name report: ${e.getClass.getSimpleName}"))
       manifestFedStore.foreach { fs =>
         scala.util
           .Try {

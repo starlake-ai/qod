@@ -151,7 +151,8 @@ private[cls] object StarExpansion:
     def isPolicyTable(t: Table): Boolean =
       val name = unquote(Option(t.getName).getOrElse(""))
       policies.exists(p =>
-        p.tableName == RoleColumnPolicy.Wildcard || p.tableName.equalsIgnoreCase(name)
+        p.tableName == RoleColumnPolicy.Wildcard || ai.starlake.sql.IdentifierFold
+          .same(p.tableName, name)
       )
     val policyScope = fromItems.exists {
       case t: Table => isPolicyTable(t)

@@ -138,7 +138,7 @@ class NonAsciiCaseFoldSpec extends AnyFlatSpec with Matchers:
       served(conn, h, sql, columnHolder) match
         case Some((text, rows)) =>
           withClue(text)(rows shouldBe List(List("1", "***"), List("2", "***")))
-        case None => fail(s"$sql was refused")
+        case None => fail(s"$sql was refused: ${h.run(sql, columnHolder)}")
       // Every form reading only the masked column is served, masked, rather than refused; a read
       // of the deny column (or a star over the table, which holds it) is refused.
       val (denied, masked) =

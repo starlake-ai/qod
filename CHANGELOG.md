@@ -1,5 +1,42 @@
 # Changelog
 
+## Unreleased
+
+### Upgrading
+
+- Read the new boot lines `WARN: tenant '...' role '...': the grant | column policy | row policy
+  on ... names a non-ASCII letter that has another case` (stderr) and check each row: names now
+  match as DuckDB binds them (below), so a grant or policy spelled with another case of such a
+  letter than its object's stopped matching.
+- An OPA tenant whose Rego compares table, schema, catalog or column names holding a non-ASCII
+  uppercase letter: update it to the new folding (below) before upgrading. A deny rule written
+  against the old lowercased form stops matching, and so allows.
+
+### Security
+
+- **Names compare as DuckDB binds them, folding ASCII letters only.** DuckDB folds identifier case
+  for `A`-`Z` only, so `"Clés"` and `"clÉs"` are two tables one schema can hold, and a CTE named
+  `"clÉs"` does not shadow the table `"Clés"`. The gateway folded every cased letter, so for a
+  holder of column policies `WITH "clÉs" AS (...) SELECT c.secret FROM "Clés" c` was read as a
+  CTE reference and its masked column went out raw, and an `INSERT` or `CREATE TABLE AS` reading
+  the table that way could copy masked values, or rows a row policy hides, into a table of the
+  user's own. CTE scoping, column and table bindings, grants (`*.*.*` aside, a grant on `"Clés"`
+  also covered `"clÉs"`), the `system` and `temp` catalog rules (a catalog named `ſystem` was read
+  as `system`), column and row policies and the metadata filter's schema checks now all compare
+  names that way. ASCII names behave exactly as before.
+  - A grant, column policy or row policy spelled with another case of a non-ASCII letter than its
+    object's (`"CLÉS"` for the table `"Clés"`) no longer matches it; boot reports each stored row
+    whose names hold such a letter.
+  - An OPA tenant's input now carries catalog, schema, table, column and secure view names folded
+    as DuckDB folds them (`"SECRET_ÉTÉ"` arrives as `secret_ÉtÉ`, formerly `secret_été`); a Rego
+    rule written against the old lowercased form must be updated.
+- **Several column policies on one column: a deny wins, a policy naming the table beats a
+  wildcard one, and two different masks are refused.** The first matching policy used to apply,
+  and the order of the policies followed the roles and the order the statement named its tables,
+  so a CTE the node never binds, listed first, could make a wildcard mask displace a deny or a
+  stronger mask. A column two different masks still cover is now refused with `conflicting
+  column policies on <table>.<column>`; give the column one mask, or a deny.
+
 ## 0.14.1
 
 ### Upgrading

@@ -51,7 +51,7 @@ private[cls] object SameNameTables:
         all.collect {
           case p
               if p.tableName != RoleColumnPolicy.Wildcard &&
-                unquote(p.tableName).equalsIgnoreCase(r.bare) =>
+                ai.starlake.sql.IdentifierFold.same(unquote(p.tableName), r.bare) =>
             p.copy(tableName = key)
         }
       }

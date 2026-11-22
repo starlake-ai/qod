@@ -10,9 +10,10 @@ package ai.starlake.sql
   * passed its masked columns raw (security review C1), and a grant on one table covered the other.
   *
   * Every comparison of a name the gateway or the node decider reads against what DuckDB resolved (a
-  * CTE name, an alias, a table or column binding, a grant's name) goes through this fold. Matching
-  * a policy to a table or column stays broader on purpose (`equalsIgnoreCase`): a policy that
-  * covers one more table masks or filters more, never less.
+  * CTE name, an alias, a table or column binding, a grant's or a column or row policy's name) goes
+  * through this fold. A broader match is not safe for policies either: a policy covering one more
+  * table can displace that table's own deny or stronger mask, or OR a row filter written for
+  * another table into its own (security review I1, M1, M2; owner ruling D21).
   */
 private[starlake] object IdentifierFold:
 

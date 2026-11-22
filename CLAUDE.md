@@ -1004,10 +1004,17 @@ The `EffectiveSet` is cached in `PoolSupervisor` (`qod_effective_sets`, at most 
 letters only, so `"Clés"` and `"clÉs"` are two tables of one schema and a CTE `"clÉs"` does not
 shadow the table `"Clés"`. Every comparison of a name against what DuckDB resolves (grants in
 `GrantMatch` and `AuthzDecider`, CTE scoping in `TableExtractor`, the column rewriter's bindings,
-`TableRef`, the metadata filter's schema checks) goes through `ai.starlake.sql.IdentifierFold`,
-never `toLowerCase` / `equalsIgnoreCase`, which fold every cased letter and made a policy step read
-the table as the CTE and pass its masked columns raw. Matching a column or row policy to a table or
-column stays `equalsIgnoreCase` on purpose (broader, so it masks or filters more, never less).
+`TableRef`, the metadata filter's schema checks, column and row policies through `PolicyCoverage`
+and `JsqltranspilerRewriter.matchingPolicy`) goes through `ai.starlake.sql.IdentifierFold`, never
+`toLowerCase` / `equalsIgnoreCase`, which fold every cased letter and made a policy step read the
+table as the CTE and pass its masked columns raw. A broader policy match is not safe either: it can
+displace a table's own deny or OR another table's row filter into its own (owner ruling D21). When
+several column policies cover one column, a deny wins, then one naming the table over a wildcard
+one, and two different masks left are refused (`conflicting column policies on <table>.<column>`,
+`JsqltranspilerRewriter.ConflictingPolicies`). Boot prints one stderr `WARN:` line per stored
+grant, column policy or row policy whose names hold a non-ASCII cased letter
+(`NonAsciiPolicyNameReport`), as such a row matches only an object spelled with exactly those
+letters. The OPA input carries names folded the same way.
 
 ### OPA authorization (per tenant)
 

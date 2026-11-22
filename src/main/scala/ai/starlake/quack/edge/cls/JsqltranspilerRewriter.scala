@@ -806,21 +806,52 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
 
         case other => other
 
-  /** Names are compared unquoted ([[ai.starlake.sql.QuotedIdentifier]]): the parser keeps the
-    * quotes of `"c_email"` on the column it hands the visitor, and a quoted name that matched no
-    * policy was left in place for the backstop to deny instead of being masked.
+  /** The one policy that applies to `table.column`, None when none matches (owner ruling D21,
+    * security review I1). Every matching policy is read, never the first: their order follows the
+    * roles and the order the statement names its tables, which a caller steers (a CTE the node
+    * never binds listed first). A deny wins; otherwise a policy naming the table beats a wildcard
+    * one; two different masks left are a refusal ([[JsqltranspilerRewriter.ConflictingPolicies]],
+    * thrown as a `DenyException`), never a choice. Names are compared unquoted
+    * ([[ai.starlake.sql.QuotedIdentifier]]: the parser keeps the quotes of `"c_email"` on the
+    * column it hands the visitor) and as DuckDB binds them ([[ai.starlake.sql.IdentifierFold]]).
+    *
+    * The table and column handed here come from the resolver (jsqltranspiler), which folds names
+    * with Java's case rules: for a reference to `"Clés"` it can name a CTE `"clÉs"` or a table
+    * `"clÉs"` of the statement, and the reverse. So a policy whose table or column equals the
+    * reference only under that broader fold is read too, and it can only make the outcome stricter:
+    * with the policy chosen above it, a deny wins and a different mask is a conflict.
     */
   private def matchingPolicy(
       table: String,
       column: String,
       policies: List[RoleColumnPolicy]
   ): Option[RoleColumnPolicy] =
-    val t = unquoteName(table)
-    val c = unquoteName(column)
-    policies.find { p =>
-      (p.tableName == RoleColumnPolicy.Wildcard || p.tableName.equalsIgnoreCase(t)) &&
-      p.columnName.equalsIgnoreCase(c)
-    }
+    val t                           = unquoteName(table)
+    val c                           = unquoteName(column)
+    def covers(p: RoleColumnPolicy) =
+      (p.tableName == RoleColumnPolicy.Wildcard || same(p.tableName, t)) && same(p.columnName, c)
+    def resolverMayMean(p: RoleColumnPolicy) =
+      !covers(p) &&
+        (p.tableName == RoleColumnPolicy.Wildcard || p.tableName.equalsIgnoreCase(t)) &&
+        p.columnName.equalsIgnoreCase(c)
+    def strictest(ps: List[RoleColumnPolicy]): Option[RoleColumnPolicy] =
+      ps.find(_.action == RoleColumnPolicy.ActionDeny).orElse {
+        ps.distinctBy(p => (p.action, p.transformSql.map(_.trim))) match
+          case Nil        => None
+          case one :: Nil => Some(one)
+          case _          => throw DenyException(JsqltranspilerRewriter.ConflictingPolicies(t, c))
+      }
+    val matched = policies.filter(covers)
+    val named   = matched.filter(_.tableName != RoleColumnPolicy.Wildcard)
+    val chosen  =
+      matched
+        .find(_.action == RoleColumnPolicy.ActionDeny)
+        .orElse(
+          strictest(if named.nonEmpty then named else matched)
+        )
+    policies.filter(resolverMayMean) match
+      case Nil   => chosen
+      case loose => strictest(chosen.toList ++ loose)
 
   private def unquoteName(s: String): String = ai.starlake.sql.QuotedIdentifier.unquote(s)
 
@@ -853,6 +884,15 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
   * field read of that column (DuckDB's fallback when the binding `q` lacks the column), whatever
   * the binding has. The check can only add denials.
   */
+object JsqltranspilerRewriter:
+
+  /** The refusal of a column two different masks cover, none of them a deny and none naming the
+    * table more closely than the other (owner ruling D21): picking one would let the order of the
+    * policies decide what the caller reads.
+    */
+  def ConflictingPolicies(table: String, column: String): String =
+    s"conflicting column policies on $table.$column"
+
 private[cls] object ResidualColumns:
   import scala.jdk.CollectionConverters._
   import ai.starlake.acl.parser.AstChildren
@@ -1179,9 +1219,7 @@ private[cls] object ResidualColumns:
     def columnsOf(table: String): Option[List[String]] =
       schema.find(e => same(e._1, table)).map(_._2).filter(_.nonEmpty)
     def isPolicyTable(table: String, byName: List[RoleColumnPolicy] = policies): Boolean =
-      byName.exists(p =>
-        p.tableName == RoleColumnPolicy.Wildcard || p.tableName.equalsIgnoreCase(table)
-      )
+      byName.exists(p => p.tableName == RoleColumnPolicy.Wildcard || same(p.tableName, table))
 
     /** Whether `src` has the column: Some(true / false) when known, None when it cannot be told. */
     def has(src: Source, name: String): Option[Boolean] =
@@ -1206,7 +1244,7 @@ private[cls] object ResidualColumns:
 
     /** Whether the bare name `name` binds to a covered column. */
     private def nameCovered(name: String, scopes: List[Scope]): Boolean =
-      val byName = policies.filter(_.columnName.equalsIgnoreCase(name))
+      val byName = policies.filter(p => same(p.columnName, name))
       byName.nonEmpty &&
       (byName.exists(_.tableName == RoleColumnPolicy.Wildcard) ||
         unqualifiedCovered(name, scopes, byName))
@@ -1229,7 +1267,7 @@ private[cls] object ResidualColumns:
 
     def covered(col: Column, scopes: List[Scope]): Boolean =
       val name   = unquote(Option(col.getColumnName).getOrElse(""))
-      val byName = policies.filter(_.columnName.equalsIgnoreCase(name))
+      val byName = policies.filter(p => same(p.columnName, name))
       Option(col.getTable).flatMap(t => Option(t.getName)).map(unquote) match
         case Some(q) =>
           // The qualifier may itself be a column and `name` one of its fields (`c_email.x`,
@@ -1328,9 +1366,9 @@ private[cls] object ResidualColumns:
           case (Some(l), Some(r)) =>
             (l intersect r).exists(name =>
               policies.exists(p =>
-                p.columnName.equalsIgnoreCase(name) &&
+                same(p.columnName, name) &&
                   (p.tableName == RoleColumnPolicy.Wildcard ||
-                    sides.exists(_.table.exists(_.equalsIgnoreCase(p.tableName))))
+                    sides.exists(_.table.exists(same(_, p.tableName))))
               )
             )
           case _ => true
