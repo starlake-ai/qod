@@ -239,17 +239,28 @@ final class ManagerServer(
     *
     * Exact equality, never a prefix test: SPI modules mount their own path prefixes under `/api`
     * (and core keeps adding siblings under `/api/auth`), and a prefix match would silently hand
-    * every one of them to regular users.
+    * every one of them to regular users. On whole segments (see [[isExactly]]): `auth%2Fwhoami`
+    * reads as `/api/auth/whoami` in the joined path and routes as one segment, to a module route
+    * shaped `/api/{x}`.
     */
-  private def isProfileApi(path: String): Boolean =
-    ManagerServer.ProfileApiPaths.contains(path) ||
+  private def isProfileApi(path: String, segments: Vector[String]): Boolean =
+    isExactly(profileApiSegments, path, segments) ||
       // Starlake SSO ticket mint: any valid session may hand its own grant to
       // Starlake, admin or not -- the minted grant mirrors the session's own
       // admin-ness, it grants nothing new. Gated on the integration flag: with
       // SL_ENABLED=false a non-admin session must still get 403 admin_required here
       // exactly as before this feature existed, not a silent profile-allowlist grant
       // ahead of the route ever being wired.
-      (cfg.auth.management.slIntegrationOn && path == "/api/auth/sso/ticket")
+      (cfg.auth.management.slIntegrationOn && isExactly(ssoTicketSegments, path, segments))
+
+  private val profileApiSegments: Map[String, Vector[String]] =
+    ManagerServer.segmentsOf(ManagerServer.ProfileApiPaths)
+  private val ssoTicketSegments: Map[String, Vector[String]] =
+    ManagerServer.segmentsOf(Set("/api/auth/sso/ticket"))
+  private val staffProfileSegments: Map[String, Vector[String]] =
+    ManagerServer.segmentsOf(ManagerServer.StaffProfilePaths)
+  private val logoutSegments: Map[String, Vector[String]] =
+    ManagerServer.segmentsOf(Set("/api/auth/logout"))
 
   /** The staff prefixes modules declared, each split into segments once. An empty one (`""` or
     * `"/"`) is dropped: it would cover every path.
@@ -271,11 +282,11 @@ final class ManagerServer(
     * console page list and the paths modules declare for staff. Everything else is
     * `403 admin_required`, so a module route written for superusers stays closed to staff, and so
     * do the branch routes: staff hold no pool. An explicit list: a profile path added later stays
-    * closed to staff until someone adds it there.
+    * closed to staff until someone adds it there. On whole segments, like every allowlist here.
     */
   private def isStaffApi(method: Method, path: String, segments: Vector[String]): Boolean =
-    ManagerServer.StaffProfilePaths.contains(path) ||
-      ManagerServer.isConsolePages(method, path) || underStaffPrefix(segments)
+    isExactly(staffProfileSegments, path, segments) ||
+      ManagerServer.isConsolePages(method, path, segments) || underStaffPrefix(segments)
 
   /** The branch routes a NON-ADMIN session may reach, and the only paths whose tenant the guard
     * leaves to the handler: any principal who may connect may branch, in its own tenant, which
@@ -517,8 +528,8 @@ final class ManagerServer(
             sessionAdmin ||
               (staffSession && isStaffApi(req.method, path, segments)) ||
               (nonAdminSession &&
-                (isProfileApi(path) || branchApi ||
-                  ManagerServer.isConsolePages(req.method, path)))
+                (isProfileApi(path, segments) || branchApi ||
+                  ManagerServer.isConsolePages(req.method, path, segments)))
           // A session of a disabled tenant's user (every tenant it holds disabled) is refused
           // everything but signing out, until a superuser enables the tenant. A PAT of one already
           // resolves to nothing (PatAuthenticator).
@@ -532,7 +543,7 @@ final class ManagerServer(
           // the insert throw and the attacker would erase their own trail.
           // Shared by both denial arms below.
           val safePath = path.filter(c => c >= ' ' && c != 0x7f).take(200)
-          if disabledTenant.isDefined && path != "/api/auth/logout" then
+          if disabledTenant.isDefined && !isExactly(logoutSegments, path, segments) then
             val username = resolved.map(_.profile.username).getOrElse("unknown")
             auditDenial("disabled:" + username)(
               audit.restAs(
@@ -1396,9 +1407,15 @@ object ManagerServer extends com.typesafe.scalalogging.LazyLogging:
   private[quack] def isStaffSession(s: SessionTokenStore.Session): Boolean =
     s.profile.tenant.isEmpty && s.profile.role.equalsIgnoreCase(UserKind.Staff)
 
-  /** A read of the console page list: `GET` only. */
-  private[ondemand] def isConsolePages(method: Method, path: String): Boolean =
-    method == Method.GET && path == ConsolePagesPath
+  private val ConsolePagesSegments: Map[String, Vector[String]] = segmentsOf(Set(ConsolePagesPath))
+
+  /** A read of the console page list: `GET` only, on whole segments (see `isExactly`). */
+  private[ondemand] def isConsolePages(
+      method: Method,
+      path: String,
+      segments: Vector[String]
+  ): Boolean =
+    method == Method.GET && ConsolePagesSegments.get(path).contains(segments)
 
   /** The branch routes a NON-ADMIN session may reach (see `isBranchApi`), as a method and a path
     * template split into segments. A `{name}` segment matches any non-empty segment; every other
