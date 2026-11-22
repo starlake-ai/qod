@@ -12,7 +12,7 @@
 # The DuckDB CLI only serves the build: it pre-installs the node's extensions. The image ships the
 # release libduckdb where qod looks for it (DUCKDB_CACHE_DIR), so nothing is downloaded at run time.
 #
-# Build: docker build -t starlakeai/quack-on-demand-worker:local -f docker/fleet-worker/Dockerfile .
+# Build: docker build -t starlakeai/quack-on-demand-worker:local -f deploy/docker/fleet-worker/Dockerfile .
 
 # The qod wheel from this checkout, never a PyPI release that may lag it. Pure Python plus the
 # bundled qod-node binaries, so the builder's interpreter version does not matter.
@@ -94,7 +94,7 @@ RUN python3 -m venv /opt/qod \
  && rm -rf /tmp/wheels \
  && /opt/qod/bin/qod --help >/dev/null
 
-COPY --chmod=0755 docker/fleet-worker/entrypoint.sh /usr/local/bin/fleet-worker-entrypoint
+COPY --chmod=0755 deploy/docker/fleet-worker/entrypoint.sh /usr/local/bin/fleet-worker-entrypoint
 
 RUN useradd --create-home --shell /bin/bash --uid 1000 quack \
  && chown -R quack:quack /opt/duckdb-extensions

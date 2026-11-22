@@ -18,9 +18,9 @@ import ai.starlake.quack.ondemand.auth.TokenRestriction
 import ai.starlake.quack.ondemand.branch.BranchNames
 import ai.starlake.quack.ondemand.rbac.{Attenuation, EffectiveSet}
 
+import ai.starlake.sql.IdentifierFold
 import com.typesafe.scalalogging.LazyLogging
 
-import java.util.Locale
 import scala.util.control.NonFatal
 
 /** What the decision endpoint answers a node: a verdict (allow or refuse), or unavailable: a
@@ -192,11 +192,11 @@ final class AuthzDecider(
       refuse(s"the description names an unknown object kind '${o.kind}'")
     else if !Accesses.contains(o.access) then
       refuse(s"the description names an unknown access '${o.access}'")
-    else if o.catalog.toLowerCase(Locale.ROOT).startsWith(DuckLakeMetadataPrefix) then
+    else if IdentifierFold.fold(o.catalog).startsWith(DuckLakeMetadataPrefix) then
       refuse(s"${o.qualified} is DuckLake catalog metadata, which only superusers reach")
     else if ProtectedKinds.contains(o.kind) && DdlAccesses.contains(o.access) then
       refuse(s"${o.access} ${o.kind.replace('_', ' ')} ${o.qualified} is superuser-only")
-    else if o.catalog.equalsIgnoreCase("system") && o.access != "read" then
+    else if IdentifierFold.same(o.catalog, "system") && o.access != "read" then
       refuse(s"${o.access} in the system catalog is superuser-only")
     else if o.via.isDefined && o.access != "read" then
       refuse(
@@ -256,7 +256,7 @@ final class AuthzDecider(
     * a view the description does not list would be judged without it.
     */
   private def viaBoundaries(d: Description): Step =
-    def low(s: String): String = s.toLowerCase(Locale.ROOT)
+    def low(s: String): String = IdentifierFold.fold(s)
     val read                   =
       d.objects
         .filter(o => o.kind == "secure_view" && o.access == "read")
@@ -302,7 +302,7 @@ final class AuthzDecider(
   // ---- rule 5 ----
 
   private def writesData(o: DescribedObject): Boolean =
-    o.access != "read" && !o.catalog.equalsIgnoreCase("temp")
+    o.access != "read" && !IdentifierFold.same(o.catalog, "temp")
 
   private def branchOnly(ctx: DecideContext, writes: Boolean): Step =
     if writes && ctx.restriction.exists(_.branchOnly) &&
@@ -354,8 +354,8 @@ final class AuthzDecider(
     * metadata filter narrows).
     */
   private def admittedWithoutGrant(o: DescribedObject): Boolean =
-    o.catalog
-      .equalsIgnoreCase("temp") || (o.catalog.equalsIgnoreCase("system") && o.access == "read")
+    IdentifierFold.same(o.catalog, "temp") ||
+      (IdentifierFold.same(o.catalog, "system") && o.access == "read")
 
   private def granted(
       eff: EffectiveSet,
@@ -390,8 +390,8 @@ final class AuthzDecider(
     * `secure_view`) carries the next view out as its own `via`. A cycle stops the walk.
     */
   private def outermostView(via: String, d: Description): String =
-    // Lowercased throughout: DuckDB resolves names case-insensitively.
-    def low(s: String): String = s.toLowerCase(Locale.ROOT)
+    // Folded throughout as DuckDB resolves names: ASCII letters only (IdentifierFold).
+    def low(s: String): String = IdentifierFold.fold(s)
     val outer                  =
       d.objects.filter(_.kind == "secure_view").map(v => low(v.qualified) -> v.via.map(low)).toMap
     @scala.annotation.tailrec
@@ -427,9 +427,9 @@ final class AuthzDecider(
         else if badVia.nonEmpty then
           refuse(s"user:${eff.user.username} lacks grants on ${names(badVia)}")
         else
-          // Lowercase names (as the gateway's statement input to OPA had them); `via` the
+          // Names folded as DuckDB folds them (ASCII letters only, IdentifierFold); `via` the
           // outermost view of its chain, the one whose grant QoD itself checks.
-          def low(s: String): String = s.toLowerCase(Locale.ROOT)
+          def low(s: String): String = IdentifierFold.fold(s)
           val accesses               = gated.map { o =>
             val schemaWide = o.kind == "schema"
             OpaAccess(

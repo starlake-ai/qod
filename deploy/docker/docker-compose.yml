@@ -26,8 +26,13 @@
 # defaults; external folders you point these vars at are left untouched.
 #
 # Settings live in `.env` (or env vars at compose time) - see .env.example.
-# Bring everything up with:
-#   docker compose up --build
+# Run every command from the repository root with `--project-directory .`: the
+# relative paths in this file, `.env` and the project name are all read from
+# there, so the stack keeps the volumes and containers it had when this file
+# sat at the root. Bring everything up with:
+#   docker compose --project-directory . -f deploy/docker/docker-compose.yml up --build
+#
+# Every `docker compose ...` in the comments below stands for that same form.
 
 services:
 
@@ -426,7 +431,7 @@ services:
 
   starflow:
     build:
-      context: docker/starflow
+      context: deploy/docker/starflow
       args:
         STARFLOW_VERSION: ${STARFLOW_VERSION:-1.8.8}
         HTTP_PROXY:  ${HTTP_PROXY:-}

@@ -1,6 +1,7 @@
 package ai.starlake.acl.parser
 
 import java.util.Locale
+import ai.starlake.sql.IdentifierFold
 import ai.starlake.acl.model.{Config, DenyReason, TableRef}
 import net.sf.jsqlparser.schema.Table
 
@@ -88,7 +89,7 @@ private[parser] object DuckDBDialectMapper extends DialectMapper:
     (dbName, schemaName) match
       case (None, Some(head))
           if table.getNameParts.size <= 3 &&
-            config.normalizedAttachedCatalogs.contains(head.toLowerCase(Locale.ROOT)) =>
+            config.normalizedAttachedCatalogs.contains(IdentifierFold.fold(head)) =>
         Left(DenyReason.AmbiguousCatalogRef(s"$head.$tableName", head))
       case _ =>
         AnsiDialectMapper.toTableRef(table, config)

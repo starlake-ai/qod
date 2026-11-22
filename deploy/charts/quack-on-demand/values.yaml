@@ -227,14 +227,14 @@ postgres:
 # --- Quack node image --------------------------------------------------------
 # Image used for the Quack node pods the manager spawns. This is the DuckDB
 # Quack server, NOT the manager - they're separate processes. Built from
-# docker/quack-node/Dockerfile in this repo.
+# deploy/docker/quack-node/Dockerfile in this repo.
 quackNode:
   # Published image on Docker Hub. Empty (the default) resolves to
   # `starlakeai/quack-on-demand-node:<appVersion>` - the node image released
   # in lockstep with the manager (release.yml publishes both since 0.6.1),
   # so a versioned chart deploys versioned images throughout. Override with
   # a full image ref to pin something else; `:latest-snapshot` is the moving
-  # alias updated on every push to main that touches docker/quack-node/**.
+  # alias updated on every push to main that touches deploy/docker/quack-node/**.
   image: ""
 
 # --- DuckLake storage --------------------------------------------------------
@@ -258,7 +258,7 @@ storage:
 # httpfs can talk to the endpoint; without the keys it uses the pod's AWS
 # credential chain.
 #
-# For the kind smoke, defaults match charts/quack-on-demand/local-stack-k8s/seaweedfs.yaml.
+# For the kind smoke, defaults match deploy/charts/quack-on-demand/local-stack-k8s/seaweedfs.yaml.
 # For production: point endpoint at your bucket (https://s3.<region>.amazonaws.com
 # for real AWS S3), set useSsl=true, and use an existingSecret rather than the
 # inline accessKey/secretKey.

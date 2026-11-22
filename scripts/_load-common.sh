@@ -183,7 +183,7 @@ CREATE OR REPLACE SECRET quack_azure (
       echo "Heads up: DATA_PATH='$DATA_PATH'" >&2
       echo "If you plan to run the manager in Docker, the container will look for the" >&2
       echo "data files at /app/ducklake/$DB_NAME (its bind-mount target), NOT at" >&2
-      echo "'$DATA_PATH'. Use 'docker compose exec quack /app/scripts/load-$DATASET-dbgen.sh'" >&2
+      echo "'$DATA_PATH'. Use 'docker compose --project-directory . -f deploy/docker/docker-compose.yml exec quack /app/scripts/load-$DATASET-dbgen.sh'" >&2
       echo "to load $DATASET_LABEL from inside the container (paths match by construction)." >&2
       echo "" >&2
     fi

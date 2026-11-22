@@ -1,6 +1,6 @@
 package ai.starlake.quack.edge.cls
 
-import java.util.Locale
+import ai.starlake.sql.IdentifierFold
 
 /** Static column lists for DuckDB's system-catalog tables (`information_schema.*` and
   * `pg_catalog.*`), so the CLS resolver can resolve metadata queries without asking the tenant
@@ -29,7 +29,7 @@ object SystemSchemaColumns:
   private val systemSchemas: Set[String] = Set("information_schema", "pg_catalog")
 
   def isSystemSchema(schema: String): Boolean =
-    systemSchemas.contains(schema.toLowerCase(Locale.ROOT))
+    systemSchemas.contains(IdentifierFold.fold(schema))
 
   /** Ordered column list for `schema.table`, case-insensitive on both parts. `None` when the schema
     * is not a system schema or the table is not a known system table of this DuckDB build (callers
@@ -37,7 +37,7 @@ object SystemSchemaColumns:
     */
   def columnsOf(schema: String, table: String): Option[List[String]] =
     if !isSystemSchema(schema) then None
-    else tables.get((schema.toLowerCase(Locale.ROOT), table.toLowerCase(Locale.ROOT)))
+    else tables.get((IdentifierFold.fold(schema), IdentifierFold.fold(table)))
 
   /** Every known system table as ((schema, table) -> ordered columns), for seeding a resolver's
     * metadata with schema-qualified entries.

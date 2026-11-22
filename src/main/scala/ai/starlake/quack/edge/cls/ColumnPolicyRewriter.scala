@@ -296,7 +296,8 @@ final class ColumnPolicyRewriter(
           case Left(reason) => IO.pure(Left(reason))
           case Right(sep)   =>
             val kept = tables.collect {
-              case (t, coords @ (_, _, tab)) if !clashing.contains(tab.toLowerCase(Locale.ROOT)) =>
+              case (t, coords @ (_, _, tab))
+                  if !clashing.contains(ai.starlake.sql.IdentifierFold.fold(tab)) =>
                 (tab, coords)
             }
             val keyed = kept ++ sep.toList.flatMap(_.keys)

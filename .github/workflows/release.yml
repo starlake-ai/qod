@@ -517,7 +517,7 @@ jobs:
   #     manager image repository (starlakeai/quack-on-demand), and one
   #     Docker Hub repository cannot hold both an image and a chart on the
   #     same tags without colliding; GHCR namespaces the chart under
-  #     charts/. The version is stamped HERE, not read from the tag, so a
+  #     deploy/charts/. The version is stamped HERE, not read from the tag, so a
   #     workflow_dispatch re-run against an older tag (whose Chart.yaml may
   #     predate chart stamping) still publishes a correctly-versioned chart.
   #     needs docker-merge: the chart's default image tag is appVersion, so
@@ -545,14 +545,14 @@ jobs:
           version="${{ needs.prepare.outputs.version }}"
           sed -i -E \
             "s|^version: .*|version: ${version}|; s|^appVersion: .*|appVersion: ${version}|" \
-            charts/quack-on-demand/Chart.yaml
-          grep -E "^(version|appVersion):" charts/quack-on-demand/Chart.yaml
+            deploy/charts/quack-on-demand/Chart.yaml
+          grep -E "^(version|appVersion):" deploy/charts/quack-on-demand/Chart.yaml
 
       - name: Lint, package, push
         run: |
           set -euo pipefail
-          helm lint charts/quack-on-demand
-          helm package charts/quack-on-demand -d "${{ runner.temp }}"
+          helm lint deploy/charts/quack-on-demand
+          helm package deploy/charts/quack-on-demand -d "${{ runner.temp }}"
           echo "${{ secrets.GITHUB_TOKEN }}" \
             | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
           helm push \
@@ -621,7 +621,7 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: ./docker/quack-node/Dockerfile
+          file: ./deploy/docker/quack-node/Dockerfile
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=image,name=${{ env.NODE_REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true,push=true
@@ -743,7 +743,7 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: ./docker/fleet-worker/Dockerfile
+          file: ./deploy/docker/fleet-worker/Dockerfile
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=image,name=${{ env.WORKER_REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true,push=true

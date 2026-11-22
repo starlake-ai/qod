@@ -14,7 +14,7 @@ End-to-end smoke for the chart on a local [kind](https://kind.sigs.k8s.io/) clus
 ## One command
 
 ```bash
-./charts/quack-on-demand/local-stack-k8s/run-local-stack-k8s.sh
+./deploy/charts/quack-on-demand/local-stack-k8s/run-local-stack-k8s.sh
 ```
 
 > **Already have a `qod-test` cluster from a previous run?** The rig now
@@ -24,7 +24,7 @@ End-to-end smoke for the chart on a local [kind](https://kind.sigs.k8s.io/) clus
 >
 > ```bash
 > kind delete cluster --name qod-test
-> ./charts/quack-on-demand/local-stack-k8s/run-local-stack-k8s.sh
+> ./deploy/charts/quack-on-demand/local-stack-k8s/run-local-stack-k8s.sh
 > ```
 
 This:
@@ -159,13 +159,13 @@ The pieces, one per row of the diagram:
 
 ```bash
 # Fresh boot from a clean Postgres + TPC demo SF=1 seeded:
-NUKE=1 LOAD_TPC=1 ./charts/quack-on-demand/local-stack-k8s/run-local-stack-k8s.sh
+NUKE=1 LOAD_TPC=1 ./deploy/charts/quack-on-demand/local-stack-k8s/run-local-stack-k8s.sh
 
 # Just nuke and reinstall without seeding:
-NUKE=1 ./charts/quack-on-demand/local-stack-k8s/run-local-stack-k8s.sh
+NUKE=1 ./deploy/charts/quack-on-demand/local-stack-k8s/run-local-stack-k8s.sh
 
 # Force a fresh docker build (default is BUILD=0 = reuse local / pull from Hub):
-BUILD=1 ./charts/quack-on-demand/local-stack-k8s/run-local-stack-k8s.sh
+BUILD=1 ./deploy/charts/quack-on-demand/local-stack-k8s/run-local-stack-k8s.sh
 ```
 
 The script also auto-cleans orphan `managed-by=quack-on-demand` pods + services from a prior failed bootstrap before installing - so reruns without `NUKE=1` still recover cleanly (the manager's bootstrap would otherwise 409 on the leftover pod name).
@@ -281,7 +281,7 @@ Swap `username=admin password=admin` for `reader/reader` to exercise the non-sup
 
 ## Run a load test
 
-[`scripts/bench/tpch-load-test/tpch-load-test.py`](../../../scripts/bench/tpch-load-test/tpch-load-test.py) is a small ADBC FlightSQL load tester that cycles a TPC-H query mix across N worker threads. It works against the kind rig over the same port-forward you'd use for an interactive client.
+[`scripts/bench/tpch-load-test/tpch-load-test.py`](../../../../scripts/bench/tpch-load-test/tpch-load-test.py) is a small ADBC FlightSQL load tester that cycles a TPC-H query mix across N worker threads. It works against the kind rig over the same port-forward you'd use for an interactive client.
 
 ```bash
 # In one terminal:
@@ -317,7 +317,7 @@ The script auto-`pip install`s `adbc_driver_flightsql adbc_driver_manager pyarro
 ## Tear down
 
 ```bash
-./charts/quack-on-demand/local-stack-k8s/stop-local-stack-k8s.sh
+./deploy/charts/quack-on-demand/local-stack-k8s/stop-local-stack-k8s.sh
 ```
 
 ## Known limitations

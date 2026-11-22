@@ -2,6 +2,7 @@ package ai.starlake.quack.edge.sql
 
 import ai.starlake.acl.parser.Verb
 import ai.starlake.quack.ondemand.state.RolePermission
+import ai.starlake.sql.IdentifierFold
 
 import java.util.Locale
 
@@ -25,8 +26,12 @@ object GrantMatch:
         case Verb.Write => gu == "RW"
         case Verb.Ddl   => gu == "DDL"
 
+  /** A grant part against the name DuckDB resolved, compared as DuckDB compares identifiers (ASCII
+    * letters folded, nothing else: [[IdentifierFold]]), so a grant on `"Clés"` never covers the
+    * distinct table `"clÉs"` of the same schema.
+    */
   def wildcardMatch(grant: String, ref: String): Boolean =
-    grant == RolePermission.Wildcard || grant.equalsIgnoreCase(ref)
+    grant == RolePermission.Wildcard || IdentifierFold.same(grant, ref)
 
   /** Catalog-specific wildcard match: the literal-equal arm behaves like `wildcardMatch`, but the
     * `*` arm additionally requires the referenced catalog to be in the session's allowed-catalog
@@ -39,8 +44,8 @@ object GrantMatch:
     * (`otherdb.*.* ALL`), which bypasses the wildcard arm via the literal-equal check below.
     */
   def catalogMatch(grant: String, ref: String, sessionCatalogs: Set[String]): Boolean =
-    if grant == RolePermission.Wildcard then sessionCatalogs.exists(_.equalsIgnoreCase(ref))
-    else grant.equalsIgnoreCase(ref)
+    if grant == RolePermission.Wildcard then sessionCatalogs.exists(IdentifierFold.same(_, ref))
+    else IdentifierFold.same(grant, ref)
 
   /** Whether some permission covers `verb` on `catalog.schema.table`. */
   def covers(

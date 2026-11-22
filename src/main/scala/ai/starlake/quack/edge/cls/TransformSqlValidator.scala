@@ -72,7 +72,7 @@ object TransformSqlValidator:
     val violations = scala.collection.mutable.ListBuffer.empty[String]
     walk(expr) {
       case col: Column =>
-        if !col.getColumnName.equalsIgnoreCase(protectedColumn) then
+        if !ai.starlake.sql.IdentifierFold.same(col.getColumnName, protectedColumn) then
           violations +=
             s"transformSql references column '${col.getColumnName}' but the policy is on '$protectedColumn'"
       case _: Select =>

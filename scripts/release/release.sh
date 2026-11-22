@@ -104,13 +104,13 @@ git add cli/shim-qod-cli/pyproject.toml
 # the next cut, matching the published OCI chart. release.yml's helm-chart job
 # re-stamps at package time anyway, so dispatch re-runs of older tags publish
 # correctly even where the tag predates chart stamping.
-if ! grep -q "^version: ${release_version}\$" charts/quack-on-demand/Chart.yaml; then
+if ! grep -q "^version: ${release_version}\$" deploy/charts/quack-on-demand/Chart.yaml; then
   echo "setting helm chart version + appVersion -> $release_version"
   sed -i.bak -E \
     "s|^version: .*|version: ${release_version}|; s|^appVersion: .*|appVersion: ${release_version}|" \
-    charts/quack-on-demand/Chart.yaml
-  rm charts/quack-on-demand/Chart.yaml.bak
-  git add charts/quack-on-demand/Chart.yaml
+    deploy/charts/quack-on-demand/Chart.yaml
+  rm deploy/charts/quack-on-demand/Chart.yaml.bak
+  git add deploy/charts/quack-on-demand/Chart.yaml
 fi
 git diff --cached --quiet || git commit -m "Setting qod version to ${release_version}" -q
 

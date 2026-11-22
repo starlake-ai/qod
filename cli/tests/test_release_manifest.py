@@ -235,7 +235,7 @@ def test_read_pins_refuses_a_dockerfile_duckdb_version_with_no_sha256(tmp_path, 
 
 def test_read_pins_refuses_a_dockerfile_release_the_cli_pins_nothing_for(tmp_path):
     repo = _fake_repo(tmp_path)
-    rel = "docker/quack-node/Dockerfile"
+    rel = "deploy/docker/quack-node/Dockerfile"
     _edit(repo, rel, "ARG DUCKDB_VERSION=2.0.0\n", "ARG DUCKDB_VERSION=9.9.9\n")
     text = (repo / rel).read_text(encoding="utf-8")
     (repo / rel).write_text(text.replace("    2.0.0/duckdb-", "    9.9.9/duckdb-"), encoding="utf-8")
@@ -258,7 +258,7 @@ def test_read_pins_refuses_a_dockerfile_release_the_cli_pins_nothing_for(tmp_pat
 )
 def test_read_pins_refuses_a_dockerfile_it_cannot_read_as_the_clis_pins(tmp_path, old, new, message):
     repo = _fake_repo(tmp_path)
-    rel = "docker/quack-node/Dockerfile"
+    rel = "deploy/docker/quack-node/Dockerfile"
     _edit(repo, rel, old, new)
     with pytest.raises(release_manifest.ManifestError, match=f"^{re.escape(rel)}.*{message}"):
         release_manifest.read_pins(repo)
@@ -301,10 +301,10 @@ def test_main_check_pins_needs_no_release_files(tmp_path, capsys):
 
     _edit(repo, "native/qod-node/CMakeLists.txt", "set(QOD_NODE_PROTOCOL 9", "set(QOD_NODE_PROTOCOL ")
     libs = "2.0.0/duckdb-shared-libs-linux-amd64.tar.gz) echo "
-    _edit(repo, "docker/fleet-worker/Dockerfile", libs + "9", libs + "8")
+    _edit(repo, "deploy/docker/fleet-worker/Dockerfile", libs + "9", libs + "8")
     assert release_manifest.main(["--check-pins", "--repo", str(repo)]) == 1
     err = capsys.readouterr().err
-    assert err.startswith("release_manifest: docker/fleet-worker/Dockerfile pins sha256 8")
+    assert err.startswith("release_manifest: deploy/docker/fleet-worker/Dockerfile pins sha256 8")
     assert "for duckdb-shared-libs-linux-amd64.tar.gz of DuckDB 2.0.0" in err
 
 

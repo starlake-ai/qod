@@ -1,7 +1,7 @@
 # docker-compose.fleet.yml - the bundled stack in fleet mode (QOD_RUNTIME_TYPE=fleet), with two
 # fleet servers simulating separate hosts on this one. Layer it on the base file:
 #
-#   docker compose -f docker-compose.yml -f docker-compose.fleet.yml --profile seaweedfs up -d --build
+#   docker compose --project-directory . -f deploy/docker/docker-compose.yml -f deploy/docker/docker-compose.fleet.yml --profile seaweedfs up -d --build
 #
 # The workers sit on their own network: `postgres` and `seaweedfs` do not resolve there, so every
 # path (manager, metastore, object storage, and the manager's dial back to each node) goes through
@@ -49,7 +49,7 @@ services:
   fleet-worker-1: &fleet-worker
     build:
       context: .
-      dockerfile: docker/fleet-worker/Dockerfile
+      dockerfile: deploy/docker/fleet-worker/Dockerfile
       # Same proxy build args and host-gateway alias as the base quack build.
       args:
         HTTP_PROXY:  ${HTTP_PROXY:-}

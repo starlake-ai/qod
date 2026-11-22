@@ -1,5 +1,6 @@
 package ai.starlake.acl.parser
 
+import ai.starlake.sql.IdentifierFold
 import java.util.Locale
 import net.sf.jsqlparser.schema.Table
 import net.sf.jsqlparser.statement.select.*
@@ -103,7 +104,7 @@ object TableExtractor:
     * to one of DuckDB's default views rather than to a grantable table.
     */
   def isBareSystemView(name: String): Boolean =
-    val n = Option(name).map(_.trim.stripPrefix("\"").stripSuffix("\"").toLowerCase(Locale.ROOT))
+    val n = Option(name).map(n => IdentifierFold.fold(n.trim.stripPrefix("\"").stripSuffix("\"")))
     n.exists(x => DuckDbDefaultViews.contains(x) || BareSystemViewPrefixes.exists(x.startsWith))
 
   /** Some(canonical name) when `raw` (a function or table name as the parser spells it, quotes
@@ -112,7 +113,7 @@ object TableExtractor:
     */
   def catalogFunctionName(raw: String): Option[String] =
     Option(raw)
-      .map(r => ai.starlake.sql.QuotedIdentifier.unquote(r.trim).toLowerCase(Locale.ROOT))
+      .map(r => IdentifierFold.fold(ai.starlake.sql.QuotedIdentifier.unquote(r.trim)))
       .filter(DuckDbCatalogFunctions.contains)
 
   /** Some(canonical name) when `call` is exactly the argument-free call `name()` of one of
@@ -354,7 +355,7 @@ private[parser] class TableExtractorVisitor:
       cteNames ++= items.flatMap(cteName)
 
   private def cteName(wi: net.sf.jsqlparser.statement.select.WithItem[?]): Option[String] =
-    Option(wi.getUnquotedAliasName).map(_.toLowerCase(Locale.ROOT))
+    Option(wi.getUnquotedAliasName).map(IdentifierFold.fold)
 
   private def setScope(names: Set[String]): Unit =
     cteNames.clear()
@@ -549,7 +550,7 @@ private[parser] class TableExtractorVisitor:
           // be extracted or the shadowing CTE would launder the access away.
           val isQualified = table.getSchemaName != null ||
             (table.getDatabase != null && table.getDatabase.getDatabaseName != null)
-          val isCteName = !isQualified && cteNames.contains(name.toLowerCase(Locale.ROOT))
+          val isCteName = !isQualified && cteNames.contains(IdentifierFold.fold(name))
           val isFileRef = DuckDBDialectMapper.isFileReference(table)
           // `FROM sqlite_master`, `FROM pg_class`, `FROM duckdb_tables`: DuckDB resolves a bare
           // name to its default view in system.main / system.pg_catalog unless a table shadows
@@ -564,14 +565,14 @@ private[parser] class TableExtractorVisitor:
           val schema          = Option(table.getUnquotedSchemaName).filter(_.nonEmpty)
           val isBareCatalogFn = !isCteName &&
             TableExtractor.isBareSystemView(name) &&
-            catalog.forall(_.equalsIgnoreCase("system")) &&
-            schema.forall(_.equalsIgnoreCase("main"))
+            catalog.forall(IdentifierFold.same(_, "system")) &&
+            schema.forall(IdentifierFold.same(_, "main"))
           if isFileRef then
             // DuckDB `FROM 'file.parquet'` reads straight from storage, escaping
             // the tenant-catalog boundary; there is no table to grant on.
             unsupported += DuckDBDialectMapper.fileReferenceMarker(table)
           else if isBareCatalogFn then
-            unsupported += TableExtractor.bareSystemViewMarker(name.toLowerCase(Locale.ROOT))
+            unsupported += TableExtractor.bareSystemViewMarker(IdentifierFold.fold(name))
           else if !isCteName then tables += table
       case ls: LateralSubSelect  => visitParenthesedSelect(ls)
       case ps: ParenthesedSelect => visitParenthesedSelect(ps)

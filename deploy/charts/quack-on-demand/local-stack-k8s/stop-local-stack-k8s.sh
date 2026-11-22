@@ -31,9 +31,9 @@
 # Requires: kind, kubectl, helm.
 #
 # Usage:
-#   ./charts/quack-on-demand/local-stack-k8s/stop-local-stack-k8s.sh                    # delete cluster
-#   KEEP_CLUSTER=1 ./charts/quack-on-demand/local-stack-k8s/stop-local-stack-k8s.sh     # helm uninstall + delete ns
-#   KEEP_CLUSTER=1 KEEP_NAMESPACE=1 ./charts/quack-on-demand/local-stack-k8s/stop-local-stack-k8s.sh  # helm uninstall only
+#   ./deploy/charts/quack-on-demand/local-stack-k8s/stop-local-stack-k8s.sh                    # delete cluster
+#   KEEP_CLUSTER=1 ./deploy/charts/quack-on-demand/local-stack-k8s/stop-local-stack-k8s.sh     # helm uninstall + delete ns
+#   KEEP_CLUSTER=1 KEEP_NAMESPACE=1 ./deploy/charts/quack-on-demand/local-stack-k8s/stop-local-stack-k8s.sh  # helm uninstall only
 
 set -euo pipefail
 
@@ -89,7 +89,7 @@ kubectl --context "$CTX" -n "$NAMESPACE" delete pods,services \
 if [[ "$KEEP_NAMESPACE" == "1" ]]; then
   echo "KEEP_NAMESPACE=1: leaving namespace '$NAMESPACE' + Postgres pod in place."
   echo "  cluster:      kind-$KIND_CLUSTER"
-  echo "  next run:     BUILD=0 ./charts/quack-on-demand/local-stack-k8s/run-local-stack-k8s.sh"
+  echo "  next run:     BUILD=0 ./deploy/charts/quack-on-demand/local-stack-k8s/run-local-stack-k8s.sh"
   exit 0
 fi
 
@@ -97,4 +97,4 @@ echo "deleting namespace '$NAMESPACE'..."
 kubectl --context "$CTX" delete namespace "$NAMESPACE" --ignore-not-found --wait=true --timeout=120s
 echo
 echo "kept kind cluster '$KIND_CLUSTER'. Next run:"
-echo "  BUILD=0 ./charts/quack-on-demand/local-stack-k8s/run-local-stack-k8s.sh"
+echo "  BUILD=0 ./deploy/charts/quack-on-demand/local-stack-k8s/run-local-stack-k8s.sh"

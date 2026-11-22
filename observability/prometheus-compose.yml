@@ -1,5 +1,5 @@
 # Prometheus scrape config used when Prometheus runs INSIDE the root
-# docker-compose.yml's `observability` profile (alongside the `quack`
+# deploy/docker/docker-compose.yml's `observability` profile (alongside the `quack`
 # manager service on the same bridge network).
 #
 # `observability/prometheus.yml` is the standalone variant for when you

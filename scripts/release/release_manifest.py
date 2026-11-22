@@ -46,7 +46,7 @@ DUCKDB_RELEASES = "https://github.com/duckdb/duckdb/releases/download"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 # The images that download DuckDB release assets, and the assets each downloads (one per target
 # architecture). Each pins their sha256 in a `duckdb_sha256` shell function (dockerfile_duckdb_pins).
-DOCKERFILES = ("Dockerfile", "docker/quack-node/Dockerfile", "docker/fleet-worker/Dockerfile")
+DOCKERFILES = ("Dockerfile", "deploy/docker/quack-node/Dockerfile", "deploy/docker/fleet-worker/Dockerfile")
 DOCKER_DUCKDB_ASSETS = tuple(
     f"duckdb-{kind}-linux-{arch}.tar.gz" for kind in ("cli", "shared-libs") for arch in ("amd64", "arm64")
 )

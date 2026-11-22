@@ -519,7 +519,7 @@ _DUCKDB_PLAT = {
 # against it before it is unpacked. Bumping DUCKDB_CLI_VERSION means adding the new release's
 # digests here (`gh api repos/duckdb/duckdb/releases/tags/v<version>` lists each asset's `digest`);
 # test_duckdb_assets_are_pinned_for_every_platform fails until they are. The three Dockerfiles
-# (Dockerfile, docker/quack-node/Dockerfile, docker/fleet-worker/Dockerfile) pin the linux-amd64
+# (Dockerfile, deploy/docker/quack-node/Dockerfile, deploy/docker/fleet-worker/Dockerfile) pin the linux-amd64
 # and linux-arm64 ones again in their duckdb_sha256 function, with their ARG DUCKDB_VERSION:
 # scripts/release/release_manifest.py --check-pins fails until they equal the ones here.
 _DUCKDB_SHA256 = {

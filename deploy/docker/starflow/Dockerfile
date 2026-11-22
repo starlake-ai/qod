@@ -1,4 +1,4 @@
-# Starflow (the Starlake API + UI) for the `starflow` profile of docker-compose.yml.
+# Starflow (the Starlake API + UI) for the `starflow` profile of deploy/docker/docker-compose.yml.
 #
 # Installs a Starflow release the same way `qod start --with-starflow` does:
 # fetch starflow/distrib/starlake.sh and run `SL_VERSION=<v> starlake install`
@@ -6,7 +6,7 @@
 # starlakeai/starlake-*-api images carry the API without the UI, hence this
 # image.
 #
-#   docker compose --profile starflow build starflow
+#   docker compose --project-directory . -f deploy/docker/docker-compose.yml --profile starflow build starflow
 
 FROM eclipse-temurin:25-jre
 

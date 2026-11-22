@@ -40,7 +40,7 @@ NUKE=1 LOAD_TPCH=1 PROFILES=observability ./scripts/docker/run-docker-compose.sh
 ```
 
 The `observability` compose profile pulls in the Prometheus + Grafana
-containers defined in the top-level `docker-compose.yml`; Prometheus
+containers defined in the `deploy/docker/docker-compose.yml`; Prometheus
 scrapes the manager container directly over the compose network (no
 `host.docker.internal` indirection needed). Grafana is preprovisioned
 with the Prometheus datasource (UID `prometheus-local`) so the bundled
@@ -60,7 +60,7 @@ Tear down:
 
 ```bash
 # Stop the full stack (keeps pgdata + Prometheus history).
-docker compose -f docker-compose.yml --profile observability down
+docker compose --project-directory . -f deploy/docker/docker-compose.yml --profile observability down
 
 # Or wipe everything and start fresh next time.
 NUKE=1 PROFILES=observability ./scripts/docker/run-docker-compose.sh
@@ -151,9 +151,9 @@ Which stack mounts which:
 
 | Stack | Dashboard |
 |---|---|
-| Top-level `docker-compose.yml` (`observability` profile) | `grafana-dashboard-single.json` |
+| `deploy/docker/docker-compose.yml` (`observability` profile) | `grafana-dashboard-single.json` |
 | Standalone `observability/docker-compose.yml` (manager elsewhere / port-forward) | `grafana-dashboard-k8s.json` |
-| kind smoke rig (`charts/quack-on-demand/local-stack-k8s`) | `grafana-dashboard-k8s.json` |
+| kind smoke rig (`deploy/charts/quack-on-demand/local-stack-k8s`) | `grafana-dashboard-k8s.json` |
 
 **Import procedure:**
 

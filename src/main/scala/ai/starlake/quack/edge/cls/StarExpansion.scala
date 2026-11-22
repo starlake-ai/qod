@@ -42,7 +42,9 @@ private[cls] object StarExpansion:
 
   private def unquote(s: String): String = ai.starlake.sql.QuotedIdentifier.unquote(s)
 
-  private def lower(s: String): String = s.toLowerCase(java.util.Locale.ROOT)
+  // DuckDB's identifier fold (ASCII letters only): CTE, binding and column names as DuckDB
+  // binds them.
+  private def lower(s: String): String = ai.starlake.sql.IdentifierFold.fold(s)
 
   private def quoteIfNeeded(name: String): String =
     if name.matches("[a-z_][a-z0-9_]*") then name
@@ -141,11 +143,16 @@ private[cls] object StarExpansion:
       val renames = Option(t.getAlias).flatMap(a => Option(a.getAliasColumns)).exists(!_.isEmpty)
       val pivoted = t.getPivot != null || t.getUnPivot != null
       if ctes.contains(lower(name)) || renames || pivoted then None
-      else schema.find(_._1.equalsIgnoreCase(name)).map(_._2).filter(_.nonEmpty)
+      else
+        schema
+          .find(e => ai.starlake.sql.IdentifierFold.same(e._1, name))
+          .map(_._2)
+          .filter(_.nonEmpty)
     def isPolicyTable(t: Table): Boolean =
       val name = unquote(Option(t.getName).getOrElse(""))
       policies.exists(p =>
-        p.tableName == RoleColumnPolicy.Wildcard || p.tableName.equalsIgnoreCase(name)
+        p.tableName == RoleColumnPolicy.Wildcard || ai.starlake.sql.IdentifierFold
+          .same(p.tableName, name)
       )
     val policyScope = fromItems.exists {
       case t: Table => isPolicyTable(t)

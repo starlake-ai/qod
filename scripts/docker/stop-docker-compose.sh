@@ -4,7 +4,7 @@
 # statements (`quack-on-demand.drainTimeoutSec`, default 60s) and
 # SIGTERMs the child Quack node processes before exiting, so a plain
 # `docker compose down` is graceful by default. `stop_grace_period`
-# on the `quack` service in docker-compose.yml gives the JVM hook
+# on the `quack` service in deploy/docker/docker-compose.yml gives the JVM hook
 # enough room (30s) before Docker escalates to SIGKILL.
 #
 # Env vars:
@@ -32,7 +32,7 @@ docker compose version >/dev/null 2>&1 || {
 }
 
 echo "removing containers + default network..."
-docker compose down
+docker compose --project-directory "$REPO_DIR" -f deploy/docker/docker-compose.yml down
 
 if [[ "$NUKE" == "1" ]]; then
   echo "wiping host state directories (./pgdata, ./ducklake, ./certs)..."

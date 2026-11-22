@@ -502,7 +502,7 @@ class MetricsEndpointSpec extends AnyFlatSpec with Matchers:
 
   it should "keep the ttl a second under the 5 s interval at which this repository's Prometheus configurations scrape" in:
     // observability/prometheus.yml, observability/prometheus-compose.yml and
-    // charts/quack-on-demand/local-stack-k8s/prometheus.yaml scrape every 5 s. A scrape is stamped
+    // deploy/charts/quack-on-demand/local-stack-k8s/prometheus.yaml scrape every 5 s. A scrape is stamped
     // when it ended, so the next scrape finds it (the interval minus the time the last one took)
     // old: a ttl of 5 s repeated half the samples (measured: 4 of 7 were new), and a ttl of 4 s
     // leaves a second for the scrape.
