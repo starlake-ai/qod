@@ -174,15 +174,32 @@ final class ManagerServer(
     try Option(java.net.URI.create(issuerUrl.trim).getHost).getOrElse("")
     catch case _: Exception => ""
 
+  /** The public prefixes modules declared, each beside its segments, split once: every segment
+    * after the leading `/` as written, empty ones included, less one trailing empty one.
+    */
+  private val modulePublicSegments: Set[(String, Vector[String])] =
+    modulePublicPrefixes.map { p =>
+      val split = p.split("/", -1).toVector.drop(1)
+      p -> (if split.lastOption.contains("") then split.init else split)
+    }
+
   /** A public path a module declared. It takes a body limit of its own,
     * `restLimits.maxModulePublicBodyBytes`: a provider's webhook does not fit the core public
     * routes' limit, and no core route lives there.
+    *
+    * On whole segments, as the router reads them (see [[underStaffPrefix]]): `%2F` inside a segment
+    * decodes to `/`, so `ping%2Fx` reads as `ping/x` in the joined path, under a prefix ending in
+    * `ping`, while the router sees one segment `ping/x` and serves a route capturing it with no
+    * credential. The joined path's test stays too, so that the segments only ever narrow it: on a
+    * path with no encoded `/` it implies theirs, and the answer is the one it always was.
     */
-  private def isModulePublic(path: String): Boolean =
-    modulePublicPrefixes.exists(p => path == p || path.startsWith(p + "/"))
+  private def isModulePublic(path: String, segments: Vector[String]): Boolean =
+    modulePublicSegments.exists((p, prefix) =>
+      (path == p || path.startsWith(p + "/")) && segments.startsWith(prefix)
+    )
 
   /** Path is unauthenticated - the UI needs these before login. */
-  private def isPublicApi(path: String): Boolean =
+  private def isPublicApi(path: String, segments: Vector[String]): Boolean =
     ManagerServer.PublicApiPaths.contains(path) ||
       // Starlake SSO redeem: the ticket is the credential (public server-to-server call).
       // Gated on the integration flag, not just on the route being unmounted when off: with
@@ -193,7 +210,7 @@ final class ManagerServer(
       // Fleet heartbeat (qod fleet join): the handler validates X-Fleet-Token itself. Gated on the
       // runtime so the path stays 401 at the guard everywhere else.
       (FleetConfig.isFleet(cfg.runtimeType) && path == "/api/fleet/heartbeat") ||
-      isModulePublic(path)
+      isModulePublic(path, segments)
 
   /** Paths a NON-ADMIN session may reach: the self-service profile surface. Everything else on
     * `/api` but [[isBranchApi]] answers `403 admin_required` for such sessions, so that no other
@@ -427,7 +444,7 @@ final class ManagerServer(
       val branchApi = isBranchApi(req.method, segments, req.uri.path.endsWithSlash)
       if ManagerServer.holdsDotSegment(segments) then OptionT.none[IO, Response[IO]]
       else if !path.startsWith("/api/") && path != "/api" then routes(req)
-      else if isPublicApi(path) then
+      else if isPublicApi(path, segments) then
         // No credential has been checked: see BoundedBody.asksChunked.
         if BoundedBody.asksChunked(req) then
           OptionT.pure[IO](
@@ -439,7 +456,7 @@ final class ManagerServer(
           )
         else
           val maxBytes =
-            if isModulePublic(path) then limits.maxModulePublicBodyBytes
+            if isModulePublic(path, segments) then limits.maxModulePublicBodyBytes
             else limits.maxPublicBodyBytes
           withBoundedBody(req, maxBytes)(routes)
       else

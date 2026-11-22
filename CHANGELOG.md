@@ -36,6 +36,12 @@
   the reason at WARN. A superuser's session already open when its row is demoted, disabled or
   deleted is refused on its next statement on the replica that made the change, and on another
   replica once that one has seen the change, through its NOTIFY or its periodic snapshot refresh.
+- **A module's public path prefix is matched on whole path segments.** It was matched on the
+  decoded path, where an encoded `/` (`%2F`) inside a segment reads as a separator, so
+  `/api/hosted-test/ping%2Fx/secret` passed as under the public prefix `/api/hosted-test/ping`
+  and reached a module route capturing that segment, such as `/api/hosted-test/{id}/secret`, with
+  no credential. An encoded `/` can no longer carry an anonymous request past the prefix; every
+  other path is answered as before.
 
 ### Changed
 

@@ -110,6 +110,69 @@ class ModuleEndpointsSpec
     finally local.shutdown()
   }
 
+  it should "keep an encoded slash inside a segment from carrying a request past it" in {
+    // A `%2F` decodes to `/` in the joined path, so `ping%2Fx` once read as `ping/x`, under the
+    // public prefix, while the router reads one segment `ping/x` and serves the route below with
+    // `id = "ping/x"`. Whole segments keep that route behind the guard.
+    val localModule = new ManagerModule:
+      def name: String                             = "encoded-slash-module"
+      def changelogPath: Option[String]            = None
+      def start(ctx: ManagerContext): IO[Unit]     = IO.unit
+      def endpoints: List[ServerEndpoint[Any, IO]] = List(
+        endpoint.get
+          .in("api" / "hosted-test" / "ping")
+          .out(stringBody)
+          .serverLogicSuccess[IO](_ => IO.pure("pong")),
+        endpoint.get
+          .in("api" / "hosted-test" / "ping" / "sub")
+          .out(stringBody)
+          .serverLogicSuccess[IO](_ => IO.pure("pong-sub")),
+        endpoint.get
+          .in("api" / "hosted-test" / path[String]("id") / "secret")
+          .out(stringBody)
+          .serverLogicSuccess[IO](id => IO.pure(s"classified:$id"))
+      )
+      def publicPathPrefixes: Set[String]        = Set("/api/hosted-test/ping")
+      def onEvent(event: ManagerEvent): IO[Unit] = IO.unit
+      def stop: IO[Unit]                         = IO.unit
+
+    val fix   = SecurityFixtures.freshStore()
+    val local = ManagerServerHarness.boot(
+      fix.store,
+      moduleEndpoints = localModule.endpoints,
+      modulePublicPrefixes = localModule.publicPathPrefixes
+    )
+    try
+      val smuggled = get(local.httpClient, s"${local.baseUrl}/api/hosted-test/ping%2Fx/secret")
+      withClue(s"GET /api/hosted-test/ping%2Fx/secret (no credential) body: ${smuggled.body()}") {
+        smuggled.statusCode() shouldBe 401
+      }
+      smuggled.body() should not include "classified"
+      // Lowercase escape too: the router decodes either.
+      val lower = get(local.httpClient, s"${local.baseUrl}/api/hosted-test/ping%2fx/secret")
+      lower.statusCode() shouldBe 401
+
+      // The route itself still answers an admitted caller, so the 401 above is the guard's.
+      val admitted = get(
+        local.httpClient,
+        s"${local.baseUrl}/api/hosted-test/ping%2Fx/secret",
+        apiKey = Some(local.superuserSession())
+      )
+      withClue(s"GET /api/hosted-test/ping%2Fx/secret (superuser) body: ${admitted.body()}") {
+        admitted.statusCode() shouldBe 200
+      }
+      admitted.body() shouldBe "classified:ping/x"
+
+      // Controls: the prefix itself and a path under it stay public.
+      val at = get(local.httpClient, s"${local.baseUrl}/api/hosted-test/ping")
+      at.statusCode() shouldBe 200
+      at.body() shouldBe "pong"
+      val under = get(local.httpClient, s"${local.baseUrl}/api/hosted-test/ping/sub")
+      under.statusCode() shouldBe 200
+      under.body() shouldBe "pong-sub"
+    finally local.shutdown()
+  }
+
   "route collisions" should "fail server construction" in {
     val fix = SecurityFixtures.freshStore()
     val ex  = intercept[IllegalStateException] {
