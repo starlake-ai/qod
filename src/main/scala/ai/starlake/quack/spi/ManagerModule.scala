@@ -44,5 +44,18 @@ trait ManagerModule:
     * same contract as endpoints: a module may build gates inside start().
     */
   def mutationGates: List[MutationGate] = Nil
+
+  /** Permissions this module checks (issue #274). Read after start(), like endpoints; boot
+    * validates them (`ModuleSurfaces.validate`) and refuses to start on a bad one.
+    */
+  def permissions: List[PlatformPermission] = Nil
+
+  /** REST path prefixes, each under `/api/<name>/`, that staff sessions may reach. The routes still
+    * check their permission with `ctx.platformCallerOf`. Read after start().
+    */
+  def staffPathPrefixes: Set[String] = Set.empty
+
+  /** Pages this module adds to the admin console's Platform section. Read after start(). */
+  def consolePages: List[ConsolePage] = Nil
   def onEvent(event: ManagerEvent): IO[Unit]
   def stop: IO[Unit]

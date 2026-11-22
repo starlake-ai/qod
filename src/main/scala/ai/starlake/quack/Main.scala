@@ -1915,6 +1915,7 @@ object Main extends IOApp with LazyLogging:
           // that does not resolve, is SessionScope.NoAccess to a module gate.
           scopeOf = credentialScopes.scopeOf,
           sessionOf = jwtSessionOf,
+          platformCallerOf = credentialScopes.platformCallerOf,
           systemSql = ai.starlake.quack.ondemand.module
             .ModuleSystemSql(m.name, routedExecutor(recordExecution = true), auditRecorder)
         )
@@ -2232,9 +2233,21 @@ object Main extends IOApp with LazyLogging:
       else if mgrCfg.mcp.enabled then logger.info("mcp: serving POST /mcp (bearer auth: PAT)")
       else logger.info("mcp: disabled (QOD_MCP_ENABLED=false); POST /mcp not mounted")
 
-      // Reads the module surfaces (endpoints / publicPathPrefixes / staticMounts),
-      // so it MUST run after moduleStart; called from the IO chain below.
-      def buildManagerServer(): ManagerServer = new ManagerServer(
+      // The first path segments after `api` that core serves or reserves: no module with a
+      // platform surface may take one as its name (ModuleSurfaces.validate). Every core endpoint
+      // ManagerServer serves under /api is in EndpointModules (DocEndpoints.all) except the
+      // undocumented security audit, added by hand; /data/v1 lies outside /api.
+      val coreApiSegments: Set[String] =
+        ai.starlake.quack.ondemand.module.ModuleSurfaces.apiSegments(
+          ai.starlake.quack.docs.DocEndpoints.all :+
+            ai.starlake.quack.ondemand.api.SecurityAuditEndpoints.audit
+        ) ++ ai.starlake.quack.ondemand.module.ModuleSurfaces.ReservedApiSegments
+      // Reads the module surfaces (endpoints / publicPathPrefixes / staticMounts, and the
+      // validated platform surfaces), so it MUST run after moduleStart; called from the IO chain
+      // below.
+      def buildManagerServer(
+          surfaces: ai.starlake.quack.ondemand.module.ModuleSurfaces
+      ): ManagerServer = new ManagerServer(
         mgrCfg,
         edgeCfg,
         pools,
@@ -2275,6 +2288,7 @@ object Main extends IOApp with LazyLogging:
         moduleEndpoints = modules.flatMap(_.endpoints),
         modulePublicPrefixes = modules.flatMap(_.publicPathPrefixes).toSet,
         moduleStaticMounts = modules.flatMap(_.staticMounts),
+        moduleStaffPrefixes = surfaces.staffPrefixes,
         passwordReset = Some(passwordResetHandlers),
         pat = Some(patHandlers),
         branches = branchHandlers,
@@ -2421,7 +2435,19 @@ object Main extends IOApp with LazyLogging:
         // the pre-start empty list, and every gate silently never registers - live
         // enforcement off while module suites (which wire gates directly) stay green.
         IO.defer(sup.setMutationGates(modules.flatMap(_.mutationGates))) *>
-        IO.delay(buildManagerServer()).flatMap { mgr =>
+        // The platform surfaces (issue #274) are read after start() too, so the same deferral
+        // applies. A refused one aborts the boot before any listener binds.
+        IO.defer(
+          IO.fromEither(
+            ai.starlake.quack.ondemand.module.ModuleSurfaces
+              .validate(modules, coreApiSegments)
+              .left
+              .map(msg => new IllegalStateException(s"module surfaces refused: $msg"))
+          )
+        ).flatMap { surfaces =>
+          IO.delay(sup.setDeclaredPermissions(surfaces.permissions)) *>
+            IO.delay(buildManagerServer(surfaces))
+        }.flatMap { mgr =>
           // The node listener first, then REST, released in the reverse order: one `use`.
           nodeInternal.resource.flatMap(_ => mgr.serve).use { _ =>
             logger.info(

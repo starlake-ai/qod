@@ -283,6 +283,21 @@ class StaffGuardSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers:
     }
   }
 
+  it should "keep the URL tenant check off its staff prefixes" in withHarness(
+    moduleEndpoints = staffModuleEndpoints,
+    moduleStaffPrefixes = Set("/api/test-module/staff")
+  ) { h =>
+    // The skip holds on a declared staff prefix only: on its own allowlisted paths a staff
+    // session naming a tenant meets the check like any caller, and manages no tenant.
+    val staff = h.staffSession(StaffName, StaffPerms)
+    for t <- List(SecurityFixtures.TenantId, SecurityFixtures.GlobexTenantId) do
+      val r = get(h.httpClient, s"${h.baseUrl}/api/auth/whoami?tenant=$t", apiKey = Some(staff))
+      withClue(s"staff GET /api/auth/whoami?tenant=$t: ${describe(r)}") {
+        r.statusCode() shouldBe 403
+        errorCode(r.body()) should contain("tenant_forbidden")
+      }
+  }
+
   private val segmentModuleEndpoints: List[ServerEndpoint[Any, IO]] = List(
     endpoint.get
       .in("api" / "m" / "staff" / "ping")

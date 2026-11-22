@@ -3,6 +3,7 @@ package ai.starlake.quack.ondemand.auth
 import ai.starlake.quack.ondemand.api.SessionTokenStore
 import ai.starlake.quack.ondemand.rbac.StaffPrincipal
 import ai.starlake.quack.ondemand.state.UserKind
+import ai.starlake.quack.spi.PlatformCaller
 
 /** The one resolver from a credential (a session JWT, then a PAT) to its session and scope. A staff
   * session is checked against its live row on every call (issue #274): its JWT names the user, so a
@@ -66,3 +67,24 @@ final class CredentialScopes(
 
   val scopeOf: SessionScope.Resolver =
     SessionScope.resolver(t => sessionOf(t).map(_.scope))
+
+  /** The caller behind `credential` as a platform caller (issue #274): a superuser session or PAT
+    * holds every permission, a staff one its row's live permissions (a `dropAdmin` staff PAT none).
+    * None for anyone else (a tenant admin or user, a superuser's `dropAdmin` PAT, whose scope is no
+    * longer superuser), no credential, or one that does not resolve.
+    */
+  def platformCallerOf(credential: Option[String]): Option[PlatformCaller] =
+    credential.flatMap(sessionOf).flatMap { s =>
+      if s.scope.superuser then
+        Some(PlatformCaller(None, s.profile.username, superuser = true, Set.empty))
+      else if isStaff(s) then
+        staffPrincipal(s.profile.username).map(sp =>
+          PlatformCaller(
+            Some(sp.user.id),
+            sp.user.username,
+            superuser = false,
+            s.scope.platformPermissions
+          )
+        )
+      else None
+    }
