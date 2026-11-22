@@ -80,7 +80,9 @@ final case class AdminConfig(
     password: String,
     @field @ConfigField(
       envVar = "QOD_ADMIN_KIND",
-      description = "Account kind (qodstate_user.kind) assigned to the bootstrap admin user."
+      description = "Account kind (qodstate_user.kind) assigned to the bootstrap admin user. " +
+        "Must be admin (any case): the seeded accounts have no tenant, and boot refuses any " +
+        "other value."
     )
     kind: String
 ):

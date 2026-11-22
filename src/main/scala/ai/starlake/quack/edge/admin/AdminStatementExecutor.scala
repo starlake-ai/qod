@@ -122,8 +122,8 @@ final class AdminStatementExecutor(
               run(ctx, cmd)
     }
 
-  /** Superuser (tenant IS NULL) anywhere; tenant admin only within the session tenant. The admin
-    * test reads the account kind (RbacUser.kind: admin | user), never an RBAC role.
+  /** Superuser (no tenant and kind admin) anywhere; tenant admin only within the session tenant.
+    * The admin test reads the account kind (RbacUser.kind), never an RBAC role.
     */
   private def authorize(
       user: String,
@@ -140,7 +140,7 @@ final class AdminStatementExecutor(
         supervisor.getTenant(poolKey.tenant).orElse(supervisor.getTenantById(poolKey.tenant)) match
           case None    => Left(RouterFailure.Internal(s"unknown tenant '${poolKey.tenant}'"))
           case Some(t) =>
-            val superuser   = e.user.tenant.isEmpty
+            val superuser   = e.user.isSuperuser
             val tenantAdmin =
               e.user.kind.equalsIgnoreCase(UserKind.Admin) && e.user.tenant.contains(t.id)
             if superuser || tenantAdmin then Right(Ctx(t.id, poolKey.tenant, superuser, user))

@@ -162,15 +162,15 @@ class BootPreflightSpec extends AnyFlatSpec with Matchers:
       store.close()
   }
 
-  it should "store the configured admin.kind as the seeded row's kind" in withFreshDb { url =>
+  it should "store the normalized admin.kind as the seeded row's kind" in withFreshDb { url =>
     val userStore = new UserStore(url, TestPostgres.pgUser, TestPostgres.pgPass)
     val store     = new PostgresControlPlaneStore(url, TestPostgres.pgUser, TestPostgres.pgPass)
     try
       BootPreflight.seedAdminUsers(
         userStore,
-        AdminConfig(username = "ops", password = "admin", kind = "user")
+        AdminConfig(username = "ops", password = "admin", kind = " Admin ")
       )
-      store.findUser(None, "ops").get.kind shouldBe "user"
+      store.findUser(None, "ops").get.kind shouldBe "admin"
     finally
       userStore.close()
       store.close()
@@ -200,7 +200,7 @@ class BootPreflightSpec extends AnyFlatSpec with Matchers:
         val before = row()
         BootPreflight.seedAdminUsers(
           userStore,
-          AdminConfig(username = "root", password = "second-pw", kind = "user"),
+          AdminConfig(username = "root", password = "second-pw", kind = "admin"),
           _ => None
         )
         row() shouldBe before

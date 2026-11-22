@@ -716,18 +716,17 @@ object BootPreflight extends LazyLogging:
           // IS its own email, so the seeded admin is reachable for reset and (when lockout
           // is enabled) lockable, consistently on fresh and upgraded installs.
           val seedEmail = if EmailFormat.matches(name) then Some(name) else None
+          val kind      = UserKind.normalize(admin.kind).getOrElse(admin.kind)
           val out       = userStore.upsertUser(
             tenant = None,
             username = name,
             plaintext = admin.password,
-            kind = UserKind.normalize(admin.kind).getOrElse(admin.kind),
+            kind = kind,
             email = Some(seedEmail),
             insertOnly = true
           )
           if out.inserted then
-            logger.info(
-              s"admin user created: $name (id=${out.id}, kind=${UserKind.normalize(admin.kind).getOrElse(admin.kind)})"
-            )
+            logger.info(s"admin user created: $name (id=${out.id}, kind=$kind)")
             None
           else if passwordFromEnv then
             val msg =
