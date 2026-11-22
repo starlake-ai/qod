@@ -375,5 +375,7 @@ object FleetHandlers:
       a.tenantDbInitSql,
       a.tenantDbInitTrusted,
       a.tenantPoolInitSql,
-      a.tenantPoolInitTrusted
+      a.tenantPoolInitTrusted,
+      a.storeSecrets,
+      a.storeEnv
     )

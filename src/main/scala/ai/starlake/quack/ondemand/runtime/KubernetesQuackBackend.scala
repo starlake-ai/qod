@@ -1191,21 +1191,13 @@ object KubernetesQuackBackend:
   /** File mode of the projected files: 0400 (owner read-only), as a decimal Integer for the API. */
   val SecretsFileMode: Int = Integer.parseInt("400", 8)
 
-  /** Object-store credential env vars the manager's pod env is allowed to forward into spawned node
-    * pods. Mirrors what `LocalQuackBackend` gets for free through `ProcessBuilder` env inheritance.
-    * Keep in sync with the `QOD_*` keys read by `scripts/spawn-quack-node.sh`.
+  /** Object-store env vars of the manager the node pods receive: the settings as pod env, the
+    * credentials as files of the node-env Secret. Mirrors what `LocalQuackBackend` gets for free
+    * through `ProcessBuilder` env inheritance. Built from the [[NodeSecretFiles]] lists, which the
+    * fleet assignment uses too, so the backends cannot drift.
     */
-  val cloudCredEnvVars: Seq[String] = Seq(
-    "QOD_S3_ENDPOINT",
-    "QOD_S3_ACCESS_KEY_ID",
-    "QOD_S3_SECRET_ACCESS_KEY",
-    "QOD_S3_REGION",
-    "QOD_S3_URL_STYLE",
-    "QOD_S3_USE_SSL",
-    "QOD_AZURE_CONNECTION_STRING",
-    "QOD_GCS_KEY_ID",
-    "QOD_GCS_SECRET"
-  )
+  val cloudCredEnvVars: Seq[String] =
+    NodeSecretFiles.CloudSettingKeys ++ NodeSecretFiles.CloudCredKeys
 
   /** (volume name, mount path) pairs for the emptyDir scratch volumes every node pod carries.
     * `readOnlyRootFilesystem` on the quack container's default security posture means DuckDB's own

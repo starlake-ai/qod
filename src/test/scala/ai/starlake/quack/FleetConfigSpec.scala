@@ -22,6 +22,7 @@ class FleetConfigSpec extends AnyFlatSpec with Matchers:
     cfg.fleet.trustedProxies shouldBe ""
     cfg.fleet.nodePgHost shouldBe ""
     cfg.fleet.nodePgPort shouldBe ""
+    cfg.fleet.nodeS3Endpoint shouldBe ""
   }
 
   it should "read the camelCase keys of an overlay, not only the defaults" in {
@@ -47,6 +48,15 @@ class FleetConfigSpec extends AnyFlatSpec with Matchers:
       .at("quack-on-demand")
       .loadOrThrow[ManagerConfig]
     (cfg.fleet.nodePgHost, cfg.fleet.nodePgPort) shouldBe ("host.docker.internal", "15432")
+  }
+
+  it should "read the node-facing S3 endpoint from its camelCase key" in {
+    val cfg = ConfigSource
+      .string("""quack-on-demand.fleet { nodeS3Endpoint = "host.docker.internal:8333" }""")
+      .withFallback(ConfigSource.default)
+      .at("quack-on-demand")
+      .loadOrThrow[ManagerConfig]
+    cfg.fleet.nodeS3Endpoint shouldBe "host.docker.internal:8333"
   }
 
   it should "flag joinToken as sensitive so ConfigHandlers masks it" in {

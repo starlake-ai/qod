@@ -1027,6 +1027,39 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
     io.circe.Encoder[FleetAssignment].apply(a).noSpaces should not include "CREATE VIEW"
   }
 
+  // Issue #285: the manager's default-store keys ride the stored assignment and the heartbeat
+  // reply; an assignment stored before them decodes with none.
+  it should "carry the manager's store maps to the heartbeat reply, and decode a row without them" in {
+    import FleetAssignment.given
+    import Dtos.given
+    val old =
+      """{"epoch":1,"nodeId":"n1","poolKey":{"tenant":"acme","tenantDb":"db","pool":"bi"},
+        |"port":21900,"token":"t","kind":"memory","env":{},"resourceSql":"","objectStoreSql":"",
+        |"extraSetupSql":""}""".stripMargin
+    val a = io.circe.parser.decode[FleetAssignment](old).toOption.get
+    (a.storeSecrets, a.storeEnv) shouldBe (Map.empty, Map.empty)
+    val withStore = a.copy(
+      storeSecrets = Map("QOD_S3_ACCESS_KEY_ID" -> "fake-id", "QOD_S3_SECRET_ACCESS_KEY" -> "fake"),
+      storeEnv = Map("QOD_S3_ENDPOINT" -> "h:1", "QOD_S3_USE_SSL" -> "false")
+    )
+    io.circe.parser
+      .decode[FleetAssignment](io.circe.Encoder[FleetAssignment].apply(withStore).noSpaces) shouldBe
+      Right(withStore)
+    val dto = FleetHandlers.toDto(
+      withStore,
+      "ab" * 32,
+      ai.starlake.quack.NodeExtensionsConfig(),
+      ai.starlake.quack.NodeFilesConfig(),
+      ai.starlake.quack.NodeAuthzLimitsConfig()
+    )
+    (dto.storeSecrets, dto.storeEnv) shouldBe (withStore.storeSecrets, withStore.storeEnv)
+    val json = io.circe.Encoder[FleetAssignmentDto].apply(dto)
+    json.hcursor.downField("storeSecrets").as[Map[String, String]] shouldBe
+      Right(withStore.storeSecrets)
+    json.hcursor.downField("storeEnv").as[Map[String, String]] shouldBe Right(withStore.storeEnv)
+    io.circe.parser.decode[FleetAssignmentDto](json.noSpaces) shouldBe Right(dto)
+  }
+
   // Phase D: an assignment an earlier manager stored carries lockdownSql. It still decodes, the field
   // is dropped, and no heartbeat hands it on.
   it should "drop the lockdownSql of an earlier manager" in {

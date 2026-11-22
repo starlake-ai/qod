@@ -9490,6 +9490,8 @@ components:
       - tenantDbInitTrusted
       - tenantPoolInitSql
       - tenantPoolInitTrusted
+      - storeSecrets
+      - storeEnv
       properties:
         epoch:
           type: integer
@@ -9529,6 +9531,10 @@ components:
           type: string
         tenantPoolInitTrusted:
           type: boolean
+        storeSecrets:
+          $ref: '#/components/schemas/Map_String'
+        storeEnv:
+          $ref: '#/components/schemas/Map_String'
     FleetHeartbeatRequest:
       title: FleetHeartbeatRequest
       type: object

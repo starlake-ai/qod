@@ -30,6 +30,14 @@ class NodeSecretFilesSpec extends AnyFlatSpec with Matchers with SpawnScriptTemp
 
   // SEC-1: the join process overlays an assignment's env with these names only, and takes only
   // the metastore's own secrets from it.
+  "the cloud store key lists" should "pin the settings and cover what Kubernetes forwards" in {
+    NodeSecretFiles.CloudSettingKeys shouldBe
+      Seq("QOD_S3_ENDPOINT", "QOD_S3_REGION", "QOD_S3_URL_STYLE", "QOD_S3_USE_SSL")
+    NodeSecretFiles.CloudSettingKeys.toSet.intersect(NodeSecretFiles.Keys.toSet) shouldBe empty
+    KubernetesQuackBackend.cloudCredEnvVars.toSet shouldBe
+      (NodeSecretFiles.CloudSettingKeys ++ NodeSecretFiles.CloudCredKeys).toSet
+  }
+
   "the node env key list" should "be the same in TenantDb and fleet join" in {
     keyList("cli/src/qod_cli/fleet_join.py", "_NODE_ENV_KEYS = (", ")").sorted shouldBe
       TenantDb.NodeEnvKeys.toList.sorted

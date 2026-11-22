@@ -97,6 +97,17 @@ object NodeSecretFiles extends LazyLogging:
     "QOD_GCS_SECRET"
   )
 
+  /** The non-secret settings of the manager's default store, which the spawn script reads from its
+    * environment beside [[CloudCredKeys]]: a Kubernetes pod gets them as env, a fleet assignment as
+    * `storeEnv`. Never secret files.
+    */
+  val CloudSettingKeys: Seq[String] = Seq(
+    "QOD_S3_ENDPOINT",
+    "QOD_S3_REGION",
+    "QOD_S3_URL_STYLE",
+    "QOD_S3_USE_SSL"
+  )
+
   /** Every key the spawn scripts read from [[DirEnv]], and only from there (a value still found in
     * the environment is ignored). Same list, same order, as `SECRET_KEYS` in
     * `scripts/spawn-quack-node.sh` / `.ps1` and `_SECRET_KEYS` in `qod_cli/fleet_join.py`.
