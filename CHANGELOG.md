@@ -180,6 +180,15 @@
 
 ### Added
 
+- **Signed images, with an SBOM.** Every release and snapshot of `starlakeai/quack-on-demand` (and
+  of `quack-on-demand-node` and the `quack-on-demand-worker` alias) is signed keyless with cosign
+  by its GitHub workflow and carries an SBOM and SLSA provenance as attestations; the workflow's
+  summary records each platform's compressed size. Verify one with `cosign verify
+  starlakeai/quack-on-demand:<tag> --certificate-oidc-issuer
+  https://token.actions.githubusercontent.com --certificate-identity-regexp
+  '^https://github.com/starlake-ai/(qod|quack-on-demand)/\.github/workflows/(release|snapshot)\.yml@'`.
+  `deploy/host/container/install.sh` and `switch.sh` run that check when `cosign` is installed and
+  refuse an unsigned image (`--no-verify` for one you built).
 - **One host as containers: `deploy/host/container/`.** `install.sh --version V --settings FILE`
   installs the manager and its fleet workers from the one image on one Linux server under systemd:
   host networking, read-only containers with their own limits, the worker count and size from the

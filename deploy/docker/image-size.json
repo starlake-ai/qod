@@ -1,0 +1,7 @@
+{
+  "about": "Compressed size of starlakeai/quack-on-demand per platform, `docker save | gzip -6 | wc -c`, as scripts/ci/one-image-checks.sh size measures it. The one-image workflow fails a build above 110% of it. Raise a value only in the pull request that grows the image, saying why.",
+  "compressedBytes": {
+    "linux/amd64": 628584450,
+    "linux/arm64": 613065809
+  }
+}

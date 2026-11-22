@@ -217,6 +217,9 @@ jobs:
           file: ./Dockerfile
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
+          # An SBOM and SLSA provenance, attached to the image as attestations.
+          sbom: true
+          provenance: mode=max
           # push-by-digest produces a digest reference (no tag yet); the
           # merge job below pulls both digests and assembles the manifest
           # list under the final tag.
@@ -246,6 +249,10 @@ jobs:
     needs: [publish-jar, docker-build]
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # id-token: the keyless cosign signatures (scripts/release/sign-image.sh).
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v7
 
@@ -294,3 +301,12 @@ jobs:
             -t "starlakeai/quack-on-demand-worker:${version}" \
             -t "starlakeai/quack-on-demand-worker:latest-snapshot" \
             -f deploy/docker/worker-alias.Dockerfile --push deploy/docker
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign, and record the size of each platform
+        run: |
+          version="${{ needs.publish-jar.outputs.version }}"
+          scripts/release/sign-image.sh "${{ env.REGISTRY_IMAGE }}:${version}"
+          scripts/release/sign-image.sh "starlakeai/quack-on-demand-worker:${version}"

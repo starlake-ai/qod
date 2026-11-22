@@ -138,6 +138,9 @@ jobs:
           file: ./deploy/docker/quack-node/Dockerfile
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
+          # An SBOM and SLSA provenance, attached to the image as attestations.
+          sbom: true
+          provenance: mode=max
           outputs: type=image,name=${{ env.REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=quack-node-${{ env.PLATFORM_PAIR }}
           cache-to:   type=gha,scope=quack-node-${{ env.PLATFORM_PAIR }},mode=max
@@ -163,6 +166,10 @@ jobs:
     needs: [version, docker-build]
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # id-token: the keyless cosign signature (scripts/release/sign-image.sh).
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v7
 
@@ -198,3 +205,9 @@ jobs:
         run: |
           version="${{ needs.version.outputs.version }}"
           docker buildx imagetools inspect "${{ env.REGISTRY_IMAGE }}:${version}"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign, and record the size of each platform
+        run: scripts/release/sign-image.sh "${{ env.REGISTRY_IMAGE }}:${{ needs.version.outputs.version }}"

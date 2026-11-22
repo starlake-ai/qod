@@ -177,8 +177,9 @@ COPY --from=wheel /wheels /tmp/wheels
 RUN <<EOF
 set -eu
 python3 -m venv /opt/qod
-/opt/qod/bin/pip install --no-cache-dir --no-deps /tmp/wheels/*.whl
-/opt/qod/bin/pip install --no-cache-dir typer rich httpx platformdirs tomli-w pg8000
+# --no-warn-conflicts: pip would report the missing pyarrow and ADBC driver, left out on purpose.
+/opt/qod/bin/pip install --no-cache-dir --no-warn-conflicts --no-deps /tmp/wheels/*.whl
+/opt/qod/bin/pip install --no-cache-dir --no-warn-conflicts typer rich httpx platformdirs tomli-w pg8000
 rm -rf /tmp/wheels
 case "${TARGETARCH:-amd64}" in
   amd64) plat=linux-x86_64 ;;
