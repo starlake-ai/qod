@@ -4,7 +4,19 @@
 
 ### Upgrading
 
-- A tenant-less account whose kind is not `admin` (one seeded with `QOD_ADMIN_KIND=user`, or a
+- **This release is one way.** Rolling back from it needs a restore of the control-plane database
+  backup taken before the upgrade: an older manager reads every staff user as a superuser, with
+  full data access. The release gate records that, so an older release with the gate refuses to
+  boot on the upgraded control plane.
+- In an HA deployment, finish the rollout before creating staff users: a replica still on an older
+  release reads each staff user as a superuser.
+- Before upgrading, check that no tenant row has the kind `staff`, which Liquibase 0061 refuses
+  (a kind was free text before 0.11.0): on the control-plane database,
+  `SELECT tenant, username, kind FROM qodstate_user WHERE tenant IS NOT NULL AND lower(kind) = 'staff'`
+  must return nothing. Change the kind of any such row first (`qod user update --kind user`, or an
+  `UPDATE` of the row).
+- A tenant-less account whose kind is not `admin` (one seeded with `QOD_ADMIN_KIND=user`, one
+  created with `qod user create --superuser` on an earlier release, which sent kind `user`, or a
   superuser demoted earlier) loses data access with this release. Its refusal reads like an
   unknown user, and the WARN line naming the reason is below the default ERROR log level. Find
   such accounts before upgrading, on the control-plane database, with
