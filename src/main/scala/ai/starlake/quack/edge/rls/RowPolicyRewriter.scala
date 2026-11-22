@@ -102,6 +102,10 @@ object RowPolicyRewriter:
     "a row-policy table is read where the row filter cannot reach it (a PIVOT or UNPIVOT " +
       "source); pivot a subquery instead: PIVOT (SELECT * FROM t) ..."
 
+  private val UnscopedRefusal =
+    "the statement reads a row-policy table where the row policy rewrite cannot tell a CTE " +
+      "from the table; name the CTE differently from the table"
+
   private val ExplainRefusal =
     "EXPLAIN of a statement reading a row-policy table is refused (EXPLAIN ANALYZE runs it " +
       "unfiltered, and a plan reports row counts); run the statement itself"
@@ -196,16 +200,21 @@ class RowPolicyRewriter(enabled: Boolean = true) extends LazyLogging:
             // Taken before the walk replaces them: every policy table the ACL parser's
             // depth-complete walk sees, as the very AST nodes the rewrite walk wraps, and the
             // references that walk binds to a CTE in scope, which are no table and stay as written.
-            val (extraction, cteReferences) = TableExtractor.extractWithCteReferences(stmt)
-            val policyReads                 = extraction.tables.filter { t =>
+            val scoping     = TableExtractor.extractWithCteReferences(stmt)
+            val policyReads = scoping.extraction.tables.filter { t =>
               matchingPolicies(t, eff, ctx).nonEmpty
             }
-            val walker = new DeepWalker(eff, ctx, values, changed, cteReferences)
+            val walker = new DeepWalker(eff, ctx, values, changed, scoping.cteReferences)
             walker.walk(stmt)
             // Completeness (audit F21): a policy table in a position the walk holds no slot for
             // (a PIVOT / UNPIVOT source) would reach the node unfiltered. Refused, never passed.
             if policyReads.exists(t => !walker.wrappedTables.contains(t)) then
               Refused(UnfilteredRefusal)
+            // A wrap is right only where DuckDB binds the table: a wrapped reference the scoping
+            // did not place, or one under a WITH item it could not scope, may be a CTE.
+            else if !walker.wrappedTables.asScala.forall(scoping.placed.contains) ||
+              (changed.get() && !scoping.scopedEverywhere)
+            then Refused(UnscopedRefusal)
             // The rewrite is printed from the parser input; when that is not the caller's
             // statement (ParserInput.Rendered.exact) shipping it would run a different one.
             else if !changed.get() then Passthrough
@@ -316,7 +325,13 @@ class RowPolicyRewriter(enabled: Boolean = true) extends LazyLogging:
     /** Some(wrapper) when the slot holds a base table matching a policy, None otherwise. A name
       * bound to a CTE in scope is the CTE, whatever table shares its name, and is never wrapped:
       * inside the wrap it would again read the CTE, and the predicate's columns, which the CTE
-      * lacks, would bind to an earlier FROM item instead.
+      * lacks, would bind to an earlier FROM item instead. Neither direction is safe here: a CTE
+      * reference wrapped leaks through that binding, a table reference left alone is read
+      * unfiltered. So a reference is left alone only when the extractor proves DuckDB binds it to a
+      * CTE ([[TableExtractor.extractWithCteReferences]]) and wrapped only when it reads it as the
+      * table (or as a CTE spelled in a way it cannot read exactly, which DuckDB may bind to the
+      * table); a statement wrapping anything else, or holding a WITH item the extractor could not
+      * scope, is refused.
       */
     private def wrapped(item: FromItem): Option[FromItem] =
       item match

@@ -97,7 +97,8 @@ class RowPolicyCteScopeSpec extends AnyFlatSpec with Matchers:
   // ---------- names DuckDB holds apart ----------
 
   /** (a non-ASCII letter Java folds to an ASCII one, that ASCII letter, its code point). */
-  private val nonAscii = List(('İ', 'i', 0x130), ('K', 'k', 0x212a), ('ſ', 's', 0x17f))
+  private val nonAscii =
+    List(('\u0130', 'i', 0x130), ('\u212A', 'k', 0x212a), ('\u017F', 's', 0x17f))
 
   for (u, a, cp) <- nonAscii do
     val nonAsciiName = s"${u}x"
@@ -241,6 +242,85 @@ class RowPolicyCteScopeSpec extends AnyFlatSpec with Matchers:
     body should include("FROM t, secret s")
   }
 
+  // ---------- a recursive body opening with a WITH clause of its own ----------
+
+  "a WITH RECURSIVE self-reference in a body with its own WITH" should "not be wrapped" in
+    Seq(
+      "WITH RECURSIVE secret AS (WITH z AS (SELECT 1) SELECT 0 AS n UNION ALL " +
+        "SELECT t.id + 10 FROM t, secret WHERE secret.n < 1) SELECT * FROM secret",
+      "WITH RECURSIVE secret AS ((WITH z AS (SELECT 1) SELECT 0 AS n UNION ALL " +
+        "SELECT n + 1 FROM secret WHERE n < 3)) SELECT * FROM secret",
+      "WITH RECURSIVE secret AS (WITH z AS (SELECT 1) (SELECT 0 AS n UNION ALL " +
+        "SELECT n + 1 FROM secret WHERE n < 3)) SELECT * FROM secret",
+      "WITH RECURSIVE secret AS (WITH RECURSIVE z AS (SELECT 1) SELECT 0 AS n UNION ALL " +
+        "SELECT n + 1 FROM secret WHERE n < 3) SELECT * FROM secret",
+      "WITH RECURSIVE secret AS (WITH z AS (SELECT 7 AS q) SELECT 0 AS n UNION ALL " +
+        "SELECT n + q FROM secret, z WHERE n < 20) SELECT * FROM secret",
+      // The inner clause declares the name too: the anchor reads it, the term the recursive CTE.
+      "WITH RECURSIVE secret AS (WITH secret AS (SELECT 50 AS n) SELECT n FROM secret " +
+        "UNION ALL SELECT n + 1 FROM secret WHERE n < 52) SELECT * FROM secret",
+      "WITH RECURSIVE a AS (SELECT 1 AS k), secret AS (WITH z AS (SELECT 1) SELECT 0 AS n " +
+        "UNION ALL SELECT n + 1 FROM secret WHERE n < 3) SELECT * FROM secret"
+    ).foreach(q => withClue(q)(go(q) shouldBe Passthrough))
+
+  it should "leave a CTE of the inner clause unwrapped in the term" in {
+    go(
+      "WITH RECURSIVE r AS (WITH secret AS (SELECT 1 AS y) SELECT 0 AS n UNION ALL " +
+        "SELECT n + 1 FROM r, secret WHERE n < 3) SELECT * FROM r"
+    ) shouldBe Passthrough
+  }
+
+  it should "leave the table wrapped where the body reads it" in
+    // The anchor, and the inner clause's own body, read the table.
+    Seq(
+      "WITH RECURSIVE secret AS (WITH z AS (SELECT 1) SELECT id AS n FROM secret UNION ALL " +
+        "SELECT n + 1 FROM secret WHERE n < 3) SELECT * FROM secret",
+      "WITH RECURSIVE secret AS (WITH z AS (SELECT count(*) AS q FROM secret) SELECT 0 AS n " +
+        "UNION ALL SELECT n + q FROM secret, z WHERE n < 5) SELECT * FROM secret",
+      // Not recursive in DuckDB: a BY NAME or EXCEPT top level, or no set operation.
+      "WITH RECURSIVE secret AS (WITH z AS (SELECT 1) SELECT 0 AS id UNION ALL BY NAME " +
+        "SELECT id FROM secret) SELECT * FROM t",
+      "WITH RECURSIVE secret AS (WITH z AS (SELECT 1) SELECT 0 AS id EXCEPT " +
+        "SELECT id FROM secret) SELECT * FROM t",
+      "WITH RECURSIVE secret AS (WITH z AS (SELECT 1) SELECT id FROM secret) SELECT * FROM t"
+    ).foreach { q =>
+      withClue(q)(wraps(rewritten(go(q)), "region = 'eu'") shouldBe 1)
+    }
+
+  // ---------- CTE spellings JSqlParser reads differently from DuckDB ----------
+
+  /** Each names, to DuckDB, a CTE other than `secret` (checked on the 2.0 CLI), while JSqlParser's
+    * own unquoting reads it as `secret`.
+    */
+  private val unlikeSpellings = List(
+    "\"secret\"\"\"",
+    "\"\"\"secret\"",
+    "`secret\"`",
+    "`\"secret`",
+    "\"[secret\"",
+    "`[secret`",
+    "\"secret]\"",
+    "`secret]`",
+    "\"secret`\"",
+    "\"`secret\"",
+    "`secret```",
+    "```secret`"
+  )
+
+  for spelling <- unlikeSpellings do
+    s"a CTE spelled $spelling" should "leave the table secret wrapped" in {
+      val sql = rewritten(
+        go(s"WITH $spelling AS (SELECT 5 AS id, 'q' AS region) SELECT * FROM secret")
+      )
+      wraps(sql, "region = 'eu'") shouldBe 1
+    }
+
+  "a CTE spelled between backticks or double quotes" should "be a CTE as DuckDB reads it" in {
+    go("WITH `secret` AS (SELECT 1 AS y) SELECT * FROM t, secret s") shouldBe Passthrough
+    go("WITH secret AS (SELECT 1 AS y) SELECT * FROM t, `SECRET` s") shouldBe Passthrough
+    go("WITH `Secret` AS (SELECT 1 AS y) SELECT * FROM t, \"secret\" s") shouldBe Passthrough
+  }
+
   // ---------- executed in DuckDB ----------
 
   /** `t` with a column the policy names (`region`) and `secret`, the row-policy table. */
@@ -288,4 +368,23 @@ class RowPolicyCteScopeSpec extends AnyFlatSpec with Matchers:
       val sql =
         "WITH secret AS (SELECT 1 AS y) SELECT r.id, s.y FROM tpch1.secret r, secret s ORDER BY r.id"
       rowsOf(conn, shipped(sql)) shouldBe List(List("10", "1"))
+    }
+
+  "a recursive body with its own WITH" should
+    "return rows that do not depend on an earlier table's columns" in
+    Using.resource(database()) { conn =>
+      val sql =
+        "WITH RECURSIVE secret AS (WITH z AS (SELECT 1) SELECT 0 AS n UNION ALL " +
+          "SELECT t.id + 10 FROM t, secret WHERE secret.n < 1) SELECT n FROM secret ORDER BY n"
+      val ship  = shipped(sql)
+      val first = rowsOf(conn, ship)
+      first shouldBe List(List("0"), List("10"), List("11"), List("12"))
+      Using.resource(conn.createStatement())(_.execute("UPDATE t SET region = 'us'")): Unit
+      rowsOf(conn, ship) shouldBe first
+    }
+
+  "a CTE spelled so DuckDB reads another name" should "not hide the table from its filter" in
+    Using.resource(database()) { conn =>
+      val sql = "WITH \"[secret\" AS (SELECT 5 AS id, 'q' AS region) SELECT id FROM secret"
+      rowsOf(conn, shipped(sql)) shouldBe List(List("10"))
     }

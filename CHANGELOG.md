@@ -82,14 +82,18 @@
   - An OPA tenant's input now carries catalog, schema, table, column and secure view names folded
     as DuckDB folds them (`"SECRET_ÉTÉ"` arrives as `secret_ÉtÉ`, formerly `secret_été`); a Rego
     rule written against the old lowercased form must be updated.
-- **A row policy applies only to a reference that DuckDB binds to its table.** A statement whose
+- **A row policy no longer filters a reference that DuckDB binds to a CTE.** A statement whose
   WITH clause declares a CTE named like a table the caller holds a row policy on had its
   references to the CTE filtered as if they read that table. Inside the filter the name still
   meant the CTE, so the policy's predicate was evaluated against another table of the statement
   instead, which told the caller, row by row, whether that other table's values satisfied the
-  predicate. A reference to the CTE is now left as written; a reference that reads the table (a
-  qualified name, or one where no CTE of that name is in scope, as DuckDB scopes CTEs) is still
-  filtered.
+  predicate. An unqualified reference is now left as written when a CTE of its name is in scope
+  where it stands, as DuckDB 2.0 scopes CTEs (WITH RECURSIVE bodies included), and both the CTE's
+  name and the reference are unquoted or quoted with nothing but double quotes or backticks
+  around a plain name. Every other reference to a row-policy table is filtered as before: a
+  qualified name, one no CTE of its name covers, and one whose spelling or whose CTE's spelling
+  holds a bracket or a quote inside the name. A statement reading a row-policy table where the
+  gateway cannot place a reference or a WITH clause in its scope is refused.
 - **Several column policies on one column: a deny wins, a policy naming the table beats a
   wildcard one, and two different masks are refused.** The policy applied used to depend on the
   order of roles and of the tables a statement named, so a weaker policy could apply in place of
