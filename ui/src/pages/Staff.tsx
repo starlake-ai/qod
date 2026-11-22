@@ -15,6 +15,9 @@ export default function Staff() {
   const [roles, setRoles] = useState<PlatformRoleView[]>([]);
   const [users, setUsers] = useState<UserResponse[]>([]);
   const [err, setErr] = useState<string | null>(null);
+  const [roleErr, setRoleErr] = useState<string | null>(null);
+  const [userErr, setUserErr] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
   const [loading, setLoading] = useState(true);
   const [form, setForm] = useState<RoleForm>(EMPTY_ROLE);
   const [newUser, setNewUser] = useState({ username: '', password: '', roles: [] as string[] });
@@ -28,6 +31,9 @@ export default function Staff() {
         setPerms(p.permissions);
         setRoles(r.roles);
         setUsers(u.users);
+        const names = new Set(r.roles.map(x => x.name));
+        setNewUser(n => ({ ...n, roles: n.roles.filter(x => names.has(x)) }));
+        setEditingUser(ed => (ed ? { ...ed, roles: ed.roles.filter(x => names.has(x)) } : ed));
         setLoading(false);
       })
       .catch(e => {
@@ -38,9 +44,15 @@ export default function Staff() {
 
   useEffect(load, [load]);
 
-  const run = (fn: () => Promise<unknown>, after?: () => void) => {
+  const run = (fn: () => Promise<unknown>, after?: () => void, setError: (m: string | null) => void = setErr) => {
     setErr(null);
-    fn().then(() => { after?.(); load(); }).catch(e => setErr(errorMessage(e)));
+    setRoleErr(null);
+    setUserErr(null);
+    setPending(true);
+    fn()
+      .then(() => { after?.(); load(); })
+      .catch(e => setError(errorMessage(e)))
+      .finally(() => setPending(false));
   };
 
   const groups = groupByModule(perms);
@@ -49,15 +61,16 @@ export default function Staff() {
     const f = form;
     run(
       () => f.id === null
-        ? api.createPlatformRole({ name: f.name.trim(), description: f.description, permissions: f.permissions })
+        ? api.createPlatformRole({ name: f.name.trim(), ...(f.description ? { description: f.description } : {}), permissions: f.permissions })
         : api.updatePlatformRole({ id: f.id, name: f.name.trim(), description: f.description, permissions: f.permissions }),
       () => setForm(EMPTY_ROLE),
+      setRoleErr,
     );
   };
 
   const removeRole = (r: PlatformRoleView) => {
     if (!window.confirm(`Delete the platform role "${r.name}"?`)) return;
-    run(() => api.deletePlatformRole(r.id));
+    run(() => api.deletePlatformRole(r.id), () => { if (form.id === r.id) setForm(EMPTY_ROLE); }, setRoleErr);
   };
 
   const createUser = () => {
@@ -65,6 +78,7 @@ export default function Staff() {
     run(
       () => api.createUser({ tenant: null, username: u.username.trim(), password: u.password, kind: 'staff', platformRoles: u.roles }),
       () => setNewUser({ username: '', password: '', roles: [] }),
+      setUserErr,
     );
   };
 
@@ -93,6 +107,7 @@ export default function Staff() {
           </tbody>
         </table>
 
+        {roleErr && <p style={{ color: 'var(--bad)' }}>{roleErr}</p>}
         <h3>{form.id === null ? 'Create a role' : `Edit role ${form.name}`}</h3>
         <p>
           <input placeholder="Name" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} />{' '}
@@ -119,7 +134,7 @@ export default function Staff() {
           </fieldset>
         ))}
         <p>
-          <button onClick={saveRole} disabled={!form.name.trim()}>{form.id === null ? 'Create role' : 'Save role'}</button>{' '}
+          <button onClick={saveRole} disabled={pending || !form.name.trim()}>{form.id === null ? 'Create role' : 'Save role'}</button>{' '}
           {form.id !== null && <button onClick={() => setForm(EMPTY_ROLE)}>Cancel</button>}
         </p>
       </div>
@@ -146,7 +161,7 @@ export default function Staff() {
                           {r.name}
                         </label>
                       ))}
-                      <button onClick={() => run(() => api.updateUser({ id: u.id, platformRoles: editingUser.roles }), () => setEditingUser(null))}>Save</button>{' '}
+                      <button onClick={() => run(() => api.updateUser({ id: u.id, platformRoles: editingUser.roles }), () => setEditingUser(null), setUserErr)} disabled={pending}>Save</button>{' '}
                       <button onClick={() => setEditingUser(null)}>Cancel</button>
                     </>
                   ) : (
@@ -157,7 +172,7 @@ export default function Staff() {
                   {editingUser?.id !== u.id && (
                     <button onClick={() => setEditingUser({ id: u.id, roles: [...(u.platformRoles ?? [])] })}>Edit roles</button>
                   )}{' '}
-                  <button onClick={() => run(() => api.updateUser({ id: u.id, enabled: !u.enabled }))}>
+                  <button onClick={() => run(() => api.updateUser({ id: u.id, enabled: !u.enabled }), undefined, setUserErr)} disabled={pending}>
                     {u.enabled ? 'Disable' : 'Enable'}
                   </button>
                 </td>
@@ -167,10 +182,11 @@ export default function Staff() {
           </tbody>
         </table>
 
+        {userErr && <p style={{ color: 'var(--bad)' }}>{userErr}</p>}
         <h3>Create a staff user</h3>
         <p>
-          <input placeholder="Username" value={newUser.username} onChange={e => setNewUser({ ...newUser, username: e.target.value })} />{' '}
-          <input type="password" placeholder="Password" value={newUser.password} onChange={e => setNewUser({ ...newUser, password: e.target.value })} />
+          <input placeholder="Username" autoComplete="off" value={newUser.username} onChange={e => setNewUser({ ...newUser, username: e.target.value })} />{' '}
+          <input type="password" placeholder="Password" autoComplete="new-password" value={newUser.password} onChange={e => setNewUser({ ...newUser, password: e.target.value })} />
         </p>
         <p>
           {roles.map(r => (
@@ -184,7 +200,7 @@ export default function Staff() {
             </label>
           ))}
         </p>
-        <button onClick={createUser} disabled={!newUser.username.trim() || !newUser.password}>Create staff user</button>
+        <button onClick={createUser} disabled={pending || !newUser.username.trim() || !newUser.password}>Create staff user</button>
       </div>
     </div>
   );
