@@ -323,10 +323,25 @@ object TableExtractor:
     visitor.process(select)
     visitor.result
 
+  /** [[extract]] plus the table references of `select` that bind to a CTE in scope where they
+    * stand, as the very AST nodes (identity, not name): unqualified names DuckDB reads as the CTE,
+    * by the scoping and the fold [[extract]] uses to leave them out of `tables`. A reference the
+    * walk did not reach is in neither, so a caller that treats only these as CTEs treats an
+    * unreached one as a table.
+    */
+  def extractWithCteReferences(select: Select): (TableExtraction, java.util.Set[Table]) =
+    val visitor = new TableExtractorVisitor()
+    visitor.process(select)
+    (visitor.result, java.util.Collections.unmodifiableSet(visitor.cteReferences))
+
 private[parser] class TableExtractorVisitor:
   val tables: mutable.ListBuffer[Table]       = mutable.ListBuffer.empty
   val unsupported: mutable.ListBuffer[String] = mutable.ListBuffer.empty
   private val cteNames: mutable.Set[String]   = mutable.Set.empty
+
+  /** The FROM-slot tables bound to a CTE in scope, by identity. */
+  val cteReferences: java.util.Set[Table] =
+    java.util.Collections.newSetFromMap(new java.util.IdentityHashMap[Table, java.lang.Boolean]())
 
   // Identity-keyed set of AST nodes already walked, so the explicit arms and the unconditional
   // descendChildren pass cannot re-walk the same subtree: keeps the walk O(n) and cycle-proof even
@@ -573,7 +588,8 @@ private[parser] class TableExtractorVisitor:
             unsupported += DuckDBDialectMapper.fileReferenceMarker(table)
           else if isBareCatalogFn then
             unsupported += TableExtractor.bareSystemViewMarker(IdentifierFold.fold(name))
-          else if !isCteName then tables += table
+          else if isCteName then cteReferences.add(table): Unit
+          else tables += table
       case ls: LateralSubSelect  => visitParenthesedSelect(ls)
       case ps: ParenthesedSelect => visitParenthesedSelect(ps)
       case tf: TableFunction     =>

@@ -82,6 +82,14 @@
   - An OPA tenant's input now carries catalog, schema, table, column and secure view names folded
     as DuckDB folds them (`"SECRET_ÉTÉ"` arrives as `secret_ÉtÉ`, formerly `secret_été`); a Rego
     rule written against the old lowercased form must be updated.
+- **A row policy applies only to a reference that DuckDB binds to its table.** A statement whose
+  WITH clause declares a CTE named like a table the caller holds a row policy on had its
+  references to the CTE filtered as if they read that table. Inside the filter the name still
+  meant the CTE, so the policy's predicate was evaluated against another table of the statement
+  instead, which told the caller, row by row, whether that other table's values satisfied the
+  predicate. A reference to the CTE is now left as written; a reference that reads the table (a
+  qualified name, or one where no CTE of that name is in scope, as DuckDB scopes CTEs) is still
+  filtered.
 - **Several column policies on one column: a deny wins, a policy naming the table beats a
   wildcard one, and two different masks are refused.** The policy applied used to depend on the
   order of roles and of the tables a statement named, so a weaker policy could apply in place of

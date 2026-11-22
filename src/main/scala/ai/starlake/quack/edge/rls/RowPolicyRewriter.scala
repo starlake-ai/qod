@@ -194,11 +194,13 @@ class RowPolicyRewriter(enabled: Boolean = true) extends LazyLogging:
           val changed = new java.util.concurrent.atomic.AtomicBoolean(false)
           try
             // Taken before the walk replaces them: every policy table the ACL parser's
-            // depth-complete walk sees, as the very AST nodes the rewrite walk wraps.
-            val policyReads = TableExtractor.extract(stmt).tables.filter { t =>
+            // depth-complete walk sees, as the very AST nodes the rewrite walk wraps, and the
+            // references that walk binds to a CTE in scope, which are no table and stay as written.
+            val (extraction, cteReferences) = TableExtractor.extractWithCteReferences(stmt)
+            val policyReads                 = extraction.tables.filter { t =>
               matchingPolicies(t, eff, ctx).nonEmpty
             }
-            val walker = new DeepWalker(eff, ctx, values, changed)
+            val walker = new DeepWalker(eff, ctx, values, changed, cteReferences)
             walker.walk(stmt)
             // Completeness (audit F21): a policy table in a position the walk holds no slot for
             // (a PIVOT / UNPIVOT source) would reach the node unfiltered. Refused, never passed.
@@ -264,7 +266,8 @@ class RowPolicyRewriter(enabled: Boolean = true) extends LazyLogging:
       eff: EffectiveSet,
       ctx: SchemaContext,
       values: Map[String, String],
-      changed: java.util.concurrent.atomic.AtomicBoolean
+      changed: java.util.concurrent.atomic.AtomicBoolean,
+      cteReferences: java.util.Set[Table]
   ):
     private val visited: java.util.Set[AnyRef] =
       java.util.Collections.newSetFromMap(
@@ -310,10 +313,15 @@ class RowPolicyRewriter(enabled: Boolean = true) extends LazyLogging:
         // fails to apply on a nested table, must reach rewrite's handler and deny.
         AstChildren.accessors(node.getClass).foreach(m => route(AstChildren.read(m, node)))
 
-    /** Some(wrapper) when the slot holds a base table matching a policy, None otherwise. */
+    /** Some(wrapper) when the slot holds a base table matching a policy, None otherwise. A name
+      * bound to a CTE in scope is the CTE, whatever table shares its name, and is never wrapped:
+      * inside the wrap it would again read the CTE, and the predicate's columns, which the CTE
+      * lacks, would bind to an earlier FROM item instead.
+      */
     private def wrapped(item: FromItem): Option[FromItem] =
       item match
-        case t: Table =>
+        case t: Table if cteReferences.contains(t) => None
+        case t: Table                              =>
           val w = maybeWrap(t, eff, ctx, values, changed)
           if w eq t then None
           else
