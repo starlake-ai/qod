@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { checkPageModule, findPage, resolveNavigate, subpathOf } from './pageContract';
+import { checkPageModule, checkUnmount, findPage, resolveNavigate, subpathOf } from './pageContract';
 
 describe('checkPageModule', () => {
   it('accepts contract 1 with a mount function', () => {
@@ -35,6 +35,20 @@ describe('resolveNavigate', () => {
     expect(resolveNavigate('/x/hosted/quotas', '/ui/settings/profile')).toBe('/settings/profile');
     expect(resolveNavigate('/x/hosted/quotas', '/ui')).toBe('/');
   });
+  it('keeps a protocol-relative or full URL under the page', () => {
+    expect(resolveNavigate('/x/hosted/quotas', '//evil')).toBe('/x/hosted/quotas/evil');
+    expect(resolveNavigate('/x/hosted/quotas', 'https://evil.example/x'))
+      .toBe('/x/hosted/quotas/https:/evil.example/x');
+  });
+  it('drops dot segments from a page-relative path', () => {
+    expect(resolveNavigate('/x/hosted/quotas', '../../x')).toBe('/x/hosted/quotas/x');
+    expect(resolveNavigate('/x/hosted/quotas', './a/../b')).toBe('/x/hosted/quotas/a/b');
+    expect(resolveNavigate('/x/hosted/quotas', '..')).toBe('/x/hosted/quotas');
+  });
+  it('refuses a console path holding a .. segment', () => {
+    expect(resolveNavigate('/x/hosted/quotas', '/ui/../x')).toBe('/x/hosted/quotas');
+    expect(resolveNavigate('/x/hosted/quotas', '/ui/settings/../../x')).toBe('/x/hosted/quotas');
+  });
 });
 
 describe('findPage', () => {
@@ -49,5 +63,18 @@ describe('findPage', () => {
     expect(findPage(pages, 'hosted', 'billing')).toBeUndefined();
     expect(findPage(pages, undefined, 'quotas')).toBeUndefined();
     expect(findPage([], 'hosted', 'quotas')).toBeUndefined();
+  });
+});
+
+describe('checkUnmount', () => {
+  it('accepts a function', () => {
+    const u = () => {};
+    expect(checkUnmount(u, 'hosted')).toEqual({ ok: true, unmount: u });
+  });
+  it('refuses anything else, naming the module', () => {
+    for (const v of [undefined, null, 1, 'x', {}]) {
+      expect(checkUnmount(v, 'hosted'))
+        .toEqual({ ok: false, error: 'module hosted: mount did not return an unmount function' });
+    }
   });
 });

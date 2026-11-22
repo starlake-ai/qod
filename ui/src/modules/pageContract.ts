@@ -43,12 +43,26 @@ export function subpathOf(routerPathname: string, routerBase: string): string {
   return rest === '/' ? '' : rest;
 }
 
-/** Router target of ctx.navigate: a /ui path is a console path, anything else is page-relative. */
+/** Router target of ctx.navigate. A /ui path is a console path, refused (the page root) when it
+ *  holds a `..` segment; anything else, `//host` and full URLs included, is page-relative, with
+ *  empty, `.` and `..` segments dropped, so it never leaves the page. */
 export function resolveNavigate(routerBase: string, path: string): string {
   if (path === '/ui') return '/';
-  if (path.startsWith('/ui/')) return path.slice(3);
-  const rel = path.replace(/^\/+/, '');
+  if (path.startsWith('/ui/')) {
+    const rest = path.slice(3);
+    return rest.split('/').includes('..') ? routerBase : rest;
+  }
+  const rel = path.split('/').filter(s => s !== '' && s !== '.' && s !== '..').join('/');
   return rel === '' ? routerBase : `${routerBase}/${rel}`;
+}
+
+export type UnmountCheck = { ok: true; unmount: Unmount } | { ok: false; error: string };
+
+/** Checks what a page's mount resolved to: contract 1 requires an unmount function. */
+export function checkUnmount(value: unknown, module: string): UnmountCheck {
+  return typeof value === 'function'
+    ? { ok: true, unmount: value as Unmount }
+    : { ok: false, error: `module ${module}: mount did not return an unmount function` };
 }
 
 /** The page a route names, among the pages the caller may see; undefined redirects. */
