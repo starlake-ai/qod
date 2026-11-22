@@ -75,7 +75,7 @@ final class ProtectedWriteGuard(
   ): GuardOutcome =
     val colPolicies = if clsEnabled then eff.columnPolicies else Nil
     val rowPolicies = if rlsEnabled then eff.rowPolicies else Nil
-    if eff.user.tenant.isEmpty then Allow // superuser
+    if eff.user.isSuperuser then Allow // superuser
     else if colPolicies.isEmpty && rowPolicies.isEmpty then Allow
     else
       // Every kind, a plain SELECT included: a table named in a string is invisible to the

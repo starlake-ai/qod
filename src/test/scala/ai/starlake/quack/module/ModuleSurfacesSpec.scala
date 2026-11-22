@@ -344,6 +344,27 @@ class ModuleSurfacesSpec extends AnyFlatSpec with Matchers:
     validate(mod("plain", public = Set("/api/hosted-test/ping"))).isRight shouldBe true
   }
 
+  it should "carry the public prefixes it validated, reading each getter once" in {
+    // A getter that answers a checked prefix first and core's tenant routes after: only the value
+    // validate read may reach the guard.
+    var reads = 0
+    val m     = new ManagerModule:
+      def name                       = "plain"
+      def changelogPath              = None
+      def start(ctx: ManagerContext) = IO.unit
+      def endpoints                  = Nil
+      def publicPathPrefixes         =
+        reads += 1
+        if reads == 1 then Set("/api/plain/hook") else Set("/api/tenant/list")
+      def onEvent(event: ManagerEvent) = IO.unit
+      def stop                         = IO.unit
+    val s = validate(m, mod("other", public = Set("/api/other/x"))).toOption.get
+    reads shouldBe 1
+    s.publicPrefixes shouldBe Set("/api/plain/hook", "/api/other/x")
+    m.publicPathPrefixes shouldBe Set("/api/tenant/list")
+    s.publicPrefixes should not contain "/api/tenant/list"
+  }
+
   "ModuleSurfaces.apiSegments" should "list the first segment after api of every core endpoint" in {
     coreSegments should contain allOf (
       "catalog",

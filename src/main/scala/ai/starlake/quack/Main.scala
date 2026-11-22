@@ -2284,7 +2284,8 @@ object Main extends IOApp with LazyLogging:
         usage = usageHandlers,
         profile = profileHandlers,
         moduleEndpoints = modules.flatMap(_.endpoints),
-        modulePublicPrefixes = modules.flatMap(_.publicPathPrefixes).toSet,
+        // As validated: ModuleSurfaces.validate read each module's getter once.
+        modulePublicPrefixes = surfaces.publicPrefixes,
         moduleStaticMounts = modules.flatMap(_.staticMounts),
         moduleStaffPrefixes = surfaces.staffPrefixes,
         platform = Some(platformHandlers),

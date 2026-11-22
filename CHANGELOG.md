@@ -42,10 +42,13 @@
   `/api/hosted-test/ping`, and `/api/auth%2Flogin` as the public `/api/auth/login`, each reaching
   a module route capturing that segment (such as `/api/hosted-test/{id}/secret` or `/api/{x}`)
   with no credential. An encoded `/` can no longer carry an anonymous request onto a public path;
-  every other path is answered as before. Boot now also refuses a module public prefix that is
-  empty, not absolute, holds an empty, `.` or `..` segment, is `/api` itself or lies under a core
-  API segment or another loaded module's name, or, outside `/api`, under none of the module's own
-  static mounts.
+  every other path is answered as before. The allowlists of signed-in non-admin and staff callers,
+  and the disabled-tenant logout exception, are now matched the same way: `GET /api/auth%2Fwhoami`
+  from such a session reached a module route shaped `/api/{x}`. Boot now also refuses a module
+  public prefix that is empty or not absolute; holds a segment that is empty (a trailing `/`
+  included), `.`, `..` or not made of `[A-Za-z0-9._-]`; is `/api` itself or one segment under it
+  (such as `/api/webhook`); lies under a core API segment or under another loaded module's name;
+  or, outside `/api`, lies under none of the module's own static mounts (a root mount covers none).
 
 ### Changed
 

@@ -14,16 +14,19 @@ final case class ResolvedConsolePage(
   def path: String = s"/ui/x/$module/$id"
 
 /** The platform surfaces of the loaded modules (issue #274), validated once at boot after every
-  * module's start(). A Left aborts the boot, naming the module and the item.
+  * module's start(). A Left aborts the boot, naming the module and the item. `publicPrefixes` are
+  * every module's public path prefixes as validated, the values the server is given: a getter is
+  * read once, so a second read can never hand the guard a prefix nobody checked.
   */
 final case class ModuleSurfaces(
     permissions: List[DeclaredPermission],
     staffPrefixes: Set[String],
-    pages: List[ResolvedConsolePage]
+    pages: List[ResolvedConsolePage],
+    publicPrefixes: Set[String]
 )
 
 object ModuleSurfaces:
-  val Empty: ModuleSurfaces = ModuleSurfaces(Nil, Set.empty, Nil)
+  val Empty: ModuleSurfaces = ModuleSurfaces(Nil, Set.empty, Nil, Set.empty)
 
   /** First segments after `api` that core reserves for routes of its own to come (the platform API
     * and the console page list), on top of those its endpoints already hold.
@@ -224,4 +227,12 @@ object ModuleSurfaces:
     }
     val all = errs.result()
     if all.nonEmpty then Left(all.mkString("; "))
-    else Right(ModuleSurfaces(perms.result(), prefixes.result(), pages.result()))
+    else
+      Right(
+        ModuleSurfaces(
+          perms.result(),
+          prefixes.result(),
+          pages.result(),
+          declared.flatMap(_.publicPrefixes).toSet
+        )
+      )

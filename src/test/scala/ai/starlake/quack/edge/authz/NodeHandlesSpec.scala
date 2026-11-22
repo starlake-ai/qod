@@ -451,14 +451,20 @@ class NodeHandlesSpec extends AnyFlatSpec with Matchers:
   }
 
   "NodePrincipal.of" should "name the user, flag a superuser, and map the system caller" in {
-    def eff(tenant: Option[String], system: Boolean = false) =
+    def eff(tenant: Option[String], kind: String = "user", system: Boolean = false) =
       Some(
-        EffectiveSet(RbacUser("u-9", tenant, "bob", "user"), Nil, Nil, Nil, Nil, system = system)
+        EffectiveSet(RbacUser("u-9", tenant, "bob", kind), Nil, Nil, Nil, Nil, system = system)
       )
     NodePrincipal.of(eff(Some("acme"))) shouldBe
       NodePrincipal("u-9", "bob", Some("acme"), superuser = false, system = false)
-    NodePrincipal.of(eff(None)) shouldBe
+    NodePrincipal.of(eff(Some("acme"), kind = "admin")) shouldBe
+      NodePrincipal("u-9", "bob", Some("acme"), superuser = false, system = false)
+    NodePrincipal.of(eff(None, kind = "admin")) shouldBe
       NodePrincipal("u-9", "bob", None, superuser = true, system = false)
+    // No tenant alone is not a superuser: the predicate needs kind admin too.
+    for kind <- List("user", "staff") do
+      NodePrincipal.of(eff(None, kind = kind)) shouldBe
+        NodePrincipal("u-9", "bob", None, superuser = false, system = false)
     NodePrincipal.of(eff(None, system = true)) shouldBe NodePrincipal.System
     NodePrincipal.of(None) shouldBe NodePrincipal.Unbound
   }

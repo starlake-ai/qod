@@ -16,7 +16,7 @@ import scala.collection.concurrent.TrieMap
   * qodstate_role_permission / qodstate_user_role until a grant changed. Superusers carry an empty
   * effective set, resolved again when the replica's policy generation moves (a demotion, a disable
   * or a delete of their row refuses them there); the node allows their statements without a
-  * decision (`effectiveSet.user.tenant.isEmpty` makes the minted principal a superuser).
+  * decision (`effectiveSet.user.isSuperuser` makes the minted principal a superuser).
   *
   * Sessions carry an `expiresAt`. Once past, every accessor pretends the entry doesn't exist and
   * the auth handler falls through to a full handshake -- which re-validates the original
