@@ -4,7 +4,7 @@ import ai.starlake.quack.FleetConfig
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.fleet.{Cidr, ClientAddress, ServerLiveness}
 import ai.starlake.quack.ondemand.ha.StateChangePublisher
-import ai.starlake.quack.ondemand.runtime.FleetQuackBackend
+import ai.starlake.quack.ondemand.runtime.{FleetQuackBackend, NodeSecretFiles}
 import ai.starlake.quack.ondemand.state.{
   ApproveResult,
   FleetAssignment,
@@ -46,7 +46,10 @@ final class FleetHandlers(
     // the manager was told.
     nodeFiles: ai.starlake.quack.NodeFilesConfig,
     // Required (Main passes the manager's): a default would silently run qod-node's own limits.
-    nodeAuthzLimits: ai.starlake.quack.NodeAuthzLimitsConfig
+    nodeAuthzLimits: ai.starlake.quack.NodeAuthzLimitsConfig,
+    // Required (Main passes the manager's environment): where the manager's default-store keys
+    // (QOD_S3_* and the like) are read for each reply, never stored with the assignment.
+    readEnv: String => Option[String]
 ) extends LazyLogging:
   type Out[A] = IO[Either[(StatusCode, ErrorResponse), A]]
 
@@ -185,7 +188,9 @@ final class FleetHandlers(
                           nodeKeys.keyHex(a.nodeId),
                           nodeExtensions,
                           nodeFiles,
-                          nodeAuthzLimits
+                          nodeAuthzLimits,
+                          NodeSecretFiles
+                            .managerStore(a.objectStoreSql, readEnv, cfg.nodeS3Endpoint)
                         )
                     ),
                   approval
@@ -344,14 +349,16 @@ object FleetHandlers:
     case ServerLiveness.Dead           => "dead"
 
   /** The heartbeat's assignment, with the node key derived for its node id, the manager's extension
-    * policy, whether its nodes may open local files and its decide limits (none stored).
+    * policy, whether its nodes may open local files, its decide limits and its default store
+    * `(secrets, settings)` from [[NodeSecretFiles.managerStore]] (none stored).
     */
   def toDto(
       a: FleetAssignment,
       authzKey: String,
       extensions: ai.starlake.quack.NodeExtensionsConfig,
       files: ai.starlake.quack.NodeFilesConfig,
-      limits: ai.starlake.quack.NodeAuthzLimitsConfig
+      limits: ai.starlake.quack.NodeAuthzLimitsConfig,
+      store: (Map[String, String], Map[String, String])
   ): FleetAssignmentDto =
     FleetAssignmentDto(
       a.epoch,
@@ -376,6 +383,6 @@ object FleetHandlers:
       a.tenantDbInitTrusted,
       a.tenantPoolInitSql,
       a.tenantPoolInitTrusted,
-      a.storeSecrets,
-      a.storeEnv
+      store._1,
+      store._2
     )

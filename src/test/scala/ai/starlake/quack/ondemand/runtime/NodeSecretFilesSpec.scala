@@ -28,8 +28,6 @@ class NodeSecretFilesSpec extends AnyFlatSpec with Matchers with SpawnScriptTemp
     keyList("cli/src/qod_cli/fleet_join.py", "_SECRET_KEYS = (", ")") shouldBe NodeSecretFiles.Keys
   }
 
-  // SEC-1: the join process overlays an assignment's env with these names only, and takes only
-  // the metastore's own secrets from it.
   "the cloud store key lists" should "pin the settings and cover what Kubernetes forwards" in {
     NodeSecretFiles.CloudSettingKeys shouldBe
       Seq("QOD_S3_ENDPOINT", "QOD_S3_REGION", "QOD_S3_URL_STYLE", "QOD_S3_USE_SSL")
@@ -38,6 +36,62 @@ class NodeSecretFilesSpec extends AnyFlatSpec with Matchers with SpawnScriptTemp
       (NodeSecretFiles.CloudSettingKeys ++ NodeSecretFiles.CloudCredKeys).toSet
   }
 
+  // Issue #285: a node signs the manager's default data path with the manager's own keys, so a
+  // fleet server gets them in the heartbeat reply, as a Kubernetes pod gets them in its Secret.
+  private val managerStoreEnv = Map(
+    "QOD_S3_ENDPOINT"             -> "fake-store:9000",
+    "QOD_S3_ACCESS_KEY_ID"        -> "fake-key-id",
+    "QOD_S3_SECRET_ACCESS_KEY"    -> "fake-secret",
+    "QOD_S3_REGION"               -> "fake-region",
+    "QOD_S3_URL_STYLE"            -> "path",
+    "QOD_S3_USE_SSL"              -> "false",
+    "QOD_AZURE_CONNECTION_STRING" -> "fake-azure",
+    "QOD_GCS_KEY_ID"              -> "fake-gcs-id",
+    "QOD_GCS_SECRET"              -> "fake-gcs-secret"
+  )
+  private def only(keys: Seq[String]) = keys.map(k => k -> managerStoreEnv(k)).toMap
+
+  "managerStore" should "give a node with no store of its own the manager's secrets and settings" in {
+    NodeSecretFiles.managerStore("", managerStoreEnv.get, "") shouldBe
+      (only(NodeSecretFiles.CloudCredKeys), only(NodeSecretFiles.CloudSettingKeys))
+  }
+
+  it should "give a node whose database has its own store none of the manager's" in {
+    NodeSecretFiles.managerStore(
+      "CREATE SECRET qod_db_store (TYPE s3);",
+      managerStoreEnv.get,
+      "h:1"
+    ) shouldBe
+      (Map.empty, Map.empty)
+  }
+
+  it should "leave out the manager's empty values" in {
+    val env = Map(
+      "QOD_S3_ACCESS_KEY_ID"     -> "fake-key-id",
+      "QOD_S3_SECRET_ACCESS_KEY" -> "",
+      "QOD_S3_REGION"            -> "fake-region",
+      "QOD_S3_ENDPOINT"          -> ""
+    )
+    NodeSecretFiles.managerStore("", env.get, "") shouldBe
+      (Map("QOD_S3_ACCESS_KEY_ID" -> "fake-key-id"), Map("QOD_S3_REGION" -> "fake-region"))
+  }
+
+  it should "replace only the endpoint with a non-blank nodeS3Endpoint, trimmed" in {
+    NodeSecretFiles.managerStore("", managerStoreEnv.get, " h:1 ") shouldBe
+      (
+        only(NodeSecretFiles.CloudCredKeys),
+        only(NodeSecretFiles.CloudSettingKeys).updated("QOD_S3_ENDPOINT", "h:1")
+      )
+    // With no endpoint of the manager's own, it is still the one servers dial.
+    NodeSecretFiles.managerStore("", _ => None, "h:1") shouldBe
+      (Map.empty, Map("QOD_S3_ENDPOINT" -> "h:1"))
+    // Blank means no override.
+    NodeSecretFiles.managerStore("", managerStoreEnv.get, "  ")._2 shouldBe
+      only(NodeSecretFiles.CloudSettingKeys)
+  }
+
+  // SEC-1: the join process overlays an assignment's env with these names only, and takes only
+  // the metastore's own secrets from it.
   "the node env key list" should "be the same in TenantDb and fleet join" in {
     keyList("cli/src/qod_cli/fleet_join.py", "_NODE_ENV_KEYS = (", ")").sorted shouldBe
       TenantDb.NodeEnvKeys.toList.sorted

@@ -394,7 +394,8 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
         backend = Some(fx.backend),
         nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
         nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
-        nodeFiles = ai.starlake.quack.NodeFilesConfig()
+        nodeFiles = ai.starlake.quack.NodeFilesConfig(),
+        readEnv = _ => None
       )
       h.drain(FleetServerOpRequest("a"), None)(_ => SessionScope.Superuser)
         .unsafeRunSync() shouldBe Right(())
@@ -417,7 +418,8 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
         backend = Some(fx.backend),
         nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
         nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
-        nodeFiles = ai.starlake.quack.NodeFilesConfig()
+        nodeFiles = ai.starlake.quack.NodeFilesConfig(),
+        readEnv = _ => None
       )
       h.drain(FleetServerOpRequest("a"), None)(_ => SessionScope.Superuser)
         .unsafeRunSync() shouldBe Right(())
@@ -640,7 +642,8 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
         backend = Some(fx.backend),
         nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
         nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
-        nodeFiles = ai.starlake.quack.NodeFilesConfig()
+        nodeFiles = ai.starlake.quack.NodeFilesConfig(),
+        readEnv = _ => None
       )
       h.remove(FleetServerOpRequest("a"), None)(_ => SessionScope.Superuser)
         .unsafeRunSync() shouldBe Right(())

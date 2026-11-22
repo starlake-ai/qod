@@ -62,7 +62,8 @@ class NodeKeysRequiredSpec extends AnyFlatSpec with Matchers:
       fleetCfg,
       nodeKeys = keys,
       nodeFiles = files,
-      nodeAuthzLimits = limits
+      nodeAuthzLimits = limits,
+      readEnv = _ => None
     )
     new ai.starlake.quack.ondemand.runtime.FleetQuackBackend(
       fleetStore,
@@ -97,10 +98,16 @@ class NodeKeysRequiredSpec extends AnyFlatSpec with Matchers:
       typeCheck
     """new ai.starlake.quack.ondemand.runtime.KubernetesQuackBackend(k8s, "ns", "img", 8080, "a=b", 5, nodeKeys = NodeKeys.ephemeral(), nodeFiles = files, nodeAuthzLimits = limits)""" should
       compile
-    """new ai.starlake.quack.ondemand.api.FleetHandlers(fleetStore, fleetCfg, nodeFiles = files, nodeAuthzLimits = limits)""" shouldNot
+    """new ai.starlake.quack.ondemand.api.FleetHandlers(fleetStore, fleetCfg, nodeFiles = files, nodeAuthzLimits = limits, readEnv = _ => None)""" shouldNot
       typeCheck
-    """new ai.starlake.quack.ondemand.api.FleetHandlers(fleetStore, fleetCfg, nodeKeys = NodeKeys.ephemeral(), nodeFiles = files, nodeAuthzLimits = limits)""" should
+    """new ai.starlake.quack.ondemand.api.FleetHandlers(fleetStore, fleetCfg, nodeKeys = NodeKeys.ephemeral(), nodeFiles = files, nodeAuthzLimits = limits, readEnv = _ => None)""" should
       compile
+  }
+
+  "the heartbeat reply that hands servers the manager's store" should "need the manager's environment" in {
+    """new ai.starlake.quack.ondemand.api.FleetHandlers(fleetStore, fleetCfg, nodeKeys = NodeKeys.ephemeral(), nodeFiles = files, nodeAuthzLimits = limits)""" shouldNot
+      typeCheck
+    // Given it, the construction compiles: the "need the manager's keys" case above.
   }
 
   "the runtimes that hand nodes their decide limits" should "need the manager's limits" in {
@@ -108,7 +115,7 @@ class NodeKeysRequiredSpec extends AnyFlatSpec with Matchers:
       typeCheck
     """new ai.starlake.quack.ondemand.runtime.KubernetesQuackBackend(k8s, "ns", "img", 8080, "a=b", 5, nodeKeys = NodeKeys.ephemeral(), nodeFiles = files)""" shouldNot
       typeCheck
-    """new ai.starlake.quack.ondemand.api.FleetHandlers(fleetStore, fleetCfg, nodeKeys = NodeKeys.ephemeral(), nodeFiles = files)""" shouldNot
+    """new ai.starlake.quack.ondemand.api.FleetHandlers(fleetStore, fleetCfg, nodeKeys = NodeKeys.ephemeral(), nodeFiles = files, readEnv = _ => None)""" shouldNot
       typeCheck
     // The same constructions given the limits compile: the "need the manager's keys" case above.
   }
@@ -118,7 +125,7 @@ class NodeKeysRequiredSpec extends AnyFlatSpec with Matchers:
       typeCheck
     """new ai.starlake.quack.ondemand.runtime.KubernetesQuackBackend(k8s, "ns", "img", 8080, "a=b", 5, nodeKeys = NodeKeys.ephemeral(), nodeAuthzLimits = limits)""" shouldNot
       typeCheck
-    """new ai.starlake.quack.ondemand.api.FleetHandlers(fleetStore, fleetCfg, nodeKeys = NodeKeys.ephemeral(), nodeAuthzLimits = limits)""" shouldNot
+    """new ai.starlake.quack.ondemand.api.FleetHandlers(fleetStore, fleetCfg, nodeKeys = NodeKeys.ephemeral(), nodeAuthzLimits = limits, readEnv = _ => None)""" shouldNot
       typeCheck
     """new ai.starlake.quack.ondemand.runtime.FleetQuackBackend(fleetStore, fleetCfg)""" shouldNot
       typeCheck

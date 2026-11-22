@@ -1,13 +1,13 @@
 package ai.starlake.quack.ondemand.api
 
-import ai.starlake.quack.FleetConfig
+import ai.starlake.quack.{FleetConfig, NodeFilesConfig}
 import ai.starlake.quack.edge.auth.AuthenticatedProfile
 import ai.starlake.quack.edge.authz.NodeKeys
 import ai.starlake.quack.model.PoolKey
 import ai.starlake.quack.ondemand.auth.SessionScope
 import ai.starlake.quack.ondemand.fleet.ServerLiveness
 import ai.starlake.quack.ondemand.ha.StateChangePublisher
-import ai.starlake.quack.ondemand.runtime.FleetQuackBackend
+import ai.starlake.quack.ondemand.runtime.{FleetQuackBackend, NodeSecretFiles}
 import ai.starlake.quack.ondemand.telemetry.{AuditRecorder, NoopTelemetryStore}
 import ai.starlake.quack.ondemand.state.{
   ApproveResult,
@@ -49,7 +49,8 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
         backend = Some(backend),
         nodeKeys = nodeKeys,
         nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
-        nodeFiles = ai.starlake.quack.NodeFilesConfig()
+        nodeFiles = ai.starlake.quack.NodeFilesConfig(),
+        readEnv = _ => None
       )
     )
   private def req(name: String = "srv-1", host: String = "10.0.0.1") =
@@ -165,7 +166,8 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       nodeExtensions = ai.starlake.quack.NodeExtensionsConfig(allowCommunity = true),
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
-      nodeFiles = ai.starlake.quack.NodeFilesConfig()
+      nodeFiles = ai.starlake.quack.NodeFilesConfig(),
+      readEnv = _ => None
     )
     assigned(on, onStore) shouldBe Some(FleetNodeExtensionsDto(true, false, false))
   }
@@ -186,7 +188,8 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
         ),
         nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
         nodeFiles = ai.starlake.quack.NodeFilesConfig(allowLocal),
-        nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig()
+        nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+        readEnv = _ => None
       )
       h.heartbeat(req(), Some("secret"), loopback, None).unsafeRunSync()
       store.claim(
@@ -253,7 +256,8 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       ),
       nodeKeys = NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(750, 0),
-      nodeFiles = ai.starlake.quack.NodeFilesConfig()
+      nodeFiles = ai.starlake.quack.NodeFilesConfig(),
+      readEnv = _ => None
     )
     limits(set, setStore) shouldBe Some(FleetNodeAuthzLimitsDto(750, 0))
   }
@@ -338,7 +342,8 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       ),
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
-      nodeFiles = ai.starlake.quack.NodeFilesConfig()
+      nodeFiles = ai.starlake.quack.NodeFilesConfig(),
+      readEnv = _ => None
     )
     val e = h.heartbeat(req(), Some("secret"), loopback, None).unsafeRunSync().left.toOption.get
     (e._1, e._2.error) shouldBe (StatusCode.BadGateway, "backend_error")
@@ -356,7 +361,8 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       backend = None,
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
-      nodeFiles = ai.starlake.quack.NodeFilesConfig()
+      nodeFiles = ai.starlake.quack.NodeFilesConfig(),
+      readEnv = _ => None
     )
     h.heartbeat(req(), Some("secret"), loopback, None)
       .unsafeRunSync()
@@ -392,7 +398,8 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
         backend = Some(backend),
         nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
         nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
-        nodeFiles = ai.starlake.quack.NodeFilesConfig()
+        nodeFiles = ai.starlake.quack.NodeFilesConfig(),
+        readEnv = _ => None
       )
     )
 
@@ -459,7 +466,8 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       ),
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
-      nodeFiles = ai.starlake.quack.NodeFilesConfig()
+      nodeFiles = ai.starlake.quack.NodeFilesConfig(),
+      readEnv = _ => None
     )
     widened
       .heartbeat(req(), Some("secret"), addr("192.168.1.5"), None)
@@ -608,7 +616,8 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       audit = rootAudit,
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
-      nodeFiles = ai.starlake.quack.NodeFilesConfig()
+      nodeFiles = ai.starlake.quack.NodeFilesConfig(),
+      readEnv = _ => None
     )
     (store, h)
   private def beat(store: InMemoryFleetServerStore, name: String, host: String) =
@@ -771,7 +780,8 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       publish = StateChangePublisher.noop,
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
-      nodeFiles = ai.starlake.quack.NodeFilesConfig()
+      nodeFiles = ai.starlake.quack.NodeFilesConfig(),
+      readEnv = _ => None
     )
     h.listServers(Some("k"))(superuser).unsafeRunSync().left.map(_._2.error) shouldBe
       Left("fleet_disabled")
@@ -934,7 +944,8 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       publish = pub,
       nodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
-      nodeFiles = ai.starlake.quack.NodeFilesConfig()
+      nodeFiles = ai.starlake.quack.NodeFilesConfig(),
+      readEnv = _ => None
     )
     (inner, probe, pub, h)
 
@@ -1027,37 +1038,135 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
     io.circe.Encoder[FleetAssignment].apply(a).noSpaces should not include "CREATE VIEW"
   }
 
-  // Issue #285: the manager's default-store keys ride the stored assignment and the heartbeat
-  // reply; an assignment stored before them decodes with none.
-  it should "carry the manager's store maps to the heartbeat reply, and decode a row without them" in {
+  // Issue #285: the manager's default-store keys are read for each heartbeat reply, like the
+  // node key, and never stored with the assignment.
+  private val managerStoreEnv = Map(
+    "QOD_S3_ENDPOINT"          -> "fake-store:9000",
+    "QOD_S3_ACCESS_KEY_ID"     -> "fake-key-id",
+    "QOD_S3_SECRET_ACCESS_KEY" -> "fake-secret-marker",
+    "QOD_S3_USE_SSL"           -> "false"
+  )
+  private val replyStore = (
+    Map(
+      "QOD_S3_ACCESS_KEY_ID"     -> "fake-key-id",
+      "QOD_S3_SECRET_ACCESS_KEY" -> "fake-secret-marker"
+    ),
+    Map("QOD_S3_ENDPOINT" -> "fake-store:9000", "QOD_S3_USE_SSL" -> "false")
+  )
+  private val storedBefore285 =
+    """{"epoch":1,"nodeId":"n1","poolKey":{"tenant":"acme","tenantDb":"db","pool":"bi"},
+      |"port":21900,"token":"t","kind":"memory","env":{},"resourceSql":"","objectStoreSql":"",
+      |"extraSetupSql":""}""".stripMargin
+
+  it should "carry the manager's default store in the reply, read per heartbeat, never stored" in {
+    import FleetAssignment.given
+    val store = new InMemoryFleetServerStore(clock = () => t0)
+    val h     = new FleetHandlers(
+      store,
+      hbCfg.copy(nodeS3Endpoint = "h:1"),
+      backend = Some(
+        new FleetQuackBackend(store, hbCfg, clock = () => t0, nodeFiles = NodeFilesConfig())
+      ),
+      nodeKeys = NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      nodeFiles = NodeFilesConfig(),
+      readEnv = managerStoreEnv.get
+    )
+    def reply() =
+      h.heartbeat(req(), Some("secret"), loopback, None).unsafeRunSync().toOption.get.assignment
+    reply()
+    store.claim(
+      FleetAssignment(
+        0,
+        "n1",
+        PoolKey("acme", "db", "bi"),
+        21900,
+        "tok",
+        "memory",
+        Map.empty,
+        "",
+        "",
+        ""
+      ),
+      30,
+      None
+    )
+    reply().map(a => (a.storeSecrets, a.storeEnv)) shouldBe
+      Some((replyStore._1, replyStore._2.updated("QOD_S3_ENDPOINT", "h:1")))
+    withClue("the stored assignment holds a store secret: ")(
+      io.circe.Encoder[FleetAssignment].apply(store.get("srv-1").get.assignment.get).noSpaces should
+        not include "fake-secret-marker"
+    )
+  }
+
+  it should "give a node whose database has its own store none of the manager's" in {
+    val store = new InMemoryFleetServerStore(clock = () => t0)
+    val h     = new FleetHandlers(
+      store,
+      hbCfg,
+      backend = Some(
+        new FleetQuackBackend(store, hbCfg, clock = () => t0, nodeFiles = NodeFilesConfig())
+      ),
+      nodeKeys = NodeKeys.ephemeral(),
+      nodeAuthzLimits = ai.starlake.quack.NodeAuthzLimitsConfig(),
+      nodeFiles = NodeFilesConfig(),
+      readEnv = managerStoreEnv.get
+    )
+    h.heartbeat(req(), Some("secret"), loopback, None).unsafeRunSync()
+    store.claim(
+      FleetAssignment(
+        0,
+        "n1",
+        PoolKey("acme", "db", "bi"),
+        21900,
+        "tok",
+        "ducklake",
+        Map.empty,
+        objectStoreSql = "CREATE SECRET qod_db_store (TYPE s3);",
+        extraSetupSql = ""
+      ),
+      30,
+      None
+    )
+    h.heartbeat(req(), Some("secret"), loopback, None)
+      .unsafeRunSync()
+      .toOption
+      .get
+      .assignment
+      .map(a => (a.storeSecrets, a.storeEnv)) shouldBe Some((Map.empty, Map.empty))
+  }
+
+  // The upgrade case: an assignment stored before #285 holds no store, and its reply carries the
+  // manager's keys all the same.
+  it should "carry the manager's store for an assignment stored before it, and its JSON round-trips" in {
     import FleetAssignment.given
     import Dtos.given
-    val old =
-      """{"epoch":1,"nodeId":"n1","poolKey":{"tenant":"acme","tenantDb":"db","pool":"bi"},
-        |"port":21900,"token":"t","kind":"memory","env":{},"resourceSql":"","objectStoreSql":"",
-        |"extraSetupSql":""}""".stripMargin
-    val a = io.circe.parser.decode[FleetAssignment](old).toOption.get
-    (a.storeSecrets, a.storeEnv) shouldBe (Map.empty, Map.empty)
-    val withStore = a.copy(
-      storeSecrets = Map("QOD_S3_ACCESS_KEY_ID" -> "fake-id", "QOD_S3_SECRET_ACCESS_KEY" -> "fake"),
-      storeEnv = Map("QOD_S3_ENDPOINT" -> "h:1", "QOD_S3_USE_SSL" -> "false")
-    )
-    io.circe.parser
-      .decode[FleetAssignment](io.circe.Encoder[FleetAssignment].apply(withStore).noSpaces) shouldBe
-      Right(withStore)
+    val a   = io.circe.parser.decode[FleetAssignment](storedBefore285).toOption.get
     val dto = FleetHandlers.toDto(
-      withStore,
+      a,
       "ab" * 32,
       ai.starlake.quack.NodeExtensionsConfig(),
-      ai.starlake.quack.NodeFilesConfig(),
-      ai.starlake.quack.NodeAuthzLimitsConfig()
+      NodeFilesConfig(),
+      ai.starlake.quack.NodeAuthzLimitsConfig(),
+      NodeSecretFiles.managerStore(a.objectStoreSql, managerStoreEnv.get, "")
     )
-    (dto.storeSecrets, dto.storeEnv) shouldBe (withStore.storeSecrets, withStore.storeEnv)
+    (dto.storeSecrets, dto.storeEnv) shouldBe replyStore
     val json = io.circe.Encoder[FleetAssignmentDto].apply(dto)
-    json.hcursor.downField("storeSecrets").as[Map[String, String]] shouldBe
-      Right(withStore.storeSecrets)
-    json.hcursor.downField("storeEnv").as[Map[String, String]] shouldBe Right(withStore.storeEnv)
+    json.hcursor.downField("storeSecrets").as[Map[String, String]] shouldBe Right(replyStore._1)
+    json.hcursor.downField("storeEnv").as[Map[String, String]] shouldBe Right(replyStore._2)
     io.circe.parser.decode[FleetAssignmentDto](json.noSpaces) shouldBe Right(dto)
+  }
+
+  // A row an earlier build of #285 stored with the maps still decodes, and they are dropped.
+  it should "decode a stored assignment that holds store maps, and drop them" in {
+    import FleetAssignment.given
+    val json = storedBefore285.stripSuffix("}") +
+      ""","storeSecrets":{"QOD_S3_SECRET_ACCESS_KEY":"fake-secret-marker"},""" +
+      """"storeEnv":{"QOD_S3_ENDPOINT":"h:1"}}"""
+    val a = io.circe.parser.decode[FleetAssignment](json)
+    a.map(_.nodeId) shouldBe Right("n1")
+    io.circe.Encoder[FleetAssignment].apply(a.toOption.get).noSpaces should
+      (not include "fake-secret-marker" and not include "storeEnv")
   }
 
   // Phase D: an assignment an earlier manager stored carries lockdownSql. It still decodes, the field
@@ -1077,7 +1186,8 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       "ab" * 32,
       ai.starlake.quack.NodeExtensionsConfig(),
       ai.starlake.quack.NodeFilesConfig(),
-      ai.starlake.quack.NodeAuthzLimitsConfig()
+      ai.starlake.quack.NodeAuthzLimitsConfig(),
+      (Map.empty, Map.empty)
     )
     io.circe
       .Encoder[FleetAssignmentDto]

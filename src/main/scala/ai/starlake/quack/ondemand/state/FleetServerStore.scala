@@ -26,13 +26,7 @@ final case class FleetAssignment(
     tenantDbInitSql: String = "",
     tenantDbInitTrusted: Boolean = false,
     tenantPoolInitSql: String = "",
-    tenantPoolInitTrusted: Boolean = false,
-    // The manager's default-store credentials (NodeSecretFiles.CloudCredKeys), which the join
-    // process writes as secret files, and settings (CloudSettingKeys), which it lays over the
-    // spawn environment. Filled only for a node whose database has no store of its own
-    // (objectStoreSql empty), the one case where the spawn script signs with them.
-    storeSecrets: Map[String, String] = Map.empty,
-    storeEnv: Map[String, String] = Map.empty
+    tenantPoolInitTrusted: Boolean = false
 )
 object FleetAssignment:
   given Codec[PoolKey] = deriveCodec

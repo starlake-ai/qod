@@ -108,6 +108,28 @@ object NodeSecretFiles extends LazyLogging:
     "QOD_S3_USE_SSL"
   )
 
+  /** The manager's default store for one node, as `(secrets, settings)`: its non-empty
+    * [[CloudCredKeys]] and [[CloudSettingKeys]] values read through `readEnv`, `QOD_S3_ENDPOINT`
+    * replaced by `nodeS3Endpoint` when that is not blank (the store as servers reach it). Both are
+    * empty for a node whose database has a store of its own (`objectStoreSql` non-empty): only
+    * without one does the spawn script sign with the manager's keys, so such a node never receives
+    * QoD's.
+    */
+  def managerStore(
+      objectStoreSql: String,
+      readEnv: String => Option[String],
+      nodeS3Endpoint: String
+  ): (Map[String, String], Map[String, String]) =
+    if objectStoreSql.nonEmpty then (Map.empty, Map.empty)
+    else
+      def values(keys: Seq[String]): Map[String, String] =
+        keys.flatMap(k => readEnv(k).filter(_.nonEmpty).map(k -> _)).toMap
+      val endpoint = Option(nodeS3Endpoint).map(_.trim).filter(_.nonEmpty)
+      (
+        values(CloudCredKeys),
+        values(CloudSettingKeys) ++ endpoint.map("QOD_S3_ENDPOINT" -> _)
+      )
+
   /** Every key the spawn scripts read from [[DirEnv]], and only from there (a value still found in
     * the environment is ignored). Same list, same order, as `SECRET_KEYS` in
     * `scripts/spawn-quack-node.sh` / `.ps1` and `_SECRET_KEYS` in `qod_cli/fleet_join.py`.

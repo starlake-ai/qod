@@ -61,10 +61,7 @@ final class FleetQuackBackend(
     defaultPgPort: String = "",
     // The setting FleetHandlers hands each assignment, for the supervisor's block of a local data
     // path. Required: a default would have the supervisor start nodes that cannot serve.
-    nodeFiles: ai.starlake.quack.NodeFilesConfig,
-    // The manager's environment, where its default-store keys live (QOD_S3_* and the like): the
-    // same process environment LocalQuackBackend's nodes inherit and KubernetesQuackBackend reads.
-    readEnv: String => Option[String] = name => Option(System.getenv(name))
+    nodeFiles: ai.starlake.quack.NodeFilesConfig
 ) extends QuackBackend
     with LazyLogging:
 
@@ -112,21 +109,8 @@ final class FleetQuackBackend(
       tenantDbInitSql = spec.tenantDbInitSql,
       tenantDbInitTrusted = spec.tenantDbInitTrusted,
       tenantPoolInitSql = spec.tenantPoolInitSql,
-      tenantPoolInitTrusted = spec.tenantPoolInitTrusted,
-      storeSecrets = managerStore(spec, NodeSecretFiles.CloudCredKeys),
-      storeEnv = managerStore(spec, NodeSecretFiles.CloudSettingKeys) ++
-        Option(cfg.nodeS3Endpoint)
-          .filter(_.nonEmpty && spec.objectStoreSql.isEmpty)
-          .map("QOD_S3_ENDPOINT" -> _)
+      tenantPoolInitTrusted = spec.tenantPoolInitTrusted
     )
-
-  /** The manager's non-empty values of `keys`, for a node whose database has no store of its own:
-    * only then does the spawn script sign with the manager's keys, so a node of a database holding
-    * its own never receives QoD's.
-    */
-  private def managerStore(spec: NodeSpec, keys: Seq[String]): Map[String, String] =
-    if spec.objectStoreSql.nonEmpty then Map.empty
-    else keys.flatMap(k => readEnv(k).filter(_.nonEmpty).map(k -> _)).toMap
 
   private def requiredMemoryBytes(spec: NodeSpec): Option[Long] =
     spec.memory.filter(_.nonEmpty).flatMap { m =>
