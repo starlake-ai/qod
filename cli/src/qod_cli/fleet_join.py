@@ -91,8 +91,10 @@ _ENV_PASSTHROUGH = (
     "PG_ADMIN_DB", "PGSSLMODE", "PGSSLROOTCERT", "PGSSLCERT", "PGSSLKEY", "PGCONNECT_TIMEOUT",
     "SSL_CERT_FILE",
 )
-# Object-storage settings the spawn script reads.
-_ENV_PASSTHROUGH_PREFIXES = ("QOD_S3_", "QOD_AZURE_")
+# The manager's default-store variables (issue #285): a node gets them from the assignment's
+# storeSecrets / storeEnv only, never from this process's environment, which is told at start that
+# any it still holds are ignored.
+_STORE_ENV_PREFIXES = ("QOD_S3_", "QOD_AZURE_", "QOD_GCS_")
 _SQL_KEYS = ("resourceSql",)
 # The tenant-db's and the pool's initSql: assignment key, its trust key, and the secret file it goes
 # to by trust. The file's name is the trust: the spawn script runs a ...Trusted file as written (a
@@ -123,6 +125,10 @@ _SECRET_KEYS = ("pgPassword", "encryptionKey", "extraSetupSql", "objectStoreSql"
                 "tenantPoolInitSqlTrusted", "QOD_INIT_NONCE", "QOD_S3_ACCESS_KEY_ID",
                 "QOD_S3_SECRET_ACCESS_KEY", "QOD_AZURE_CONNECTION_STRING", "QOD_GCS_KEY_ID", "QOD_GCS_SECRET")
 _CLOUD_CRED_KEYS = _SECRET_KEYS[11:]
+# The default store's non-secret settings, taken from an assignment's storeEnv and laid over the
+# node's environment: same list as NodeSecretFiles.CloudSettingKeys on the manager
+# (NodeSecretFilesSpec pins it). An assignment's storeSecrets give only _CLOUD_CRED_KEYS files.
+_CLOUD_SETTING_KEYS = ("QOD_S3_ENDPOINT", "QOD_S3_REGION", "QOD_S3_URL_STYLE", "QOD_S3_USE_SSL")
 # An assignment's env is a tenant-db's metastore, tenant-admin input: only the keys the spawn script
 # reads from its environment are laid over the node's environment, and only the metastore's own
 # secrets below become files. Any other name (BASH_ENV, which bash expands before running the
@@ -498,8 +504,8 @@ class FleetMember:
         self.approval: str | None = None
         # Monotonic deadline of the scheduled restart of a failed node; None while none is scheduled.
         self.next_restart_at: float | None = None
-        # (pool, key) of each assignment env key already named as dropped, so it is named once.
-        self.dropped_keys: set[tuple[str, str]] = set()
+        # (pool, field, key) of each assignment key already named as dropped, so it is named once.
+        self.dropped_keys: set[tuple[str, str, str]] = set()
         self.state_dir.mkdir(parents=True, exist_ok=True)
 
     # ---- pidfile ----
@@ -559,23 +565,46 @@ class FleetMember:
                 "action": node_failure_action(n.error, n.assignment["port"]) if n.state == "failed" else None}
 
     # ---- process control ----
-    def _warn_dropped(self, assignment: dict, keys: list[str]) -> None:
-        """Name each assignment env key that reaches no node, once per pool and key, never its value."""
+    def _warn_dropped(self, assignment: dict, keys: list[str], field: str = "env") -> None:
+        """Name each assignment key of `field` that reaches no node, once per pool and key, never its value."""
         pool = assignment.get("poolKey") or {}
         pool_id = "/".join(str(pool.get(p, "?")) for p in ("tenant", "tenantDb", "pool"))
+        allowed = {"env": f"{', '.join(_NODE_ENV_KEYS)} and the metastore's own secrets",
+                   "storeSecrets": ", ".join(_CLOUD_CRED_KEYS),
+                   "storeEnv": ", ".join(_CLOUD_SETTING_KEYS)}[field]
         for k in sorted(keys):
-            if (pool_id, k) not in self.dropped_keys:
-                self.dropped_keys.add((pool_id, k))
-                sys.stderr.write(f"qod fleet join: WARN ignoring {k!r} in the assignment env for {pool_id}: a node "
-                                 f"gets only {', '.join(_NODE_ENV_KEYS)} and the metastore's own secrets\n")
+            if (pool_id, field, k) not in self.dropped_keys:
+                self.dropped_keys.add((pool_id, field, k))
+                sys.stderr.write(f"qod fleet join: WARN ignoring {k!r} in the assignment {field} for {pool_id}: "
+                                 f"a node gets only {allowed} from it\n")
+
+    def _store(self, assignment: dict, field: str, names: tuple[str, ...]) -> dict[str, str]:
+        """The manager's default-store values of `field` named in `names`; any other name is dropped
+        with a WARN. An older manager sends no such map, and a value that is no JSON object is none."""
+        values = assignment.get(field)
+        if not isinstance(values, dict):
+            return {}
+        kept = {str(k): str(v) for k, v in values.items() if str(k) in names and v is not None}
+        self._warn_dropped(assignment, [str(k) for k in values if str(k) not in names], field)
+        return kept
+
+    def warn_ignored_store_env(self) -> None:
+        """Name, once, the default-store variables this process's environment still holds: the
+        manager sends them in the assignment, so they reach no node. Never their values."""
+        names = sorted(k for k in os.environ if k.startswith(_STORE_ENV_PREFIXES))
+        if names:
+            sys.stderr.write(f"qod fleet join: WARN ignoring {', '.join(names)} in this process's environment: "
+                             f"the manager sends its store settings and keys in the assignment; remove them "
+                             f"from this server\n")
 
     def _launch_spec(self, assignment: dict) -> tuple[list[str], dict[str, str], dict[str, str]]:
         """Command, environment and secret files for `assignment`. Raises KeyError/TypeError on a
         malformed assignment, before anything is stopped."""
-        env = {k: v for k, v in os.environ.items()
-               if (k in _ENV_PASSTHROUGH or k.startswith(_ENV_PASSTHROUGH_PREFIXES))
-               and _canonical_secret(k) is None}
-        secrets = {k: os.environ[k] for k in _CLOUD_CRED_KEYS if os.environ.get(k)}
+        env = {k: v for k, v in os.environ.items() if k in _ENV_PASSTHROUGH and _canonical_secret(k) is None}
+        # The manager's default store (issue #285): secrets as files, settings as env, and only when
+        # the manager sends them (only for a node whose database has no store of its own).
+        secrets = self._store(assignment, "storeSecrets", _CLOUD_CRED_KEYS)
+        env.update(self._store(assignment, "storeEnv", _CLOUD_SETTING_KEYS))
         dropped = []
         for k, v in assignment["env"].items():
             k = str(k)
@@ -840,6 +869,7 @@ class FleetMember:
         self.reap_orphan()
         self.sweep_secrets()
         self.sweep_spill()
+        self.warn_ignored_store_env()
         sys.stderr.write(f"qod fleet join: server '{self.name}', advertise host {self.advertise_host}, node binds "
                          f"{self.bind_host}:{self.node_port} (override with --advertise-host / --bind-host if "
                          f"this is not the data interface)\n")

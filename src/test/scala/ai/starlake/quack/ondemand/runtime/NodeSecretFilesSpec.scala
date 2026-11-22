@@ -1,6 +1,7 @@
 package ai.starlake.quack.ondemand.runtime
 
 import ai.starlake.quack.model.TenantDb
+import ai.starlake.quack.ondemand.runtime.NodeSecretFiles.ManagerStore
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -36,6 +37,11 @@ class NodeSecretFilesSpec extends AnyFlatSpec with Matchers with SpawnScriptTemp
       (NodeSecretFiles.CloudSettingKeys ++ NodeSecretFiles.CloudCredKeys).toSet
   }
 
+  it should "be the settings fleet join takes from an assignment's storeEnv" in {
+    keyList("cli/src/qod_cli/fleet_join.py", "_CLOUD_SETTING_KEYS = (", ")") shouldBe
+      NodeSecretFiles.CloudSettingKeys
+  }
+
   // Issue #285: a node signs the manager's default data path with the manager's own keys, so a
   // fleet server gets them in the heartbeat reply, as a Kubernetes pod gets them in its Secret.
   private val managerStoreEnv = Map(
@@ -53,7 +59,10 @@ class NodeSecretFilesSpec extends AnyFlatSpec with Matchers with SpawnScriptTemp
 
   "managerStore" should "give a node with no store of its own the manager's secrets and settings" in {
     NodeSecretFiles.managerStore("", managerStoreEnv.get, "") shouldBe
-      (only(NodeSecretFiles.CloudCredKeys), only(NodeSecretFiles.CloudSettingKeys))
+      ManagerStore(
+        secrets = only(NodeSecretFiles.CloudCredKeys),
+        env = only(NodeSecretFiles.CloudSettingKeys)
+      )
   }
 
   it should "give a node whose database has its own store none of the manager's" in {
@@ -61,8 +70,7 @@ class NodeSecretFilesSpec extends AnyFlatSpec with Matchers with SpawnScriptTemp
       "CREATE SECRET qod_db_store (TYPE s3);",
       managerStoreEnv.get,
       "h:1"
-    ) shouldBe
-      (Map.empty, Map.empty)
+    ) shouldBe ManagerStore.Empty
   }
 
   it should "leave out the manager's empty values" in {
@@ -73,20 +81,23 @@ class NodeSecretFilesSpec extends AnyFlatSpec with Matchers with SpawnScriptTemp
       "QOD_S3_ENDPOINT"          -> ""
     )
     NodeSecretFiles.managerStore("", env.get, "") shouldBe
-      (Map("QOD_S3_ACCESS_KEY_ID" -> "fake-key-id"), Map("QOD_S3_REGION" -> "fake-region"))
+      ManagerStore(
+        secrets = Map("QOD_S3_ACCESS_KEY_ID" -> "fake-key-id"),
+        env = Map("QOD_S3_REGION" -> "fake-region")
+      )
   }
 
   it should "replace only the endpoint with a non-blank nodeS3Endpoint, trimmed" in {
     NodeSecretFiles.managerStore("", managerStoreEnv.get, " h:1 ") shouldBe
-      (
-        only(NodeSecretFiles.CloudCredKeys),
-        only(NodeSecretFiles.CloudSettingKeys).updated("QOD_S3_ENDPOINT", "h:1")
+      ManagerStore(
+        secrets = only(NodeSecretFiles.CloudCredKeys),
+        env = only(NodeSecretFiles.CloudSettingKeys).updated("QOD_S3_ENDPOINT", "h:1")
       )
     // With no endpoint of the manager's own, it is still the one servers dial.
     NodeSecretFiles.managerStore("", _ => None, "h:1") shouldBe
-      (Map.empty, Map("QOD_S3_ENDPOINT" -> "h:1"))
+      ManagerStore(secrets = Map.empty, env = Map("QOD_S3_ENDPOINT" -> "h:1"))
     // Blank means no override.
-    NodeSecretFiles.managerStore("", managerStoreEnv.get, "  ")._2 shouldBe
+    NodeSecretFiles.managerStore("", managerStoreEnv.get, "  ").env shouldBe
       only(NodeSecretFiles.CloudSettingKeys)
   }
 

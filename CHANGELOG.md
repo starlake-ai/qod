@@ -58,6 +58,12 @@
   such accounts before upgrading, on the control-plane database, with
   `SELECT username, kind FROM qodstate_user WHERE tenant IS NULL AND lower(kind) <> 'admin'`,
   and set the kind of each one that should stay a superuser back to `admin`.
+- Fleet: upgrade the servers (`qod fleet join`) with the manager, then remove `QOD_S3_*`,
+  `QOD_AZURE_*` and `QOD_GCS_*` from every fleet server, which now ignores them (Changed below). A
+  server on an earlier release does not read the store keys the manager now sends, and a server of
+  this release takes none from an earlier manager. Set `QOD_FLEET_NODE_S3_ENDPOINT` on the manager
+  where servers reach the store at another address than the manager, and give every HA replica the
+  same `QOD_S3_*`.
 
 ### Security
 
@@ -144,6 +150,25 @@
   by the manager`), retried before reconcile passes every 1 to 15 minutes until it succeeds.
   Before, it was a WARN the default log level hid, never retried until the next boot, and the
   database's nodes attached its catalog unmigrated and without the dataPath and encryption checks.
+- **Fleet servers need no storage keys: the manager sends its default-store credentials in the
+  assignment** (#285), as a Kubernetes pod gets them in its Secret. For a node whose database has
+  no store of its own, each heartbeat reply carries the manager's non-empty
+  `QOD_S3_ACCESS_KEY_ID`, `QOD_S3_SECRET_ACCESS_KEY`, `QOD_AZURE_CONNECTION_STRING`,
+  `QOD_GCS_KEY_ID` and `QOD_GCS_SECRET` as `storeSecrets`, which `qod fleet join` writes as the
+  node's secret files, and its `QOD_S3_ENDPOINT`, `QOD_S3_REGION`, `QOD_S3_URL_STYLE` and
+  `QOD_S3_USE_SSL` as `storeEnv`, laid over the node's environment. Before, every server needed
+  the manager's keys in its own environment, one `/proc/<pid>/environ` away from its nodes, or the
+  first Parquet read failed with HTTP 403 while `count(*)` still answered from catalog
+  statistics. `qod fleet join` no longer reads `QOD_S3_*`, `QOD_AZURE_*` or `QOD_GCS_*` from its
+  environment and prints one WARN at start naming any it still holds, never their values.
+  `QOD_FLEET_NODE_S3_ENDPOINT` (`quack-on-demand.fleet.nodeS3Endpoint`) replaces
+  `QOD_S3_ENDPOINT` in the assignment, for servers that reach the store at another address than
+  the manager. The keys are not stored in the control plane: every HA replica answers from its own
+  environment, so every replica must hold the same `QOD_S3_*` (as the DuckLake init already
+  requires). A rotated key reaches a server on its next heartbeat, but a running node keeps the
+  secret it started with until it restarts, as on Kubernetes. The keys ride the plain-HTTP
+  heartbeat reply, as the node token and node key do, so the private network fleet mode requires
+  still applies. `deploy/docker/docker-compose.fleet.yml` sets them on the manager only.
 
 ### Added
 

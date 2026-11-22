@@ -349,8 +349,8 @@ object FleetHandlers:
     case ServerLiveness.Dead           => "dead"
 
   /** The heartbeat's assignment, with the node key derived for its node id, the manager's extension
-    * policy, whether its nodes may open local files, its decide limits and its default store
-    * `(secrets, settings)` from [[NodeSecretFiles.managerStore]] (none stored).
+    * policy, whether its nodes may open local files, its decide limits and its default store from
+    * [[NodeSecretFiles.managerStore]] (none stored).
     */
   def toDto(
       a: FleetAssignment,
@@ -358,7 +358,7 @@ object FleetHandlers:
       extensions: ai.starlake.quack.NodeExtensionsConfig,
       files: ai.starlake.quack.NodeFilesConfig,
       limits: ai.starlake.quack.NodeAuthzLimitsConfig,
-      store: (Map[String, String], Map[String, String])
+      store: NodeSecretFiles.ManagerStore
   ): FleetAssignmentDto =
     FleetAssignmentDto(
       a.epoch,
@@ -383,6 +383,6 @@ object FleetHandlers:
       a.tenantDbInitTrusted,
       a.tenantPoolInitSql,
       a.tenantPoolInitTrusted,
-      store._1,
-      store._2
+      store.secrets,
+      store.env
     )

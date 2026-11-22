@@ -278,7 +278,8 @@ def test_node_env_is_an_allowlist_and_sql_keys_come_only_from_the_assignment(tmp
     make_member(http, popen, tmp_path).run_once()
     env = envs[0]
     assert "QOD_FLEET_JOIN_TOKEN" not in env and "SOME_RANDOM_SECRET" not in env
-    assert "PATH" in env and env["QOD_S3_ENDPOINT"] == "minio:9000"
+    # Issue #285: the store settings come from the assignment's storeEnv only.
+    assert "PATH" in env and "QOD_S3_ENDPOINT" not in env
     assert "lockdownSql" not in env and env["resourceSql"] == ""
     leaked = any("disabled_filesystems" in v for v in env.values())
     assert not leaked, "an earlier manager's lockdownSql reached the node"
@@ -293,14 +294,13 @@ SECRET_VALUES = {"pw", "tok", "hunter2", "fed-sql-secret", "store-sql-secret", "
 
 def secret_assignment():
     return dict(assignment(1), env={"pgHost": "h", "pgPassword": "hunter2", "encryptionKey": "k3y"},
-                extraSetupSql="fed-sql-secret", objectStoreSql="store-sql-secret", token="tok")
+                extraSetupSql="fed-sql-secret", objectStoreSql="store-sql-secret", token="tok",
+                storeSecrets={"QOD_S3_ACCESS_KEY_ID": "s3-key-id", "QOD_S3_SECRET_ACCESS_KEY": "s3-secret",
+                              "QOD_AZURE_CONNECTION_STRING": "az-conn"},
+                storeEnv={"QOD_S3_ENDPOINT": "minio:9000"})
 
 
-def test_no_secret_value_reaches_the_node_env_or_command_line(tmp_path, monkeypatch):
-    monkeypatch.setenv("QOD_S3_ACCESS_KEY_ID", "s3-key-id")
-    monkeypatch.setenv("QOD_S3_SECRET_ACCESS_KEY", "s3-secret")
-    monkeypatch.setenv("QOD_AZURE_CONNECTION_STRING", "az-conn")
-    monkeypatch.setenv("QOD_S3_ENDPOINT", "minio:9000")
+def test_no_secret_value_reaches_the_node_env_or_command_line(tmp_path):
     seen = []
     def popen(cmd, env=None, **kw):
         d = pathlib.Path(env["QOD_SECRETS_DIR"])
@@ -321,6 +321,127 @@ def test_no_secret_value_reaches_the_node_env_or_command_line(tmp_path, monkeypa
                        "QOD_AZURE_CONNECTION_STRING": "az-conn"}
     assert env["QOD_S3_ENDPOINT"] == "minio:9000"
     assert dir_mode == 0o700 and set(file_modes.values()) == {0o600}
+
+
+# Issue #285: the manager's default-store keys travel in the assignment, as a Kubernetes pod gets
+# them in its Secret; this process's own environment never supplies them. Fake values only.
+STORE_SECRETS = {"QOD_S3_ACCESS_KEY_ID": "fake-key-id", "QOD_S3_SECRET_ACCESS_KEY": "fake-s3-secret",
+                 "QOD_AZURE_CONNECTION_STRING": "fake-azure", "QOD_GCS_KEY_ID": "fake-gcs-id",
+                 "QOD_GCS_SECRET": "fake-gcs-secret"}
+STORE_ENV = {"QOD_S3_ENDPOINT": "fake-store:8333", "QOD_S3_REGION": "fake-region", "QOD_S3_URL_STYLE": "path",
+             "QOD_S3_USE_SSL": "false"}
+
+
+def _clear_store_env(monkeypatch):
+    for k in list(os.environ):
+        if k.startswith(("QOD_S3_", "QOD_AZURE_", "QOD_GCS_")):
+            monkeypatch.delenv(k)
+
+
+def _store_launch(tmp_path, a):
+    seen = []
+    def popen(cmd, env=None, **kw):
+        seen.append((cmd, env, read_secrets(env))); return FakeProc()
+    http = FakeHttp([FakeResponse(200, {"heartbeatSec": 5, "assignment": a})])
+    make_member(http, popen, tmp_path).run_once()
+    return seen[0]
+
+
+def test_store_secrets_become_files_and_store_env_lands_in_env(tmp_path, monkeypatch):
+    _clear_store_env(monkeypatch)
+    cmd, env, secrets = _store_launch(tmp_path, dict(assignment(1), storeSecrets=STORE_SECRETS, storeEnv=STORE_ENV))
+    assert {k: secrets.get(k) for k in STORE_SECRETS} == STORE_SECRETS
+    assert [k for k in STORE_SECRETS if k in env] == []
+    leaked = sorted(k for k, v in env.items() if any(s in v for s in STORE_SECRETS.values()))
+    assert leaked == [] and not any(s in c for c in cmd for s in STORE_SECRETS.values())
+    assert {k: env.get(k) for k in STORE_ENV} == STORE_ENV
+    assert [k for k in STORE_ENV if k in secrets] == []
+
+
+def test_an_older_managers_assignment_gives_no_store(tmp_path, monkeypatch):
+    _clear_store_env(monkeypatch)
+    cmd, env, secrets = _store_launch(tmp_path, assignment(1))
+    names = [k for k in (*STORE_SECRETS, *STORE_ENV) if k in env or k in secrets]
+    assert names == []
+
+
+def test_an_unknown_store_name_is_dropped_once_per_pool_and_key(tmp_path, monkeypatch, capsys):
+    _clear_store_env(monkeypatch)
+    a = dict(assignment(1),
+             # A setting sent as a secret, a secret sent as a setting, and names no node reads.
+             storeSecrets={**STORE_SECRETS, "QOD_S3_REGION": "marker-285-region", "BASH_ENV": "marker-285-bash"},
+             storeEnv={**STORE_ENV, "QOD_GCS_SECRET": "marker-285-gcs", "PATH": "/nonexistent/marker-285-path"})
+    cmd, env, secrets = _store_launch(tmp_path, a)
+    assert sorted(k for k, v in {**env, **secrets}.items() if "marker-285" in v) == []
+    assert env.get("PATH") == os.environ.get("PATH") and "BASH_ENV" not in env
+    assert env["QOD_S3_REGION"] == "fake-region" and secrets["QOD_GCS_SECRET"] == "fake-gcs-secret"
+    err = capsys.readouterr().err
+    named = all(f"{k!r}" in err for k in ("QOD_S3_REGION", "BASH_ENV", "QOD_GCS_SECRET", "PATH"))
+    assert named, "a dropped store name is not named on stderr"
+    assert "marker-285" not in err, "a dropped store value was printed"
+    member = make_member(FakeHttp([]), lambda *a, **k: FakeProc(), tmp_path / "again")
+    member._launch_spec(a)
+    member._launch_spec(dict(a, epoch=2))
+    assert capsys.readouterr().err.count("'BASH_ENV'") == 1
+    member._launch_spec(dict(a, poolKey={"tenant": "acme", "tenantDb": "db", "pool": "etl"}))
+    assert capsys.readouterr().err.count("'BASH_ENV'") == 1
+
+
+def test_a_store_map_that_is_no_object_gives_nothing(tmp_path, monkeypatch):
+    _clear_store_env(monkeypatch)
+    cmd, env, secrets = _store_launch(tmp_path, dict(assignment(1), storeSecrets=["QOD_GCS_SECRET"], storeEnv=None))
+    assert [k for k in (*STORE_SECRETS, *STORE_ENV) if k in env or k in secrets] == []
+
+
+def test_the_joins_own_store_variables_never_reach_a_node(tmp_path, monkeypatch):
+    _clear_store_env(monkeypatch)
+    monkeypatch.setenv("QOD_S3_ACCESS_KEY_ID", "marker-285-own-key")
+    monkeypatch.setenv("QOD_S3_ENDPOINT", "marker-285-own-endpoint")
+    monkeypatch.setenv("QOD_AZURE_CONNECTION_STRING", "marker-285-own-azure")
+    cmd, env, secrets = _store_launch(tmp_path, assignment(1))
+    assert sorted(k for k, v in {**env, **secrets}.items() if "marker-285" in v) == []
+    assert [k for k in ("QOD_S3_ACCESS_KEY_ID", "QOD_S3_ENDPOINT", "QOD_AZURE_CONNECTION_STRING")
+            if k in env or k in secrets] == []
+
+
+def test_the_start_warns_once_naming_the_ignored_store_variables(tmp_path, monkeypatch, capsys):
+    _clear_store_env(monkeypatch)
+    monkeypatch.setenv("QOD_S3_ACCESS_KEY_ID", "marker-285-own-key")
+    monkeypatch.setenv("QOD_S3_ENDPOINT", "marker-285-own-endpoint")
+    monkeypatch.setenv("QOD_AZURE_CONNECTION_STRING", "marker-285-own-azure")
+    replies = [FakeResponse(200, {"heartbeatSec": 5, "assignment": None})] * 3
+    member = make_member(FakeHttp(replies), lambda *a, **k: FakeProc(), tmp_path)
+    beats = []
+    def sleep(_s):
+        beats.append(1)
+        if len(beats) == 3:
+            raise KeyboardInterrupt
+    member.sleep = sleep
+    with pytest.raises(KeyboardInterrupt):
+        member.run_forever()
+    err = capsys.readouterr().err
+    warns = [l for l in err.splitlines() if "ignoring" in l and "QOD_S3_ACCESS_KEY_ID" in l]
+    assert len(warns) == 1, "the start warning is not printed exactly once"
+    assert all(k in warns[0] for k in ("QOD_AZURE_CONNECTION_STRING", "QOD_S3_ACCESS_KEY_ID", "QOD_S3_ENDPOINT"))
+    assert "marker-285" not in err, "an ignored variable's value was printed"
+
+
+def test_the_start_says_nothing_without_store_variables(tmp_path, monkeypatch, capsys):
+    _clear_store_env(monkeypatch)
+    member = make_member(FakeHttp([FakeResponse(200, {"heartbeatSec": 5, "assignment": None})]),
+                         lambda *a, **k: FakeProc(), tmp_path)
+    def sleep(_s):
+        raise KeyboardInterrupt
+    member.sleep = sleep
+    with pytest.raises(KeyboardInterrupt):
+        member.run_forever()
+    assert "QOD_S3_" not in capsys.readouterr().err
+
+
+def test_cloud_setting_keys_are_pinned_by_name():
+    # NodeSecretFiles.CloudSettingKeys on the manager (NodeSecretFilesSpec pins the same list).
+    assert fleet_join._CLOUD_SETTING_KEYS == ("QOD_S3_ENDPOINT", "QOD_S3_REGION", "QOD_S3_URL_STYLE", "QOD_S3_USE_SSL")
+    assert not set(fleet_join._CLOUD_SETTING_KEYS) & set(fleet_join._SECRET_KEYS)
 
 
 # SEC-1: an assignment's env is a tenant-db's metastore, tenant-admin input. Only the keys the

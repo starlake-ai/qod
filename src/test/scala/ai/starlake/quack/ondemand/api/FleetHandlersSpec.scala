@@ -1046,12 +1046,12 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
     "QOD_S3_SECRET_ACCESS_KEY" -> "fake-secret-marker",
     "QOD_S3_USE_SSL"           -> "false"
   )
-  private val replyStore = (
-    Map(
+  private val replyStore = NodeSecretFiles.ManagerStore(
+    secrets = Map(
       "QOD_S3_ACCESS_KEY_ID"     -> "fake-key-id",
       "QOD_S3_SECRET_ACCESS_KEY" -> "fake-secret-marker"
     ),
-    Map("QOD_S3_ENDPOINT" -> "fake-store:9000", "QOD_S3_USE_SSL" -> "false")
+    env = Map("QOD_S3_ENDPOINT" -> "fake-store:9000", "QOD_S3_USE_SSL" -> "false")
   )
   private val storedBefore285 =
     """{"epoch":1,"nodeId":"n1","poolKey":{"tenant":"acme","tenantDb":"db","pool":"bi"},
@@ -1092,7 +1092,7 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       None
     )
     reply().map(a => (a.storeSecrets, a.storeEnv)) shouldBe
-      Some((replyStore._1, replyStore._2.updated("QOD_S3_ENDPOINT", "h:1")))
+      Some((replyStore.secrets, replyStore.env.updated("QOD_S3_ENDPOINT", "h:1")))
     withClue("the stored assignment holds a store secret: ")(
       io.circe.Encoder[FleetAssignment].apply(store.get("srv-1").get.assignment.get).noSpaces should
         not include "fake-secret-marker"
@@ -1150,10 +1150,12 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       ai.starlake.quack.NodeAuthzLimitsConfig(),
       NodeSecretFiles.managerStore(a.objectStoreSql, managerStoreEnv.get, "")
     )
-    (dto.storeSecrets, dto.storeEnv) shouldBe replyStore
+    NodeSecretFiles.ManagerStore(dto.storeSecrets, dto.storeEnv) shouldBe replyStore
     val json = io.circe.Encoder[FleetAssignmentDto].apply(dto)
-    json.hcursor.downField("storeSecrets").as[Map[String, String]] shouldBe Right(replyStore._1)
-    json.hcursor.downField("storeEnv").as[Map[String, String]] shouldBe Right(replyStore._2)
+    json.hcursor.downField("storeSecrets").as[Map[String, String]] shouldBe Right(
+      replyStore.secrets
+    )
+    json.hcursor.downField("storeEnv").as[Map[String, String]] shouldBe Right(replyStore.env)
     io.circe.parser.decode[FleetAssignmentDto](json.noSpaces) shouldBe Right(dto)
   }
 
@@ -1187,7 +1189,7 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       ai.starlake.quack.NodeExtensionsConfig(),
       ai.starlake.quack.NodeFilesConfig(),
       ai.starlake.quack.NodeAuthzLimitsConfig(),
-      (Map.empty, Map.empty)
+      NodeSecretFiles.ManagerStore.Empty
     )
     io.circe
       .Encoder[FleetAssignmentDto]

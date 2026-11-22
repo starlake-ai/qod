@@ -2541,11 +2541,18 @@ command line, `KeepAlive` true, `EnvironmentVariables` carrying the token. On a 
 start reaps the previous node through `node.pid` in the state dir.
 
 The node does NOT inherit the join process's whole environment (it holds the join token). It gets only
-`PATH HOME TMPDIR LANG LC_ALL TZ USER LOGNAME SHELL`, the proxy variables,
-`QOD_S3_*` / `QOD_AZURE_*`, and these metastore settings, so set them on the `qod fleet join` unit when needed:
+`PATH HOME TMPDIR LANG LC_ALL TZ USER LOGNAME SHELL`, the proxy variables and these metastore settings,
+so set them on the `qod fleet join` unit when needed:
 `PG_ADMIN_DB` (the database `CREATE DATABASE` runs from, when it is not `postgres`), `PGSSLMODE`,
 `PGSSLROOTCERT`, `PGSSLCERT`, `PGSSLKEY`, `PGCONNECT_TIMEOUT` (a metastore reached over TLS) and
 `SSL_CERT_FILE`. Anything else exported on the join process never reaches a node.
+
+Servers hold no storage keys: the manager sends its own default-store settings and keys (`QOD_S3_*`,
+`QOD_AZURE_CONNECTION_STRING`, `QOD_GCS_*`) in each assignment, for a node whose database has no store of
+its own. `qod fleet join` ignores any `QOD_S3_*` / `QOD_AZURE_*` / `QOD_GCS_*` in its own environment and
+warns once at start: remove them. When servers reach the store at another address than the manager, set
+`QOD_FLEET_NODE_S3_ENDPOINT` (host:port) on the manager. Every HA replica must hold the same `QOD_S3_*`. A
+rotated key reaches a server on its next heartbeat; restart the nodes for it to apply.
 
 - `qod fleet servers` lists servers with liveness (reachable / unreachable / dead) and the node they run.
 - Maintenance on a server: `qod fleet drain <name>` (its node moves elsewhere or goes pending), work,
@@ -2570,7 +2577,6 @@ loads. One container per server (normally one per host):
       -e QOD_FLEET_NAME=<stable name, e.g. the host name> \
       -e QOD_FLEET_ADVERTISE_HOST=<this host's address the manager can dial> \
       -e QOD_FLEET_NODE_PORT=21900 \
-      -e QOD_S3_ENDPOINT=... -e QOD_S3_ACCESS_KEY_ID=... -e QOD_S3_SECRET_ACCESS_KEY=... \
       starlakeai/quack-on-demand:latest worker
 
 - Run the manager and every server at the same version. `starlakeai/quack-on-demand-worker` is a
