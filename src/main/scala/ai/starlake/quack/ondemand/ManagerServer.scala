@@ -125,7 +125,13 @@ final class ManagerServer(
     // Path prefixes modules declare for staff callers (issue #274): a staff session or PAT reaches
     // a module route only under one of these, matched on whole segments. Empty keeps every module
     // route closed to staff.
-    moduleStaffPrefixes: Set[String] = Set.empty
+    moduleStaffPrefixes: Set[String] = Set.empty,
+    // Platform staff roles and staff users (issue #274, /api/platform/*, superuser-only). None
+    // leaves those routes unmounted; Main always wires it.
+    platform: Option[PlatformHandlers] = None,
+    // The modules' console pages (ModuleSurfaces.pages), listed by GET /api/console/pages, which is
+    // always mounted: with none, every caller reads an empty list.
+    consolePages: List[ai.starlake.quack.ondemand.module.ResolvedConsolePage] = Nil
 ) extends LazyLogging:
 
   // The bearer-credential lookups, composed session-first: the JWT verify is a
@@ -145,6 +151,8 @@ final class ManagerServer(
   private val scopeOfToken: ai.starlake.quack.ondemand.auth.SessionScope.Resolver =
     credentials.scopeOf
   private val sessionOfToken: String => Option[SessionTokenStore.Session] = credentials.sessionOf
+
+  private val console = new ConsoleHandlers(consolePages, credentials.platformCallerOf)
 
   extension [I, E, O](e: sttp.tapir.PublicEndpoint[I, E, O, Any])
     /** Binds `e` to a handler of the common shape `handler(inputs...)(scopeOf)`: the endpoint's
@@ -1007,8 +1015,18 @@ final class ManagerServer(
       RbacEndpoints.createRowPolicy.scoped(rowPolicies.create(_, _)),
       RbacEndpoints.updateRowPolicy.scoped(rowPolicies.update(_, _)),
       RbacEndpoints.deleteRowPolicy.scoped(rowPolicies.delete(_, _)),
-      RbacEndpoints.listRowPolicies.scoped(rowPolicies.list(_, _))
-    )
+      RbacEndpoints.listRowPolicies.scoped(rowPolicies.list(_, _)),
+      PlatformEndpoints.consolePages.serverLogic(console.list)
+    ) ++ platform.toList.flatMap { p =>
+      List[ServerEndpoint[Any, IO]](
+        PlatformEndpoints.listPermissions.scoped(p.listPermissions(_)),
+        PlatformEndpoints.listRoles.scoped(p.listRoles(_)),
+        PlatformEndpoints.createRole.scoped(p.createRole(_, _)),
+        PlatformEndpoints.updateRole.scoped(p.updateRole(_, _)),
+        PlatformEndpoints.deleteRole.scoped(p.deleteRole(_, _)),
+        PlatformEndpoints.listStaff.scoped(p.listStaff(_))
+      )
+    }
 
     val metricsEndpoints: List[ServerEndpoint[Any, IO]] = metricsEndpoint.serverEndpoints
 

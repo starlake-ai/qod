@@ -1128,7 +1128,10 @@ final case class UserCreateRequest(
     // (qod_all_tables / qod_all_pools); an empty list is refused; both must be omitted for a
     // superuser.
     roles: Option[List[String]] = None,
-    groups: Option[List[String]] = None
+    groups: Option[List[String]] = None,
+    // Platform role NAMES (issue #274), for a `staff` user only (kind staff, no tenant); refused
+    // with 400 invalid_kind on any other. Omitted = none.
+    platformRoles: Option[List[String]] = None
 )
 final case class UserUpdateRequest(
     id: String,
@@ -1152,7 +1155,10 @@ final case class UserUpdateRequest(
     // restarts: recovery is another admin, or for a superuser
     // qod admin reset-password --username <name> (only a name given with
     // --username is re-enabled).
-    enabled: Option[Boolean] = None
+    enabled: Option[Boolean] = None,
+    // Platform role NAMES (issue #274): omit = unchanged, [] = none, a list replaces them. Refused
+    // with 400 invalid_kind unless the row is, or becomes, staff.
+    platformRoles: Option[List[String]] = None
 )
 final case class UserDeleteRequest(id: String)
 final case class UserResponse(
@@ -1165,9 +1171,56 @@ final case class UserResponse(
     groups: List[String] = Nil,     // group NAMES (a user's groups are all direct)
     poolGrants: List[String] = Nil, // human label "tenant/pool" or "tenant/*"
     email: Option[String] = None,
-    directRoles: List[String] = Nil // the role NAMES granted to the user itself, not via a group
+    directRoles: List[String] = Nil,  // the role NAMES granted to the user itself, not via a group
+    platformRoles: List[String] = Nil // a staff user's platform role NAMES (issue #274); else empty
 )
 final case class UserListResponse(users: List[UserResponse])
+
+// ----- Platform staff roles and console pages (issue #274) -----
+
+/** A platform permission: one a loaded module declares (`declared`), or one a stored role still
+  * names though no loaded module declares it (`module` and `description` then absent).
+  */
+final case class PlatformPermissionView(
+    name: String,
+    module: Option[String],
+    description: Option[String],
+    declared: Boolean
+)
+final case class PlatformPermissionListResponse(permissions: List[PlatformPermissionView])
+final case class PlatformRoleView(
+    id: String,
+    name: String,
+    description: Option[String],
+    permissions: List[String]
+)
+final case class PlatformRoleListResponse(roles: List[PlatformRoleView])
+final case class PlatformRoleCreateRequest(
+    name: String,
+    description: Option[String] = None,
+    permissions: List[String] = Nil
+)
+
+/** Omit a field to keep it; an empty `description` clears it; `permissions` replaces the set. */
+final case class PlatformRoleUpdateRequest(
+    id: String,
+    name: Option[String] = None,
+    description: Option[String] = None,
+    permissions: Option[List[String]] = None
+)
+final case class PlatformRoleDeleteRequest(id: String)
+final case class StaffListResponse(users: List[UserResponse])
+
+/** A module's console page the caller may open: `path` is the console route, `bundle` the script.
+  */
+final case class ConsolePageView(
+    module: String,
+    id: String,
+    label: String,
+    path: String,
+    bundle: String
+)
+final case class ConsolePagesResponse(pages: List[ConsolePageView])
 
 /** GET /user/{id}/effective response. Permits the UI to show what a given user can actually do
   * without spelunking through roles/groups.
@@ -2030,8 +2083,20 @@ object Dtos:
   given Codec[UserCreateRequest] = refusingLegacyRoleKey(ConfiguredCodec.derived)
   given Codec[UserUpdateRequest] = refusingLegacyRoleKey(deriveCodec)
   given Codec[UserDeleteRequest] = deriveCodec
-  given Codec[UserResponse]      = deriveCodec
+  given Codec[UserResponse]      = ConfiguredCodec.derived
   given Codec[UserListResponse]  = deriveCodec
+
+  // Platform staff roles and console pages (issue #274)
+  given Codec[PlatformPermissionView]         = deriveCodec
+  given Codec[PlatformPermissionListResponse] = deriveCodec
+  given Codec[PlatformRoleView]               = deriveCodec
+  given Codec[PlatformRoleListResponse]       = deriveCodec
+  given Codec[PlatformRoleCreateRequest]      = ConfiguredCodec.derived
+  given Codec[PlatformRoleUpdateRequest]      = deriveCodec
+  given Codec[PlatformRoleDeleteRequest]      = deriveCodec
+  given Codec[StaffListResponse]              = deriveCodec
+  given Codec[ConsolePageView]                = deriveCodec
+  given Codec[ConsolePagesResponse]           = deriveCodec
 
   // RBAC: roles
   given Codec[RoleCreateRequest]           = deriveCodec

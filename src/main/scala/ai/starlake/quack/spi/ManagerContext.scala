@@ -39,7 +39,11 @@ final case class ManagerContext(
     sessionOf: String => Option[ai.starlake.quack.ondemand.api.SessionTokenStore.Session],
     /** The caller behind a credential (the same input as `scopeOf`) as a platform caller: a
       * superuser holds every permission, a staff user its platform roles' permissions, read live.
-      * None for a tenant user, no credential, or one that does not resolve. Stable SPI.
+      * None for a tenant user, no credential, or one that does not resolve. Stable SPI. `Some` with
+      * no permissions is a normal answer (a staff user whose roles grant nothing), so a module must
+      * check `has(p)` (or `PermissionCheck.require`), never `isDefined`. It can read the
+      * control-plane database (a PAT's verify, a cold staff cache), so call it inside
+      * `IO.blocking`.
       */
     platformCallerOf: Option[String] => Option[PlatformCaller],
     /** Runs one statement on a pool as the manager's system caller, bound to this module's name

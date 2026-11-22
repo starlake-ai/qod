@@ -1733,6 +1733,7 @@ object Main extends IOApp with LazyLogging:
       val groupHandlers      = new GroupHandlers(sup, userHandlers, audit = auditRecorder)
       val membershipHandlers = new MembershipHandlers(sup, userHandlers, audit = auditRecorder)
       val poolPermHandlers   = new PoolPermissionHandlers(sup, userHandlers, audit = auditRecorder)
+      val platformHandlers   = new PlatformHandlers(sup, userHandlers, audit = auditRecorder)
       val columnPolicyHandlers =
         new ai.starlake.quack.ondemand.api.RoleColumnPolicyHandlers(sup, audit = auditRecorder)
       val rowPolicyHandlers =
@@ -2289,6 +2290,8 @@ object Main extends IOApp with LazyLogging:
         modulePublicPrefixes = modules.flatMap(_.publicPathPrefixes).toSet,
         moduleStaticMounts = modules.flatMap(_.staticMounts),
         moduleStaffPrefixes = surfaces.staffPrefixes,
+        platform = Some(platformHandlers),
+        consolePages = surfaces.pages,
         passwordReset = Some(passwordResetHandlers),
         pat = Some(patHandlers),
         branches = branchHandlers,

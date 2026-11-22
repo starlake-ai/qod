@@ -337,6 +337,8 @@ object ManagerServerHarness:
       moduleStaticMounts: List[ai.starlake.quack.spi.StaticMount] = Nil,
       // Path prefixes modules declare for staff callers (issue #274).
       moduleStaffPrefixes: Set[String] = Set.empty,
+      // The modules' console pages, as GET /api/console/pages lists them (issue #274).
+      consolePages: List[ai.starlake.quack.ondemand.module.ResolvedConsolePage] = Nil,
       // SPI module event sink (Task 9): defaulted to noop so every pre-existing caller
       // compiles unchanged; specs that want to observe emissions pass a recording sink.
       events: ai.starlake.quack.spi.ManagerEventSink = ai.starlake.quack.spi.ManagerEventSink.noop,
@@ -841,6 +843,8 @@ object ManagerServerHarness:
       modulePublicPrefixes = modulePublicPrefixes,
       moduleStaticMounts = moduleStaticMounts,
       moduleStaffPrefixes = moduleStaffPrefixes,
+      platform = Some(new PlatformHandlers(sup, userHandlers, audit)),
+      consolePages = consolePages,
       passwordReset = Some(passwordResetHandlers),
       pat = patHandlers,
       branches = branchesOf.map(build => build(sup, previewHandlers, restCaller)),
