@@ -1043,3 +1043,61 @@ def test_a_failed_nodes_error_is_cut_to_its_last_8192_characters(tmp_path):
     assert "another process holds port 21900" in node["action"]
     # What this process knows of the failure is not cut.
     assert len(member.node.error) > 70000
+
+
+# ---- the one image: heartbeat marker, `qod healthcheck worker`, spill sweep ----
+
+def test_an_accepted_heartbeat_is_recorded_for_qod_healthcheck(tmp_path):
+    http = FakeHttp([FakeResponse(200, {"heartbeatSec": 7, "assignment": None})])
+    member = make_member(http, lambda *a, **k: FakeProc(), tmp_path)
+    member.run_once()
+    rec = json.loads((tmp_path / "state" / fleet_join.HEARTBEAT_FILE).read_text())
+    assert rec["pid"] == os.getpid() and rec["intervalSec"] == 7
+    assert fleet_join.worker_health(tmp_path / "state", now=rec["at"] + 1, pid_alive=lambda p: True) is None
+
+
+def test_a_refused_heartbeat_is_not_recorded(tmp_path):
+    http = FakeHttp([FakeResponse(401, {"error": "invalid_token"})])
+    member = make_member(http, lambda *a, **k: FakeProc(), tmp_path)
+    member.connected = True  # past the first contact, so a refusal is retried, not fatal
+    member.run_once()
+    assert not (tmp_path / "state" / fleet_join.HEARTBEAT_FILE).exists()
+
+
+def test_worker_health_names_why_a_worker_is_unhealthy(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    assert "no accepted heartbeat yet" in fleet_join.worker_health(state)
+    (state / fleet_join.HEARTBEAT_FILE).write_text("{not json")
+    assert "cannot read" in fleet_join.worker_health(state)
+    (state / fleet_join.HEARTBEAT_FILE).write_text(json.dumps({"at": 1000.0, "pid": 4242, "intervalSec": 5}))
+    assert "not running" in fleet_join.worker_health(state, now=1001.0, pid_alive=lambda p: False)
+    # Three intervals, never under 30 s.
+    assert fleet_join.worker_health(state, now=1029.0, pid_alive=lambda p: True) is None
+    assert "31s ago (limit 30s)" in fleet_join.worker_health(state, now=1031.0, pid_alive=lambda p: True)
+    (state / fleet_join.HEARTBEAT_FILE).write_text(json.dumps({"at": 1000.0, "pid": 4242, "intervalSec": 20}))
+    assert fleet_join.worker_health(state, now=1059.0, pid_alive=lambda p: True) is None
+
+
+def test_the_spill_sweep_removes_only_the_spill_folders_a_node_makes(tmp_path):
+    spill = tmp_path / "spill"
+    spill.mkdir()
+    for name in ("qod-node.AbC123", "qod-spill.Zz9yY8", "qod-spill.20900-0a1b.Qq1Ww2"):
+        (spill / name).mkdir()
+        (spill / name / "duckdb_temp_storage-0.tmp").write_text("x")
+    keep = ["qod-node.toolong7", "other", "qod-spill.AbC12"]
+    for name in keep:
+        (spill / name).mkdir()
+    (spill / "qod-node.Fi1e00").write_text("a file, not a folder")
+    (tmp_path / "elsewhere").mkdir()
+    (spill / "qod-node.L1nk00").symlink_to(tmp_path / "elsewhere")
+    member = make_member(FakeHttp([]), lambda *a, **k: FakeProc(), tmp_path, spill_dir=spill)
+    removed = member.sweep_spill()
+    assert sorted(removed) == ["qod-node.AbC123", "qod-spill.20900-0a1b.Qq1Ww2", "qod-spill.Zz9yY8"]
+    assert sorted(p.name for p in spill.iterdir()) == sorted(keep + ["qod-node.Fi1e00", "qod-node.L1nk00"])
+    assert (tmp_path / "elsewhere").is_dir()
+
+
+def test_no_spill_dir_sweeps_nothing(tmp_path):
+    member = make_member(FakeHttp([]), lambda *a, **k: FakeProc(), tmp_path)
+    assert member.sweep_spill() == []

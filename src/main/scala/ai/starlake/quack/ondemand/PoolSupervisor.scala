@@ -263,6 +263,15 @@ final class PoolSupervisor(
   // deleteTenantDb; in-memory only, like dataPathBlocked (the next boot re-runs every init anyway).
   private val duckLakeInitPending = TrieMap.empty[String, String]
 
+  // tenant-db.id -> its last DuckLake init's failure of any other kind (the catalog's Postgres
+  // unreachable, an extension the manager's DuckDB cannot install or load: a read-only filesystem,
+  // no network). Nodes still start: they attach the catalog as it is and never migrate it, so what
+  // is lost is what only this initializer does (the AUTOMATIC_MIGRATION of an older catalog, the
+  // dataPath and encryption guards). Reported by [[startupProblems]] and retried before reconcile
+  // passes with a growing delay ([[PoolSupervisor.InitFailure]]). Cleared by a successful init and
+  // by deleteTenantDb; in-memory only.
+  private val duckLakeInitFailed = TrieMap.empty[String, PoolSupervisor.InitFailure]
+
   /** Module-contributed veto hooks (quota policy). Set once by Main after moduleStart; empty in
     * zero-module boots and in every existing test, so default behavior is unchanged.
     */
@@ -800,11 +809,37 @@ final class PoolSupervisor(
           )
         }
       }
-    blocked.sortBy(p => (p.tenant, p.database)) ++ federation.sortBy(p => (p.tenant, p.database))
+    val initFailed =
+      duckLakeInitFailed.toList.flatMap { case (id, f) =>
+        named(id).map { case (t, db) =>
+          StartupProblem(
+            t,
+            db,
+            StartupProblem.Kind.InitFailed,
+            s"the manager could not initialize its DuckLake catalog (${f.message}), so its nodes " +
+              "attach the catalog as it is: a catalog an older DuckLake wrote is not migrated, " +
+              "and the dataPath and encryption checks did not run",
+            List(
+              "check that the manager reaches the catalog's Postgres and that its DuckDB has the " +
+                "ducklake, postgres_scanner and httpfs extensions (pre-installed in its " +
+                "~/.duckdb, or a directory named by QOD_DUCKDB_EXTENSION_DIR); the manager " +
+                "retries on its own"
+            ),
+            poolsOf(id)
+          )
+        }
+      }
+    blocked.sortBy(p => (p.tenant, p.database)) ++
+      federation.sortBy(p => (p.tenant, p.database)) ++
+      initFailed.sortBy(p => (p.tenant, p.database))
 
   /** Test-only seam: record a federation resolution failure as restore() would. */
   private[ondemand] def failFederationForTest(tenantDbId: String, message: String): Unit =
     federationFailed.put(tenantDbId, message)
+
+  /** Test-only seam: read back [[duckLakeInitFailed]]. */
+  private[ondemand] def initFailureForTest(tenantDbId: String): Option[PoolSupervisor.InitFailure] =
+    duckLakeInitFailed.get(tenantDbId)
 
   /** Test-only seam: read back [[dataPathBlocked]] membership. */
   private[ondemand] def isDataPathBlockedForTest(tenantDbId: String): Boolean =
@@ -953,6 +988,7 @@ final class PoolSupervisor(
     // dataPath block held for it is moot; drop it rather than leaking it forever.
     dataPathBlocked.keys.toList.filterNot(snapTenantDbIds).foreach(dataPathBlocked.remove)
     duckLakeInitPending.keys.toList.filterNot(snapTenantDbIds).foreach(duckLakeInitPending.remove)
+    duckLakeInitFailed.keys.toList.filterNot(snapTenantDbIds).foreach(duckLakeInitFailed.remove)
     federationFailed.keys.toList.filterNot(snapTenantDbIds).foreach(federationFailed.remove)
 
     snap.tenants.foreach(t => tenants.put(t.id, t))
@@ -1146,18 +1182,49 @@ final class PoolSupervisor(
     * [[duckLakeInitPending]]). Run by [[reconcileLoop]] before each pass, so behind the same leader
     * gate as reconcile; a no-op when nothing is pending.
     */
-  def retryPendingDuckLakeInit(): IO[Unit] = IO.blocking {
-    duckLakeInitPending.keys.toList.foreach { id =>
+  def retryPendingDuckLakeInit(): IO[Unit] =
+    IO.blocking(retryPendingDuckLakeInitAt(System.currentTimeMillis()))
+
+  /** [[retryPendingDuckLakeInit]] at `nowMs`: every lock-timed-out init, and every failed one
+    * ([[duckLakeInitFailed]]) whose delay has passed.
+    */
+  private[ondemand] def retryPendingDuckLakeInitAt(nowMs: Long): Unit =
+    val due = duckLakeInitPending.keys.toList ++
+      duckLakeInitFailed.collect { case (id, f) if f.nextAttemptMs <= nowMs => id }
+    due.distinct.foreach { id =>
       tenantDbs.get(id) match
-        case Some(td) => initDuckLake(td, "retryPendingDuckLakeInit")
-        case None     => duckLakeInitPending.remove(id)
+        case Some(td) => initDuckLake(td, "retryPendingDuckLakeInit", nowMs)
+        case None     =>
+          duckLakeInitPending.remove(id)
+          duckLakeInitFailed.remove(id)
     }
-  }
+
+  /** Records a failed DuckLake init of `td` (see [[duckLakeInitFailed]]) and logs it at ERROR, the
+    * default level, when its message is new: a repeat of the same failure stays quiet.
+    */
+  private def recordInitFailure(td: TenantDb, ctx: String, t: Throwable, nowMs: Long): Unit =
+    // The first line only: DuckDB's errors go on with lists ("Candidate extensions: ...") that
+    // would break the banner's one-line `why`.
+    val first =
+      Option(t.getMessage).map(_.linesIterator.nextOption().getOrElse("").trim).getOrElse("")
+    val message = s"${t.getClass.getSimpleName}: $first"
+    val failure = PoolSupervisor.InitFailure.next(duckLakeInitFailed.get(td.id), message, nowMs)
+    duckLakeInitFailed.put(td.id, failure)
+    if failure.repeats == 0 then
+      logger.error(
+        s"$ctx: '${td.name}' DuckLake pre-init failed ($message). Its nodes attach the catalog " +
+          "as it is, unmigrated and unchecked, until an init succeeds; retried before reconcile " +
+          s"passes, next in ${failure.delayMs / 1000}s."
+      )
 
   /** One tenant-db's DuckLake init with its outcome recorded. Never throws: one bad tenant-db must
     * not abort the loop over the others, nor boot.
     */
-  private def initDuckLake(td: TenantDb, ctx: String): Unit =
+  private def initDuckLake(
+      td: TenantDb,
+      ctx: String,
+      nowMs: Long = System.currentTimeMillis()
+  ): Unit =
     try
       duckLakeInitializer(
         effectiveMetastoreFor(td),
@@ -1166,6 +1233,7 @@ final class PoolSupervisor(
       )
       dataPathBlocked.remove(td.id)
       duckLakeInitPending.remove(td.id)
+      duckLakeInitFailed.remove(td.id)
     catch
       case t: DuckLakeInitializer.PreInitMismatchException =>
         // Not transient: every future node spawn hits the same DuckDB DATA_PATH or encryption
@@ -1188,14 +1256,13 @@ final class PoolSupervisor(
         // Transient: the lock holder is a read or a transaction that ends. Retry later rather than
         // block anything; the bounded wait already happened inside the initializer.
         duckLakeInitPending.put(td.id, t.getMessage)
+        duckLakeInitFailed.remove(td.id)
         logger.warn(s"$ctx: tenant-db '${td.name}': ${t.getMessage}")
       case t: Throwable =>
-        // Not retried before the next manager boot or leader promotion. A node spawn creates a
-        // catalog that does not exist yet, but never migrates one.
-        logger.warn(
-          s"$ctx: '${td.name}' pre-init raised ${t.getClass.getSimpleName}: ${t.getMessage}. " +
-            "Not retried until the next boot; node spawns attach the catalog as it is."
-        )
+        // A node spawn creates a catalog that does not exist yet, but never migrates one, and runs
+        // none of the guards: reported and retried rather than left at a WARN the default log
+        // level hides.
+        recordInitFailure(td, ctx, t, nowMs)
 
   /** Re-check every persisted node; respawn dead ones. */
   def reconcile(): IO[Unit] = IO.defer {
@@ -2890,14 +2957,20 @@ final class PoolSupervisor(
                                     )
                                     Left(SupervisorError.Internal(t.getMessage))
                                   case t: Throwable =>
-                                    logger.warn(
-                                      s"createTenantDb: DuckLake pre-init for '$full' failed; " +
-                                        s"first pool spawn will retry the ATTACH. Cause: ${t.getMessage}"
-                                    )
                                     t match
                                       case _: DuckLakeInitializer.CatalogLockTimeoutException =>
+                                        logger.warn(
+                                          s"createTenantDb: DuckLake pre-init for '$full' " +
+                                            s"failed; retried later. Cause: ${t.getMessage}"
+                                        )
                                         duckLakeInitPending.put(td.id, t.getMessage)
-                                      case _ => ()
+                                      case _ =>
+                                        recordInitFailure(
+                                          td,
+                                          "createTenantDb",
+                                          t,
+                                          System.currentTimeMillis()
+                                        )
                                     store.upsertTenantDb(td)
                                     recordManagedPrefix()
                                     putTenantDbRow(td)
@@ -3005,6 +3078,7 @@ final class PoolSupervisor(
                   dataFoldersChanged()
                   dataPathBlocked.remove(td.id)
                   duckLakeInitPending.remove(td.id)
+                  duckLakeInitFailed.remove(td.id)
                   federationFailed.remove(td.id)
                   try onTenantDbDeleted(tn, tenantDbName)
                   catch case _: Throwable => ()
@@ -5741,7 +5815,27 @@ object PoolSupervisor:
   )
   object StartupProblem:
     enum Kind:
-      case Blocked, Federation
+      case Blocked, Federation, InitFailed
+
+  /** A tenant-db's last failed DuckLake init (not a lock timeout, not a refusal): its message, when
+    * the next attempt is due, the delay that led there and how many attempts in a row failed with
+    * this same message (0 for a new one).
+    */
+  final case class InitFailure(message: String, nextAttemptMs: Long, delayMs: Long, repeats: Int)
+  object InitFailure:
+    val FirstDelayMs: Long = 60_000L
+    val MaxDelayMs: Long   = 15 * 60_000L
+
+    /** The failure after `previous` failed again with `message` at `nowMs`: the delay doubles up to
+      * [[MaxDelayMs]] while the message repeats, and starts over at [[FirstDelayMs]] when it
+      * changes.
+      */
+    def next(previous: Option[InitFailure], message: String, nowMs: Long): InitFailure =
+      previous.filter(_.message == message) match
+        case Some(p) =>
+          val delay = math.min(p.delayMs * 2, MaxDelayMs)
+          InitFailure(message, nowMs + delay, delay, p.repeats + 1)
+        case None => InitFailure(message, nowMs + FirstDelayMs, FirstDelayMs, 0)
 
   /** A new pool's name the naming rule refuses (`Names.poolNameRefusal`). */
   final class InvalidPoolName(message: String) extends IllegalArgumentException(message)

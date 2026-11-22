@@ -46,10 +46,14 @@ services:
       - "${EDGE_PORT:-31338}:31338"
       - "${QUACK_PORT:-9494}:9494"
 
+  # The workers run the manager's image, in its worker role (`qod fleet join`): one image, one
+  # version for every container. The build section repeats the quack service's, so that
+  # `up --build` builds the image whichever service compose starts with (the second build is a
+  # cache hit).
   fleet-worker-1: &fleet-worker
     build:
       context: .
-      dockerfile: deploy/docker/fleet-worker/Dockerfile
+      dockerfile: Dockerfile
       # Same proxy build args and host-gateway alias as the base quack build.
       args:
         HTTP_PROXY:  ${HTTP_PROXY:-}
@@ -60,7 +64,8 @@ services:
         no_proxy:    ${no_proxy:-}
       extra_hosts:
         - "host.docker.internal:host-gateway"
-    image: starlakeai/quack-on-demand-worker:${QOD_VERSION:-latest}
+    image: starlakeai/quack-on-demand:${QOD_VERSION:-latest}
+    command: [worker]
     container_name: quack-on-demand-fleet-worker-1
     restart: unless-stopped
     # qod fleet join stops its node (up to 60 s) before exiting on SIGTERM.

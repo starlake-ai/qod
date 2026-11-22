@@ -193,6 +193,31 @@ class BannerSpec extends AnyFlatSpec with Matchers:
     b should include("Client connection strings:")
   }
 
+  it should "say that a database whose catalog the manager could not initialize keeps serving" in {
+    import ai.starlake.quack.ondemand.PoolSupervisor.StartupProblem
+    val b = Banner.startup(
+      meta,
+      "0.0.0.0",
+      20900,
+      "0.0.0.0",
+      31338,
+      tlsEnabled = true,
+      problems = List(
+        StartupProblem(
+          "acme",
+          "acme_tpch",
+          StartupProblem.Kind.InitFailed,
+          "why",
+          List("fix"),
+          List("bi")
+        )
+      )
+    )
+    b should include(
+      "   acme/acme_tpch: catalog NOT initialized by the manager (pools bi attach it as it is)\n"
+    )
+  }
+
   it should "print no PROBLEMS section when there is none" in {
     val b = Banner.startup(meta, "0.0.0.0", 20900, "0.0.0.0", 31338, tlsEnabled = true)
     (b should not).include("PROBLEMS")

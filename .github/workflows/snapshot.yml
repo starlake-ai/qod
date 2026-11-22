@@ -281,3 +281,16 @@ jobs:
         run: |
           version="${{ needs.publish-jar.outputs.version }}"
           docker buildx imagetools inspect "${{ env.REGISTRY_IMAGE }}:${version}"
+
+      # The deprecated worker alias (deploy/docker/worker-alias.Dockerfile): the one image in its
+      # worker role, published for two releases after 0.14.2 so existing fleet servers keep
+      # starting. Replaces the former fleet-worker-snapshot workflow.
+      - name: Build + push the worker alias
+        run: |
+          set -euo pipefail
+          version="${{ needs.publish-jar.outputs.version }}"
+          docker buildx build --platform linux/amd64,linux/arm64 \
+            --build-arg "BASE=${{ env.REGISTRY_IMAGE }}:${version}" \
+            -t "starlakeai/quack-on-demand-worker:${version}" \
+            -t "starlakeai/quack-on-demand-worker:latest-snapshot" \
+            -f deploy/docker/worker-alias.Dockerfile --push deploy/docker

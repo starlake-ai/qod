@@ -52,13 +52,6 @@ class DuckDbPinParitySpec extends AnyFlatSpec with Matchers:
       "ARG DUCKDB_VERSION"
     )
 
-  "deploy/docker/fleet-worker/Dockerfile" should "bake the pinned DuckDB CLI into the worker image" in
-    fileMustContain(
-      "deploy/docker/fleet-worker/Dockerfile",
-      s"ARG DUCKDB_VERSION=$enginePin",
-      "ARG DUCKDB_VERSION"
-    )
-
   private lazy val libquackwireVersion: String =
     val buildSbt = Files.readString(Paths.get("build.sbt"))
     val re       = """val libquackwireVersion\s*=\s*"([^"]+)"""".r

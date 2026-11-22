@@ -9,6 +9,7 @@ docs/superpowers/specs/2026-09-25-fleet-backend-design.md.
 from __future__ import annotations
 
 import collections
+import json
 import math
 import os
 import platform
@@ -16,6 +17,7 @@ import re
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -40,6 +42,13 @@ STDERR_TAIL = 20
 # the node would never restart. The cause is usually the last thing the node wrote, so the end is kept.
 ERROR_REPORT_CHARS = 8192
 PIDFILE = "node.pid"
+# The last accepted heartbeat, for `qod healthcheck worker`: {"at": <epoch s>, "pid": <join pid>,
+# "intervalSec": <the manager's heartbeatSec>}, rewritten after each accepted heartbeat.
+HEARTBEAT_FILE = "heartbeat.json"
+# The spill folders a node of this server can leave in its spill directory: the spawn script's
+# per-node folder and qod-node's leaf under a superuser's temp_directory (the same patterns as
+# spawn-quack-node.sh's remove_stale_spill / remove_spill_leaf).
+_SPILL_FOLDER = re.compile(r"^(qod-node\.[A-Za-z0-9]{6}|qod-spill\.([0-9]+-[0-9a-f]+\.)?[A-Za-z0-9]{6})$")
 
 # A failed node's error (exit status and stderr tail) -> the fix to suggest; first match wins.
 _NODE_FAILURES: tuple[tuple[re.Pattern, str], ...] = (
@@ -425,19 +434,52 @@ class _Node:
         return f"exited with {self.proc.poll()}: {self.tail()}"
 
 
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def worker_health(state_dir: Path, *, now: float | None = None,
+                  pid_alive: Callable[[int], bool] = _pid_alive) -> str | None:
+    """None when the join process recorded in `state_dir` lives and its last heartbeat was accepted
+    recently, else why not. Recently: within three heartbeat intervals, and never less than 30 s,
+    so one slow manager answer does not make a worker unhealthy."""
+    path = Path(state_dir) / HEARTBEAT_FILE
+    try:
+        rec = json.loads(path.read_text())
+        at, pid, interval = float(rec["at"]), int(rec["pid"]), float(rec.get("intervalSec", 5))
+    except FileNotFoundError:
+        return f"no accepted heartbeat yet ({path} is missing)"
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return f"cannot read {path}: {exc}"
+    if pid <= 1 or not pid_alive(pid):
+        return f"the join process (pid {pid}) is not running"
+    age = (time.time() if now is None else now) - at
+    limit = max(30.0, 3 * interval)
+    if age > limit:
+        return f"last accepted heartbeat {age:.0f}s ago (limit {limit:.0f}s)"
+    return None
+
+
 class FleetMember:
     def __init__(self, manager_url: str, join_token: str, *, name: str, advertise_host: str, bind_host: str,
                  node_port: int, spawn_script: Path, node_bin: Path | None, state_dir: Path, insecure: bool,
                  http=httpx, popen=subprocess.Popen, sleep: Callable[[float], None] = time.sleep,
                  port_open: Callable[[int], bool] | None = None, clock: Callable[[], float] = time.monotonic,
                  capacity: Callable[[], tuple[int | None, int | None]] = host_capacity,
-                 duckdb_version: str | None = None):
+                 duckdb_version: str | None = None, spill_dir: Path | None = None):
         if manager_url.lower().startswith("http://") and not insecure:
             sys.stderr.write("qod fleet join: refusing a plain http:// manager URL (the assignment carries credentials); pass --insecure to override\n")
             raise SystemExit(2)
         self.manager_url, self.join_token = manager_url.rstrip("/"), join_token
         self.name, self.advertise_host, self.bind_host, self.node_port = name, advertise_host, bind_host, node_port
         self.spawn_script, self.node_bin, self.state_dir = spawn_script, node_bin, Path(state_dir)
+        self.spill_dir = Path(spill_dir) if spill_dir is not None else None
         self.http, self.popen, self.sleep, self.clock, self.capacity = http, popen, sleep, clock, capacity
         probe_host = "127.0.0.1" if bind_host == "0.0.0.0" else bind_host
         self.port_open = port_open or (lambda p: _port_open(probe_host, p))
@@ -705,9 +747,11 @@ class FleetMember:
         # kill the process: log it, keep whatever node runs, and heartbeat again after the backoff.
         try:
             reply = r.json()
+            interval = float(reply.get("heartbeatSec", 5))
+            self._write_heartbeat(interval)
             self._note_approval(reply.get("approval"))
             self._reconcile(reply.get("assignment"))
-            return float(reply.get("heartbeatSec", 5))
+            return interval
         except (ValueError, KeyError, TypeError, AttributeError, OSError) as exc:
             sys.stderr.write(f"qod fleet join: could not act on the manager's reply: {exc!r}\n")
             return BACKOFF_MIN_S
@@ -743,6 +787,50 @@ class FleetMember:
             sys.stderr.write(f"qod fleet join: server '{self.name}' approved\n")
         self.approval = approval
 
+    @property
+    def heartbeat_file(self) -> Path:
+        return self.state_dir / HEARTBEAT_FILE
+
+    def _write_heartbeat(self, interval: float) -> None:
+        """Record the accepted heartbeat for `qod healthcheck worker`, written aside and renamed into
+        place so a reader never sees half a file. A failed write is no reason to stop heartbeating."""
+        tmp = self.heartbeat_file.with_name(f".{HEARTBEAT_FILE}.{os.getpid()}")
+        try:
+            tmp.write_text(json.dumps({"at": time.time(), "pid": os.getpid(), "intervalSec": interval}))
+            os.replace(tmp, self.heartbeat_file)
+        except OSError as exc:
+            sys.stderr.write(f"qod fleet join: could not record the heartbeat in {self.heartbeat_file}: {exc}\n")
+
+    def sweep_spill(self) -> list[str]:
+        """Remove the spill folders a node of a previous run left in this server's own spill
+        directory (--spill-dir): a node killed with its container leaves its folder, and the record
+        the spawn script's stale sweep reads lived in the container's tmpfs. Only folders named as
+        the spawn script and qod-node name them, real directories owned by this user, directly in
+        the spill directory. Only called while no node of this process runs, and only safe when the
+        directory is this server's alone. Returns the names removed."""
+        if self.spill_dir is None:
+            return []
+        try:
+            entries = list(self.spill_dir.iterdir())
+        except OSError:
+            return []
+        removed = []
+        for entry in entries:
+            if not _SPILL_FOLDER.match(entry.name):
+                continue
+            try:
+                st = entry.lstat()
+            except OSError:
+                continue
+            if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+                continue
+            shutil.rmtree(entry, ignore_errors=True)
+            removed.append(entry.name)
+        if removed:
+            sys.stderr.write(f"qod fleet join: removed {len(removed)} spill folder(s) a previous node left in "
+                             f"{self.spill_dir}\n")
+        return removed
+
     def sweep_secrets(self) -> None:
         """Remove secret directories a previous join process left behind (killed between writing one
         and its script reading it). Only called while no node of this process runs."""
@@ -751,6 +839,7 @@ class FleetMember:
     def run_forever(self) -> None:
         self.reap_orphan()
         self.sweep_secrets()
+        self.sweep_spill()
         sys.stderr.write(f"qod fleet join: server '{self.name}', advertise host {self.advertise_host}, node binds "
                          f"{self.bind_host}:{self.node_port} (override with --advertise-host / --bind-host if "
                          f"this is not the data interface)\n")

@@ -1988,6 +1988,64 @@ class PoolSupervisorSpec extends AnyFlatSpec with Matchers:
     problems.head.fixes.head should startWith("restart the manager with QOD_DUCKLAKE_DATA_PATH=")
   }
 
+  it should "report a failed init, keep its pools runnable and retry it once its delay has passed" in {
+    val (failing, calls, sup) = scriptedInitializer()
+    val a                     = lakeDb(sup, "a")
+    sup.createPool(PoolKey("acme", "acme_a", "bi"), RoleDistribution(0, 0, 1)).unsafeRunSync()
+    failing.put("acme_a", new java.io.IOException("Read-only file system: ~/.duckdb/extensions"))
+    calls.clear()
+
+    sup.ensureDuckLakeInitialized().unsafeRunSync()
+
+    sup.isDataPathBlockedForTest(a.id) shouldBe false
+    sup.isDuckLakeInitPendingForTest(a.id) shouldBe false
+    val first = sup.initFailureForTest(a.id).getOrElse(fail("no failure recorded"))
+    first.repeats shouldBe 0
+    first.delayMs shouldBe PoolSupervisor.InitFailure.FirstDelayMs
+    val problems = sup.startupProblems()
+    problems.map(p => (p.database, p.kind, p.pools)) shouldBe List(
+      ("acme_a", PoolSupervisor.StartupProblem.Kind.InitFailed, List("bi"))
+    )
+    problems.head.reason should include("Read-only file system")
+    problems.head.reason should include("not migrated")
+
+    // Not due yet: nothing runs. Due: it runs again, fails the same way and waits twice as long.
+    calls.clear()
+    sup.retryPendingDuckLakeInitAt(first.nextAttemptMs - 1)
+    calls.toArray.toList shouldBe Nil
+    sup.retryPendingDuckLakeInitAt(first.nextAttemptMs)
+    calls.toArray.toList shouldBe List("acme_a")
+    val second = sup.initFailureForTest(a.id).get
+    second.repeats shouldBe 1
+    second.delayMs shouldBe 2 * PoolSupervisor.InitFailure.FirstDelayMs
+
+    // Healed: the next due attempt succeeds and the problem is gone.
+    failing.remove("acme_a")
+    sup.retryPendingDuckLakeInitAt(second.nextAttemptMs)
+    sup.initFailureForTest(a.id) shouldBe None
+    sup.startupProblems() shouldBe Nil
+  }
+
+  "InitFailure.next" should "double the delay up to its cap while the message repeats, and start over on a new one" in {
+    import PoolSupervisor.InitFailure
+    val f0 = InitFailure.next(None, "boom", 0L)
+    f0 shouldBe InitFailure("boom", InitFailure.FirstDelayMs, InitFailure.FirstDelayMs, 0)
+    val capped = (1 to 10).foldLeft(f0)((f, _) => InitFailure.next(Some(f), "boom", 0L))
+    capped.delayMs shouldBe InitFailure.MaxDelayMs
+    capped.repeats shouldBe 10
+    InitFailure.next(Some(capped), "other", 5L) shouldBe
+      InitFailure("other", 5L + InitFailure.FirstDelayMs, InitFailure.FirstDelayMs, 0)
+  }
+
+  "createTenantDb" should "record a failed DuckLake pre-init as a problem and still create the database" in {
+    val (failing, _, sup) = scriptedInitializer()
+    failing.put("acme_c", new java.sql.SQLException("Connection refused\n\nCandidate hosts: a, b"))
+    val c = lakeDb(sup, "c")
+    sup.initFailureForTest(c.id).map(_.message) shouldBe Some("SQLException: Connection refused")
+    sup.deleteTenantDb("acme", "acme_c").unsafeRunSync().isRight shouldBe true
+    sup.initFailureForTest(c.id) shouldBe None
+  }
+
   "startupProblems" should "list federation failures after blocks, both for a database with both" in {
     val (_, _, sup) = scriptedInitializer()
     val a           = lakeDb(sup, "a")

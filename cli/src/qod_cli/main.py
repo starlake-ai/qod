@@ -119,6 +119,10 @@ from .commands import fleet  # noqa: E402
 
 app.add_typer(fleet.app, name="fleet")
 
+from .commands import healthcheck  # noqa: E402
+
+app.add_typer(healthcheck.app, name="healthcheck")
+
 from .commands import admin, group, membership, platform, role, user  # noqa: E402
 
 app.add_typer(user.app, name="user")

@@ -22,8 +22,10 @@ def join(
     advertise_host: str = typer.Option(None, "--advertise-host", envvar="QOD_FLEET_ADVERTISE_HOST", help="Address the manager dials; default: first non-loopback IPv4. Set it explicitly on multi-NIC hosts and in containers."),
     bind_host: str = typer.Option(None, "--bind-host", envvar="QOD_FLEET_BIND_HOST", help="Interface the node listens on; default: the advertise host. 0.0.0.0 to listen everywhere."),
     node_port: int = typer.Option(21900, "--node-port", envvar="QOD_FLEET_NODE_PORT"),
-    qod_node_bin: Path = typer.Option(None, "--qod-node-bin", help="qod-node executable the node runs; default: the one qod bundles, installed in the qod cache beside the pinned libduckdb."),
-    state_dir: Path = typer.Option(None, "--state-dir", help="Where the node pidfile lives; default: the qod cache."),
+    qod_node_bin: Path = typer.Option(None, "--qod-node-bin", envvar="QOD_NODE_BIN", help="qod-node executable the node runs; default: the one qod bundles, installed in the qod cache beside the pinned libduckdb."),
+    spawn_script: Path = typer.Option(None, "--spawn-script", envvar="QOD_SPAWN_SCRIPT", help="spawn-quack-node.sh the node starts through; default: the one qod bundles, copied into the qod cache."),
+    spill_dir: Path = typer.Option(None, "--spill-dir", envvar="QOD_FLEET_SPILL_DIR", help="This server's own spill directory (/duckdb-tmp in the image): spill folders a previous node left there are removed at start. Only for a directory no other server shares."),
+    state_dir: Path = typer.Option(None, "--state-dir", help="Where the node pidfile and the last heartbeat live; default: the qod cache."),
     insecure: bool = typer.Option(False, "--insecure", help="Allow a plain http:// manager URL (it does not relax TLS checks on https://)."),
 ):
     """Join this machine to a quack-on-demand fleet and keep running (Linux, macOS).
@@ -34,7 +36,9 @@ def join(
         typer.echo("qod fleet join is not available on Windows yet", err=True)
         raise typer.Exit(2)
     cache = launcher.default_cache_dir()
-    spawn_sh, _ = launcher.materialize_spawn_scripts(cache / "scripts")
+    # A pre-installed script and qod-node (the image's QOD_SPAWN_SCRIPT and QOD_NODE_BIN) leave the
+    # cache untouched, so the join runs on a read-only root filesystem.
+    spawn_sh = spawn_script or launcher.materialize_spawn_scripts(cache / "scripts")[0]
     try:
         exe = qod_node_bin or qod_node.install(cache, launcher.ensure_libduckdb(cache))
     except Exception as e:
@@ -52,7 +56,8 @@ def join(
     # finds, and reaps, a node orphaned by the previous version's pidfile.
     runner = FleetMember(manager, join_token, name=name, advertise_host=adv, bind_host=bind_host or adv,
                          node_port=node_port, spawn_script=spawn_sh, node_bin=exe,
-                         state_dir=state_dir or cache / "agent", insecure=insecure, duckdb_version=version)
+                         state_dir=state_dir or cache / "agent", insecure=insecure, duckdb_version=version,
+                         spill_dir=spill_dir)
 
     # SIGTERM (systemd stop, kill) must unwind through run_forever's finally so the node, which
     # lives in its own session, is stopped with this process rather than left behind.

@@ -2559,9 +2559,9 @@ The node does NOT inherit the join process's whole environment (it holds the joi
 
 ### Fleet servers as Docker containers
 
-Manager and servers can all be containers. One container per server (normally one per host), from
-`starlakeai/quack-on-demand-worker` (it runs `qod fleet join` and bundles the node binary and its DuckDB
-library):
+Manager and servers can all be containers, from the same image: `starlakeai/quack-on-demand`, whose
+`worker` role runs `qod fleet join` with the node binary, its DuckDB library and every extension a node
+loads. One container per server (normally one per host):
 
     docker run -d --name qod-worker --restart unless-stopped --stop-timeout 70 \
       -p 21900:21900 \
@@ -2571,8 +2571,12 @@ library):
       -e QOD_FLEET_ADVERTISE_HOST=<this host's address the manager can dial> \
       -e QOD_FLEET_NODE_PORT=21900 \
       -e QOD_S3_ENDPOINT=... -e QOD_S3_ACCESS_KEY_ID=... -e QOD_S3_SECRET_ACCESS_KEY=... \
-      starlakeai/quack-on-demand-worker:latest
+      starlakeai/quack-on-demand:latest worker
 
+- Run the manager and every server at the same version. `starlakeai/quack-on-demand-worker` is a
+  deprecated alias of the image in its worker role.
+- Healthchecks: `qod healthcheck worker` (the join runs and its last heartbeat was accepted) and
+  `qod healthcheck manager` (`/ready` answers 200), each with a `timeout:`.
 - `QOD_FLEET_NAME` and `QOD_FLEET_ADVERTISE_HOST` are required: a container's hostname changes on every
   recreate (each would join as a new server) and its own IP is a bridge address the manager cannot reach.
 - Publish the node port with the SAME number on both sides (`-p 21901:21901` with

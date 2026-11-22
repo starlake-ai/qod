@@ -25,7 +25,7 @@ All of these must exist upstream before step 1:
 - `project/Versions.scala`: `val duckdbJdbc = duckdb` (Versions.duckdbJdbc from Maven Central).
 - `build.sbt`: drop `resolvers += Resolver.mavenLocal` and its comment.
 - The `quack` submodule: the commit the published v2.0.0 quack extension was built from.
-- The Docker images (`Dockerfile`, `deploy/docker/quack-node/Dockerfile`, `deploy/docker/fleet-worker/Dockerfile`)
+- The Docker images (`Dockerfile`, `deploy/docker/quack-node/Dockerfile`)
   already pin `ARG DUCKDB_VERSION=2.0.0`, and the qod CLI launcher and `run-jar.sh` already
   provision from the release URLs; `DuckDbPinParitySpec` binds them together. Confirm each download
   now resolves.
