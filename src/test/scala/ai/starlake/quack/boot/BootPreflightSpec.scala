@@ -22,6 +22,20 @@ import scala.util.Try
   */
 class BootPreflightSpec extends AnyFlatSpec with Matchers:
 
+  "checkAdminKind" should "accept admin in any case with surrounding spaces" in {
+    BootPreflight.checkAdminKind("admin") shouldBe Right(())
+    BootPreflight.checkAdminKind(" Admin ") shouldBe Right(())
+  }
+
+  it should "refuse every other kind, naming the setting and the value" in {
+    for raw <- List("user", "staff", "root", "") do
+      BootPreflight.checkAdminKind(raw) match
+        case Left(msg) =>
+          msg should include("QOD_ADMIN_KIND")
+          msg should include(s"'$raw'")
+        case Right(()) => fail(s"expected Left for '$raw'")
+  }
+
   "checkLockoutSmtp" should "refuse lockout enabled with no SMTP host configured" in {
     val result = BootPreflight.checkLockoutSmtp(lockoutEnabled = true, smtpHost = None)
     result match

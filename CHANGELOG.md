@@ -15,6 +15,9 @@
   `SELECT tenant, username, kind FROM qodstate_user WHERE tenant IS NOT NULL AND lower(kind) = 'staff'`
   must return nothing. Change the kind of any such row first (`qod user update --kind user`, or an
   `UPDATE` of the row).
+- A `QOD_ADMIN_KIND` other than `admin` (any case, surrounding spaces allowed) now refuses boot,
+  naming the setting: the seeded accounts have no tenant, so only kind `admin` makes them
+  superusers.
 - A tenant-less account whose kind is not `admin` (one seeded with `QOD_ADMIN_KIND=user`, one
   created with `qod user create --superuser` on an earlier release, which sent kind `user`, or a
   superuser demoted earlier) loses data access with this release. Its refusal reads like an

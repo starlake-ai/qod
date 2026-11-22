@@ -11,6 +11,7 @@ import ai.starlake.quack.ondemand.state.{
   EmailFormat,
   FederatedSourceOps,
   SessionSecretStore,
+  UserKind,
   UserStore
 }
 import com.typesafe.scalalogging.LazyLogging
@@ -403,6 +404,20 @@ object BootPreflight extends LazyLogging:
       "QOD_NODE_ALLOW_LOCAL_FILES=false (quack-on-demand.nodeFiles.allowLocal) turns local files " +
       "off on every node: no node could read a tenant's local folder. Unset one of the two."
 
+  /** Refuses a seeded admin kind that would not make a superuser: the seeded accounts have no
+    * tenant, and a tenant-less account is a superuser only with kind `admin` (issue #274). Reads
+    * the configuration alone, before any socket opens.
+    */
+  def checkAdminKind(raw: String): Either[String, Unit] =
+    UserKind.normalize(raw) match
+      case Right(UserKind.Admin) => Right(())
+      case _                     =>
+        Left(
+          s"QOD_ADMIN_KIND (quack-on-demand.admin.kind) is '$raw', but it must be 'admin': the " +
+            "seeded accounts have no tenant, and a tenant-less account is a superuser only with " +
+            "kind admin, so any other kind would seed accounts that cannot sign in as superusers"
+        )
+
   /** Refuses settings that contradict each other about a node's local files. Reads the
     * configuration alone, before any socket opens. The default data path is not judged: rows may
     * all name their own.
@@ -705,12 +720,14 @@ object BootPreflight extends LazyLogging:
             tenant = None,
             username = name,
             plaintext = admin.password,
-            kind = admin.kind,
+            kind = UserKind.normalize(admin.kind).getOrElse(admin.kind),
             email = Some(seedEmail),
             insertOnly = true
           )
           if out.inserted then
-            logger.info(s"admin user created: $name (id=${out.id}, kind=${admin.kind})")
+            logger.info(
+              s"admin user created: $name (id=${out.id}, kind=${UserKind.normalize(admin.kind).getOrElse(admin.kind)})"
+            )
             None
           else if passwordFromEnv then
             val msg =
