@@ -1181,8 +1181,8 @@ behavior. See docs/superpowers/specs/2026-07-18-manager-module-spi-design.md.
 ### Platform staff and console pages (issue #274)
 
 A **staff** user is a `qodstate_user` row of kind `staff` with tenant NULL (a CHECK constraint,
-`ck_qodstate_user_staff_tenantless`, in changeset `0061-platform-roles`, plus the store's own
-validation, `400 invalid_kind`). It holds platform roles, never tenant roles or groups. Three tables
+`ck_qodstate_user_staff_tenantless`, in changeset `0061-platform-roles`, which the supervisor
+checks first, `400 invalid_kind`). It holds platform roles, never tenant roles or groups. Three tables
 (`0061`): `qodstate_platform_role` (names unique ignoring case, a `lower(name)` index),
 `qodstate_platform_role_permission` and `qodstate_user_platform_role`, both cascading. A role
 bundles permission names that manager modules declare, `<module name>.<rest>` over `[a-z0-9._]`;

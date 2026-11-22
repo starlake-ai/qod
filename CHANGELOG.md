@@ -25,7 +25,7 @@
 ### Changed
 
 - `qod user create --superuser` now creates an account of kind `admin`. Earlier releases created
-  kind `user`, which was never a superuser.
+  kind `user`, which was not a superuser on the management plane.
 
 ### Added
 
