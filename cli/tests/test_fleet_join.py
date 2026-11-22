@@ -1052,31 +1052,39 @@ def test_an_accepted_heartbeat_is_recorded_for_qod_healthcheck(tmp_path):
     member = make_member(http, lambda *a, **k: FakeProc(), tmp_path)
     member.run_once()
     rec = json.loads((tmp_path / "state" / fleet_join.HEARTBEAT_FILE).read_text())
-    assert rec["pid"] == os.getpid() and rec["intervalSec"] == 7
+    assert rec["pid"] == os.getpid() and rec["intervalSec"] == 7 and rec["acceptedAt"] is not None
     assert fleet_join.worker_health(tmp_path / "state", now=rec["at"] + 1, pid_alive=lambda p: True) is None
 
 
-def test_a_refused_heartbeat_is_not_recorded(tmp_path):
-    http = FakeHttp([FakeResponse(401, {"error": "invalid_token"})])
+def test_a_refused_or_lost_heartbeat_is_recorded_too_so_a_manager_outage_leaves_workers_healthy(tmp_path):
+    def boom(*a, **k):
+        raise httpx.ConnectError("refused")
+    http = FakeHttp([FakeResponse(200, {"heartbeatSec": 5, "assignment": None}), FakeResponse(503, {"error": "busy"})])
     member = make_member(http, lambda *a, **k: FakeProc(), tmp_path)
-    member.connected = True  # past the first contact, so a refusal is retried, not fatal
     member.run_once()
-    assert not (tmp_path / "state" / fleet_join.HEARTBEAT_FILE).exists()
+    accepted = json.loads((tmp_path / "state" / fleet_join.HEARTBEAT_FILE).read_text())["acceptedAt"]
+    member.run_once()  # 503
+    member.http.post = boom
+    member.run_once()  # unreachable
+    rec = json.loads((tmp_path / "state" / fleet_join.HEARTBEAT_FILE).read_text())
+    assert rec["acceptedAt"] == accepted and rec["intervalSec"] == BACKOFF_MIN_S
+    assert fleet_join.worker_health(tmp_path / "state", now=rec["at"] + 1, pid_alive=lambda p: True) is None
 
 
 def test_worker_health_names_why_a_worker_is_unhealthy(tmp_path):
     state = tmp_path / "state"
     state.mkdir()
-    assert "no accepted heartbeat yet" in fleet_join.worker_health(state)
+    assert "no heartbeat yet" in fleet_join.worker_health(state)
     (state / fleet_join.HEARTBEAT_FILE).write_text("{not json")
     assert "cannot read" in fleet_join.worker_health(state)
     (state / fleet_join.HEARTBEAT_FILE).write_text(json.dumps({"at": 1000.0, "pid": 4242, "intervalSec": 5}))
     assert "not running" in fleet_join.worker_health(state, now=1001.0, pid_alive=lambda p: False)
-    # Three intervals, never under 30 s.
-    assert fleet_join.worker_health(state, now=1029.0, pid_alive=lambda p: True) is None
-    assert "31s ago (limit 30s)" in fleet_join.worker_health(state, now=1031.0, pid_alive=lambda p: True)
-    (state / fleet_join.HEARTBEAT_FILE).write_text(json.dumps({"at": 1000.0, "pid": 4242, "intervalSec": 20}))
+    # Three waits plus the request timeout each, never under 60 s.
     assert fleet_join.worker_health(state, now=1059.0, pid_alive=lambda p: True) is None
+    assert "61s (limit 60s)" in fleet_join.worker_health(state, now=1061.0, pid_alive=lambda p: True)
+    (state / fleet_join.HEARTBEAT_FILE).write_text(json.dumps({"at": 1000.0, "pid": 4242, "intervalSec": 30}))
+    assert fleet_join.worker_health(state, now=1119.0, pid_alive=lambda p: True) is None
+    assert "121s (limit 120s)" in fleet_join.worker_health(state, now=1121.0, pid_alive=lambda p: True)
 
 
 def test_the_spill_sweep_removes_only_the_spill_folders_a_node_makes(tmp_path):

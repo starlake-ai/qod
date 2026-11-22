@@ -139,9 +139,10 @@
 ### Added
 
 - `qod healthcheck manager` and `qod healthcheck worker`, the image's container healthchecks: exit
-  0 when the manager's `/ready` answers 200, or when `qod fleet join` runs and its last heartbeat
-  was accepted within three intervals (at least 30 s; it records each in `heartbeat.json` in its
-  state directory). They read no profile.
+  0 when the manager's `/ready` answers 200, or when `qod fleet join` runs and its heartbeat loop
+  ran within three waits (at least 60 s; it records each attempt in `heartbeat.json` in its state
+  directory), whatever the manager answered: a manager that is down or hung leaves its workers
+  healthy, as restarting them would only kill their nodes. They read no profile.
 - `qod fleet join --spill-dir DIR` (`QOD_FLEET_SPILL_DIR`): at start, removes the spill folders a
   node of an earlier run left in this server's own spill directory, as a node killed with its
   container leaves its folder behind. Only for a directory no other server shares. `--qod-node-bin`
