@@ -32,6 +32,7 @@ from .. import admin_password, launcher
 from ..config import load_start_env
 from ._launch import resolve_jar, resolve_java
 from ..output import render
+from ..registry import covers
 from ._run import call
 from .status import _embedded_postgres_port, _tcp_open
 
@@ -150,6 +151,7 @@ def _unexpected(why: str) -> typer.Exit:
 
 
 @app.command("security-audit")
+@covers("GET", "/api/security/audit")
 def security_audit(
     ctx: typer.Context,
     fail_on: List[str] = typer.Option(

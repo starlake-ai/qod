@@ -1,7 +1,6 @@
 package ai.starlake.quack.module
 
 import ai.starlake.quack.docs.DocEndpoints
-import ai.starlake.quack.ondemand.api.SecurityAuditEndpoints
 import ai.starlake.quack.ondemand.module.ModuleSurfaces
 import ai.starlake.quack.spi.*
 import cats.effect.IO
@@ -33,7 +32,7 @@ class ModuleSurfacesSpec extends AnyFlatSpec with Matchers:
 
   /** What Main passes: every core endpoint's first segment after `api`, plus the reserved ones. */
   private val coreSegments =
-    ModuleSurfaces.apiSegments(DocEndpoints.all :+ SecurityAuditEndpoints.audit) ++
+    ModuleSurfaces.apiSegments(DocEndpoints.all) ++
       ModuleSurfaces.ReservedApiSegments
 
   private def validate(m: ManagerModule*) = ModuleSurfaces.validate(m.toList, coreSegments)

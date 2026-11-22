@@ -4123,6 +4123,40 @@ paths:
             application/scim+json:
               schema:
                 type: string
+  /api/security/audit:
+    get:
+      operationId: getApiSecurityAudit
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SecurityAuditResponse'
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: cookie
+            qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/tenant/list:
     get:
       operationId: getApiTenantList
@@ -11512,6 +11546,82 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/SchemaDiffNullability'
+    SecurityAuditResponse:
+      title: SecurityAuditResponse
+      type: object
+      required:
+      - generatedAt
+      - replica
+      - version
+      - summary
+      properties:
+        generatedAt:
+          type: string
+        replica:
+          type: string
+        version:
+          type: string
+        summary:
+          $ref: '#/components/schemas/SecurityAuditSummaryView'
+        findings:
+          type: array
+          items:
+            $ref: '#/components/schemas/SecurityFindingView'
+    SecurityAuditSummaryView:
+      title: SecurityAuditSummaryView
+      type: object
+      required:
+      - critical
+      - warn
+      - ok
+      - na
+      - error
+      properties:
+        critical:
+          type: integer
+          format: int32
+        warn:
+          type: integer
+          format: int32
+        ok:
+          type: integer
+          format: int32
+        na:
+          type: integer
+          format: int32
+        error:
+          type: integer
+          format: int32
+    SecurityFindingView:
+      title: SecurityFindingView
+      type: object
+      required:
+      - id
+      - area
+      - status
+      - title
+      - detail
+      - fix
+      - docs
+      properties:
+        id:
+          type: string
+        area:
+          type: string
+        status:
+          type: string
+        title:
+          type: string
+        detail:
+          type: string
+        fix:
+          type: string
+        settings:
+          type: array
+          items:
+            type: string
+        docs:
+          type: string
     SetMaxConcurrentRequest:
       title: SetMaxConcurrentRequest
       type: object
