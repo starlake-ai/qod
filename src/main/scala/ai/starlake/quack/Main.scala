@@ -2449,6 +2449,12 @@ object Main extends IOApp with LazyLogging:
           )
         ).flatMap { surfaces =>
           IO.delay(sup.setDeclaredPermissions(surfaces.permissions)) *>
+            // Stderr, never the logger, whose default level is ERROR.
+            IO.delay(
+              ai.starlake.quack.ondemand.rbac.PlatformPermissionReport
+                .lines(sup.listPlatformRoles(), surfaces.permissions.map(_.name).toSet)
+                .foreach(System.err.println)
+            ) *>
             IO.delay(buildManagerServer(surfaces))
         }.flatMap { mgr =>
           // The node listener first, then REST, released in the reverse order: one `use`.

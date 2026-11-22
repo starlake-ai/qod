@@ -5,7 +5,8 @@ import ai.starlake.quack.ondemand.state.{
   BuiltinRbac,
   ControlPlaneSnapshot,
   ControlPlaneStore,
-  FederatedSourceStore
+  FederatedSourceStore,
+  UserKind
 }
 import com.typesafe.scalalogging.LazyLogging
 
@@ -394,7 +395,13 @@ object ManifestExporter extends LazyLogging:
         email = u.email,
         roles = Nil,
         groups = Nil,
-        poolGrants = userPoolGrants
+        poolGrants = userPoolGrants,
+        // Only a staff row holds platform roles; any other row's edges are not exported, and the
+        // import clears them.
+        platformRoles =
+          if u.kind.equalsIgnoreCase(UserKind.Staff) then
+            store.listUserPlatformRoleIds(u.id).flatMap(store.getPlatformRole).map(_.name).sorted
+          else Nil
       )
     }
 
@@ -406,7 +413,12 @@ object ManifestExporter extends LazyLogging:
       tenants = tenants.map(_._1),
       roles = tenants.flatMap(_._2),
       groups = tenants.flatMap(_._3),
-      users = superusers ++ tenants.flatMap(_._4)
+      users = superusers ++ tenants.flatMap(_._4),
+      // Every stored permission, declared by a loaded module or not: a backup always restores.
+      platformRoles = store
+        .listPlatformRoles()
+        .sortBy(_.name)
+        .map(r => ManifestPlatformRole(r.name, r.description, r.permissions.toList.sorted))
     )
 
   /** `metastore` (of `tenant`'s `database`) without its keys outside

@@ -278,3 +278,16 @@ class ModuleSurfacesSpec extends AnyFlatSpec with Matchers:
     coreSegments should not contain "hosted"
     coreSegments should not contain "test-module"
   }
+
+  "PlatformPermissionReport.lines" should "name each stored permission no loaded module declares" in {
+    ai.starlake.quack.ondemand.rbac.PlatformPermissionReport.lines(
+      List(
+        ai.starlake.quack.ondemand.state
+          .PlatformRole("1", "support", None, Set("gone.module.x", "a.b"))
+      ),
+      Set("a.b")
+    ) shouldBe List(
+      "WARN: platform role 'support' grants 'gone.module.x', which no loaded module declares; " +
+        "it has no effect"
+    )
+  }

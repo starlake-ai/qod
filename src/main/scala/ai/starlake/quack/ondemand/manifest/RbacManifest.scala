@@ -31,7 +31,7 @@ final case class RbacManifest(
 object RbacManifest:
   private given Configuration     = Configuration.default.withDefaults
   given Codec[RbacManifest]       = ConfiguredCodec.derived
-  private val SectionsOutsideRbac = List("tenants", "users")
+  private val SectionsOutsideRbac = List("tenants", "users", "platformRoles")
   private val PoolGrantsField     = "poolGrants"
 
   /** A refused RBAC import or export: an HTTP 400 with this code. */

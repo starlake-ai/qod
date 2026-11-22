@@ -33,3 +33,26 @@ object PlatformPermissions:
             "are allowed"
         )
       else None
+
+/** Boot's report of stored permissions no loaded module declares (issue #274). Such a permission is
+  * kept, so a backup always restores and a module loaded again finds its roles intact, but it
+  * grants nothing while no module declares it.
+  */
+object PlatformPermissionReport:
+  /** One stderr `WARN:` line per stored permission outside `declared`, by role then permission. */
+  def lines(
+      roles: List[ai.starlake.quack.ondemand.state.PlatformRole],
+      declared: Set[String]
+  ): List[String] =
+    roles
+      .sortBy(_.name)
+      .flatMap(r =>
+        r.permissions
+          .diff(declared)
+          .toList
+          .sorted
+          .map(p =>
+            s"WARN: platform role '${r.name}' grants '$p', which no loaded module declares; it has " +
+              "no effect"
+          )
+      )
