@@ -2235,14 +2235,9 @@ object Main extends IOApp with LazyLogging:
       else logger.info("mcp: disabled (QOD_MCP_ENABLED=false); POST /mcp not mounted")
 
       // The first path segments after `api` that core serves or reserves: no module with a
-      // platform surface may take one as its name (ModuleSurfaces.validate). Every core endpoint
-      // ManagerServer serves under /api is in EndpointModules (DocEndpoints.all) except the
-      // undocumented security audit, added by hand; /data/v1 lies outside /api.
+      // platform surface may take one as its name (ModuleSurfaces.validate).
       val coreApiSegments: Set[String] =
-        ai.starlake.quack.ondemand.module.ModuleSurfaces.apiSegments(
-          ai.starlake.quack.docs.DocEndpoints.all :+
-            ai.starlake.quack.ondemand.api.SecurityAuditEndpoints.audit
-        ) ++ ai.starlake.quack.ondemand.module.ModuleSurfaces.ReservedApiSegments
+        ai.starlake.quack.ondemand.module.ModuleSurfaces.coreApiSegments
       // Reads the module surfaces (endpoints / publicPathPrefixes / staticMounts, and the
       // validated platform surfaces), so it MUST run after moduleStart; called from the IO chain
       // below.
