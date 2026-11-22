@@ -1,0 +1,338 @@
+#!/usr/bin/env bash
+# qod-host: day-two operations of a container install (README.md). Run as root.
+#
+#   qod-host status
+#   qod-host scale --workers N [--worker-size <cpus>cpu,<GiB>g] [--move]
+#   qod-host scale --remove NAME [--remove NAME ...] [--move]
+#   qod-host backup [--all] [--encrypt-to AGE_RECIPIENT]
+#   qod-host render
+#   qod-host uninstall [--purge]
+#   qod-host health-restart          (run by qod-health.timer)
+set -euo pipefail
+HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+# shellcheck source=lib.sh
+source "$HERE/lib.sh"
+
+usage() { sed -n '2,10p' "$(readlink -f "$0")" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+
+# ---------------------------------------------------------------------------------------------
+# status
+# ---------------------------------------------------------------------------------------------
+cmd_status() {
+  load_host_env
+  local version ids free=0 busy=0
+  read -ra ids <<<"$WORKER_IDS"
+  version="$(grep -E '^QOD_VERSION=' "$VERSION_ENV" | cut -d= -f2-)"
+  echo "QoD $version ($QOD_IMAGE), host $HOST_NAME: $(host_cpus) vCPU, $(host_mem_gib) GiB"
+  echo "manager: $(container_state qod-manager)"
+  [[ "$POSTGRES" == bundled ]] && echo "postgres (bundled): $(container_state qod-postgres)"
+  local servers; servers="$(fleet_servers 2>/dev/null || true)"
+  echo
+  printf '%-22s %-18s %-9s %-11s %-8s %s\n' WORKER CONTAINER APPROVAL LIVENESS DRAINED NODE
+  local i name line approval liveness drained node pool
+  for i in "${ids[@]}"; do
+    name="$(worker_name "$i")"
+    line="$(awk -F'\t' -v n="$name" '$1 == n' <<<"$servers")"
+    IFS=$'\t' read -r _ approval liveness drained node pool <<<"${line:-$name	-	-	-	-	-}"
+    if [[ "$node" == "-" ]]; then free=$((free + 1)); else busy=$((busy + 1)); fi
+    printf '%-22s %-18s %-9s %-11s %-8s %s\n' "$name" "$(container_state "$(worker_container "$i")")" \
+      "$approval" "$liveness" "$drained" "$([[ "$node" == - ]] && echo - || echo "$node ($pool)")"
+  done
+  echo
+  echo "workers: ${#ids[@]} ($WORKER_CPUS CPU, ${WORKER_MEM_GIB} GiB each), $busy running a node, $free free"
+  (( free >= 1 )) || echo "WARN: no free worker: maintenance and merges wait (NoFreeServer) until one frees"
+
+  local pools; pools="$(api GET /api/pool/list 2>/dev/null || echo '{"pools":[]}')"
+  echo
+  printf '%-40s %-8s %-6s %s\n' POOL STATUS NODES PENDING
+  jq -r '.pools[] | [(.tenant + "/" + .tenantDb + "/" + .pool), .status, (.nodes | length | tostring), (if .pending > 0 then (.pending|tostring) + " (" + (.pendingReason // "?") + ")" else "-" end)] | @tsv' <<<"$pools" |
+    while IFS=$'\t' read -r p s n pe; do printf '%-40s %-8s %-6s %s\n' "$p" "$s" "$n" "$pe"; done
+  local pending branches
+  pending="$(jq '[.pools[].pending] | add // 0' <<<"$pools")"
+  branches="$(jq '[.pools[] | select(.pool | startswith("__br_"))] | length' <<<"$pools")"
+  echo
+  echo "live branches: $branches (each holds a worker for its whole TTL)"
+  if (( pending > 0 )); then
+    local want=$(( ${#ids[@]} + pending + (free > 0 ? 0 : 1) ))
+    echo "pending: $pending node slot(s) wait for a free worker. Fill them, keeping one spare:"
+    echo "  qod-host scale --workers $want"
+    if [[ -n "$(check_sizing "$(host_cpus)" "$(host_mem_gib)" "$want" "$WORKER_CPUS" "$WORKER_MEM_GIB")" ]]; then
+      echo "  $want workers of $WORKER_CPUS CPU and ${WORKER_MEM_GIB} GiB do not fit this host: add --worker-size with a smaller size, or add a host"
+    fi
+  fi
+}
+
+container_state() {
+  docker inspect "$1" --format '{{.State.Status}}{{if .State.Health}}/{{.State.Health.Status}}{{end}}' 2>/dev/null || echo absent
+}
+
+# ---------------------------------------------------------------------------------------------
+# scale
+# ---------------------------------------------------------------------------------------------
+server_line() { awk -F'\t' -v n="$1" '$1 == n' <<<"$(fleet_servers)"; }
+server_node() { local l; l="$(server_line "$1")"; [[ -n "$l" ]] && cut -f5 <<<"$l" || echo -; }
+server_pool() { local l; l="$(server_line "$1")"; [[ -n "$l" ]] && cut -f6 <<<"$l" | awk -F/ '{print $NF}' || echo -; }
+
+# wait_moved NODE_ID FROM_SERVER: until another server runs NODE_ID.
+wait_moved() {
+  local node="$1" from="$2" _
+  for _ in $(seq 1 150); do
+    if api GET /api/fleet/servers | jq -e --arg n "$node" --arg f "$from" \
+        '.servers | any(.name != $f and .assignedNodeId == $n and .nodeState == "running")' >/dev/null; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+server_op() { jq -n --arg n "$2" '{name: $n}' | api POST "/api/fleet/server/$1" >/dev/null; }
+
+# drain_and_move NAME: drain the server and, when it runs a node, wait until reconcile restarted
+# that node on another free worker.
+drain_and_move() {
+  local name="$1" node
+  node="$(server_node "$name")"
+  server_op drain "$name"
+  if [[ "$node" != - ]]; then
+    say "$name: draining, waiting for $node to restart on another worker"
+    wait_moved "$node" "$name" || die "$node did not restart elsewhere within 5 minutes: qod-host status (is a worker free?)"
+  fi
+}
+
+# A maintenance or merge node: never moved, as moving it would end the run it serves.
+runs_ephemeral() { local p; p="$(server_pool "$1")"; [[ "$p" == __maint || "$p" == __merge ]]; }
+
+wait_approved() {
+  local name _
+  for _ in $(seq 1 120); do
+    local all=1
+    for name in "$@"; do
+      server_line "$name" | awk -F'\t' '$2 == "approved" && $3 == "reachable" { ok = 1 } END { exit !ok }' || all=0
+    done
+    (( all )) && return 0
+    sleep 2
+  done
+  return 1
+}
+
+cmd_scale() {
+  need_root; load_host_env
+  local n="" size="" move=0 named=()
+  while (( $# )); do
+    case "$1" in
+      --workers) n="$2"; shift 2 ;;
+      --worker-size) size="$2"; shift 2 ;;
+      --remove) named+=("$2"); shift 2 ;;
+      --move) move=1; shift ;;
+      *) die "unknown argument '$1' (qod-host scale --workers N [--worker-size Xcpu,Yg] [--remove NAME] [--move])" ;;
+    esac
+  done
+  local ids cur
+  read -ra ids <<<"$WORKER_IDS"
+  cur=${#ids[@]}
+  # --remove NAME: these workers, whatever runs on them (the only case --move is for: picked by
+  # count, free workers go first, and a busy one is reached only when no capacity is left).
+  local named_ids=() nm k found
+  for nm in "${named[@]}"; do
+    found=""
+    for k in "${ids[@]}"; do [[ "$(worker_name "$k")" == "$nm" ]] && found="$k"; done
+    [[ -n "$found" ]] || die "no worker named $nm on this host (qod-host status)"
+    named_ids+=("$found")
+  done
+  if (( ${#named_ids[@]} )); then
+    [[ -z "$n" || "$n" == $((cur - ${#named_ids[@]})) ]] || die "--remove of ${#named_ids[@]} worker(s) leaves $((cur - ${#named_ids[@]})), not --workers $n"
+    n=$((cur - ${#named_ids[@]}))
+  fi
+  [[ -n "$n" ]] || n="$cur"
+  [[ "$n" =~ ^[0-9]+$ ]] || die "--workers wants a number"
+  local new_cpus="$WORKER_CPUS" new_mem="$WORKER_MEM_GIB"
+  [[ -n "$size" ]] && read -r new_cpus new_mem <<<"$(parse_worker_size "$size")"
+  local problems
+  problems="$(check_sizing "$(host_cpus)" "$(host_mem_gib)" "$n" "$new_cpus" "$new_mem")"
+  [[ -z "$problems" ]] || { while IFS= read -r p; do say "refused: $p"; done <<<"$problems"; exit 1; }
+
+  local i name node busy=0
+  for i in "${ids[@]}"; do [[ "$(server_node "$(worker_name "$i")")" != - ]] && busy=$((busy + 1)); done
+
+  # --- remove ---------------------------------------------------------------------------------
+  if (( n < cur )); then
+    (( n - busy >= 1 )) || die "refused: $n workers cannot hold the $busy nodes that run now plus a spare"
+    local free_ids=() busy_ids=() remove=()
+    for (( k = ${#ids[@]} - 1; k >= 0; k-- )); do
+      i="${ids[$k]}"
+      if [[ "$(server_node "$(worker_name "$i")")" == - ]]; then free_ids+=("$i"); else busy_ids+=("$i"); fi
+    done
+    if (( ${#named_ids[@]} )); then remove=("${named_ids[@]}")
+    else for i in "${free_ids[@]}" "${busy_ids[@]}"; do (( ${#remove[@]} < cur - n )) && remove+=("$i"); done; fi
+    for i in "${remove[@]}"; do
+      name="$(worker_name "$i")"; node="$(server_node "$name")"
+      if [[ "$node" != - ]]; then
+        runs_ephemeral "$name" && die "refused: $name runs $node (maintenance or a merge): retry once it ends"
+        (( move )) || die "refused: $name runs $node; pass --move to restart it on another worker first"
+      fi
+    done
+    for i in "${remove[@]}"; do
+      name="$(worker_name "$i")"
+      drain_and_move "$name"
+      WORKER_IDS="$(tr ' ' '\n' <<<"$WORKER_IDS" | grep -vx "$i" | tr '\n' ' ' | sed 's/ $//')"
+      write_host_env; render_compose
+      compose up -d --remove-orphans >/dev/null
+      server_op remove "$name"
+      rm -rf -- "${SPILL_ROOT:?}/w$i"
+      say "$name removed"
+    done
+    read -ra ids <<<"$WORKER_IDS"
+  fi
+
+  # --- resize ---------------------------------------------------------------------------------
+  if [[ "$new_cpus" != "$WORKER_CPUS" || "$new_mem" != "$WORKER_MEM_GIB" ]]; then
+    local free_first=() later=()
+    for i in "${ids[@]}"; do
+      if [[ "$(server_node "$(worker_name "$i")")" == - ]]; then free_first+=("$i"); else later+=("$i"); fi
+    done
+    for i in "${later[@]}"; do
+      runs_ephemeral "$(worker_name "$i")" && die "refused: $(worker_name "$i") runs a maintenance or merge node: retry once it ends"
+    done
+    WORKER_CPUS="$new_cpus" WORKER_MEM_GIB="$new_mem"
+    write_host_env; render_compose
+    # One at a time, free workers first, so a moved node always finds a worker already resized.
+    for i in "${free_first[@]}" "${later[@]}"; do
+      name="$(worker_name "$i")"
+      drain_and_move "$name"
+      compose up -d --no-deps --wait "$(worker_service "$i")" >/dev/null
+      server_op undrain "$name"
+      wait_approved "$name" || die "$name did not come back: qod-host status"
+      say "$name resized to $WORKER_CPUS CPU, ${WORKER_MEM_GIB} GiB"
+    done
+  fi
+
+  # --- add ------------------------------------------------------------------------------------
+  if (( n > ${#ids[@]} )); then
+    local max=0 added=() services=()
+    for i in "${ids[@]}"; do (( i > max )) && max="$i"; done
+    for (( i = max + 1; ${#ids[@]} + ${#added[@]} < n; i++ )); do
+      [[ -z "$(ss -Hltn "sport = :$(worker_port "$i")" 2>/dev/null)" ]] || die "port $(worker_port "$i") is in use"
+      added+=("$i"); services+=("$(worker_service "$i")")
+      make_spill_dir "$i"
+    done
+    WORKER_IDS="$(echo "${ids[@]}" "${added[@]}" | xargs)"
+    write_host_env; render_compose
+    compose up -d --no-deps --wait "${services[@]}" >/dev/null
+    local names=(); for i in "${added[@]}"; do names+=("$(worker_name "$i")"); done
+    wait_approved "${names[@]}" || die "the new workers are not approved and reachable: qod-host status"
+    say "added ${names[*]}; reconcile fills any pending slot"
+  fi
+}
+
+# ---------------------------------------------------------------------------------------------
+# backup
+# ---------------------------------------------------------------------------------------------
+cmd_backup() {
+  need_root; load_host_env
+  local all=0 recipient="" keep="${QOD_BACKUP_KEEP:-7}"
+  while (( $# )); do
+    case "$1" in
+      --all) all=1; shift ;;
+      --encrypt-to) recipient="$2"; shift 2 ;;
+      *) die "unknown argument '$1' (qod-host backup [--all] [--encrypt-to AGE_RECIPIENT])" ;;
+    esac
+  done
+  [[ -z "$recipient" ]] || command -v age >/dev/null || die "--encrypt-to needs age (https://age-encryption.org) on this host"
+  local ts file; ts="$(date -u +%Y%m%dT%H%M%SZ)"
+  umask 077
+  install -d -m 0700 "$BACKUP_DIR"
+  if [[ "$POSTGRES" == bundled ]]; then
+    if (( all )); then
+      file="$BACKUP_DIR/qod-all-$ts.sql.gz"
+      docker exec qod-postgres pg_dumpall -U postgres -h 127.0.0.1 | gzip > "$file"
+    else
+      file="$BACKUP_DIR/qod-$ts.dump"
+      docker exec qod-postgres pg_dump -Fc -U postgres -h 127.0.0.1 qod > "$file"
+    fi
+  else
+    (( all )) && die "--all dumps every database of the bundled PostgreSQL only; back up an external server with its own tools"
+    file="$BACKUP_DIR/qod-$ts.dump"
+    local envf; envf="$(mktemp)"
+    awk -F= '/^QOD_PG_HOST=/ {print "PGHOST=" substr($0, index($0,"=")+1)}
+             /^QOD_PG_PORT=/ {print "PGPORT=" substr($0, index($0,"=")+1)}
+             /^QOD_PG_USER=/ {print "PGUSER=" substr($0, index($0,"=")+1)}
+             /^QOD_PG_PASSWORD=/ {print "PGPASSWORD=" substr($0, index($0,"=")+1)}
+             /^QOD_PG_DBNAME=/ {print "PGDATABASE=" substr($0, index($0,"=")+1)}' "$QOD_ENV" > "$envf"
+    grep -q '^PGDATABASE=' "$envf" || echo PGDATABASE=qod >> "$envf"
+    docker run --rm --network host --env-file "$envf" --entrypoint pg_dump \
+      "$QOD_IMAGE:$(grep -E '^QOD_VERSION=' "$VERSION_ENV" | cut -d= -f2-)" -Fc > "$file" || { rm -f "$envf" "$file"; die "pg_dump failed"; }
+    rm -f "$envf"
+  fi
+  chmod 600 "$file"
+  [[ -s "$file" ]] || die "the dump $file is empty"
+  say "dumped to $file"
+  if [[ -n "$recipient" ]]; then
+    age -r "$recipient" -o "$file.age" "$file"
+    chmod 600 "$file.age"
+    say "encrypted copy: $file.age (only this copy may leave the host)"
+  fi
+  # Keep the $keep most recent of each kind.
+  local kind
+  for kind in 'qod-2*.dump' 'qod-all-*.sql.gz'; do
+    # shellcheck disable=SC2012,SC2086  # $kind is a glob on purpose
+    { ls -1t "$BACKUP_DIR"/$kind 2>/dev/null || true; } | tail -n +"$((keep + 1))" | while read -r old; do rm -f -- "$old" "$old.age"; done
+  done
+}
+
+# ---------------------------------------------------------------------------------------------
+# uninstall
+# ---------------------------------------------------------------------------------------------
+cmd_uninstall() {
+  need_root
+  local purge=0
+  [[ "${1:-}" == --purge ]] && purge=1
+  local host_name="" image=""
+  if [[ -r "$HOST_ENV" ]]; then
+    load_host_env; host_name="$HOST_NAME"
+    # Only the tag this host ran: other tags of the repository may serve something else.
+    image="$QOD_IMAGE:$(grep -E '^QOD_VERSION=' "$VERSION_ENV" 2>/dev/null | cut -d= -f2-)"
+  fi
+  if (( purge )); then
+    [[ -t 0 ]] || die "--purge deletes $ETC and $VAR (the control plane too, with the bundled PostgreSQL): run it from a terminal"
+    printf 'This deletes %s, %s and %s. Type the host name (%s) to confirm: ' "$ETC" "$VAR" "${SPILL_ROOT:-the spill folders}" "$host_name" >&2
+    local answer; read -r answer
+    [[ -n "$host_name" && "$answer" == "$host_name" ]] || die "not confirmed; nothing was deleted"
+  fi
+  systemctl disable --now qod-health.timer qod-backup.timer qod.service 2>/dev/null || true
+  [[ -r "$COMPOSE_FILE" ]] && compose down --remove-orphans || true
+  for u in qod.service qod-health.service qod-health.timer qod-backup.service qod-backup.timer; do rm -f "$UNIT_DIR/$u"; done
+  systemctl daemon-reload
+  rm -f /usr/local/sbin/qod-host
+  if (( purge )); then
+    rm -rf -- "${SPILL_ROOT:?}" "$VAR" "$ETC" "$HOST_DIR"
+    [[ -n "$image" && "$image" != *: ]] && docker image rm "$image" >/dev/null 2>&1 || true
+    say "purged"
+  else
+    rm -rf -- "$HOST_DIR"
+    say "removed the containers and units; kept $ETC, $VAR, the spill folders and the image (--purge removes them)"
+  fi
+}
+
+# ---------------------------------------------------------------------------------------------
+# health-restart: Docker marks a container unhealthy and never restarts it. A hung JVM cannot act
+# on SIGTERM, so waiting out its 75 s grace gains nothing: 10 s, then SIGKILL.
+# ---------------------------------------------------------------------------------------------
+cmd_health_restart() {
+  local c
+  for c in $(docker ps --filter "label=com.docker.compose.project=$PROJECT" --filter health=unhealthy --format '{{.Names}}'); do
+    say "$c is unhealthy, restarting it"
+    docker restart -t 10 "$c" >/dev/null
+  done
+}
+
+case "${1:-}" in
+  status) shift; cmd_status "$@" ;;
+  scale) shift; cmd_scale "$@" ;;
+  backup) shift; cmd_backup "$@" ;;
+  render) need_root; load_host_env; render_compose; say "rendered $COMPOSE_FILE" ;;
+  uninstall) shift; cmd_uninstall "$@" ;;
+  health-restart) cmd_health_restart ;;
+  -h|--help|"") usage 0 ;;
+  *) usage 1 ;;
+esac

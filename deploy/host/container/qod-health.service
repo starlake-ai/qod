@@ -1,0 +1,7 @@
+[Unit]
+Description=Restart QoD containers Docker reports unhealthy
+After=qod.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/qod/host/qod-host health-restart

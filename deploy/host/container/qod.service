@@ -1,0 +1,19 @@
+[Unit]
+Description=QoD: the manager and its fleet workers (docker compose)
+Documentation=file:///opt/qod/host/README.md
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# --wait: up returns once every container is healthy (qod healthcheck manager|worker).
+ExecStart=/usr/bin/docker compose -p qod -f /etc/qod/compose.yaml --env-file /etc/qod/version.env up -d --wait --remove-orphans
+ExecStop=/usr/bin/docker compose -p qod -f /etc/qod/compose.yaml --env-file /etc/qod/version.env down
+# The manager drains running statements for up to 60 s, each worker stops its node for up to 60 s.
+TimeoutStartSec=900
+TimeoutStopSec=300
+
+[Install]
+WantedBy=multi-user.target

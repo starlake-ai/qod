@@ -1,5 +1,8 @@
 # One manager on one Linux host, with side-by-side versions
 
+To run QoD on one host as containers instead (the manager and its fleet workers from the one
+image, under Docker), see [container/](container/README.md).
+
 This folder runs the quack-on-demand manager under systemd with every installed release side by
 side and one pin file choosing which one runs. Switching versions, and switching back, is "write
 the pin, restart": no unit edit, no `daemon-reload`, and no network at restart.

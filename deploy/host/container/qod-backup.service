@@ -1,0 +1,7 @@
+[Unit]
+Description=Dump the QoD control-plane database (bundled PostgreSQL)
+After=qod.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/qod/host/qod-host backup
