@@ -24,7 +24,9 @@ final case class RbacUser(
     // SCIM 2.0 externalId: the provisioning IdP's identifier, set only through the
     // /api/scim surface (never by REST/CLI/manifest). None = not IdP-managed.
     externalId: Option[String] = None
-)
+):
+  /** [[UserKind.isSuperuser]] of this row. */
+  def isSuperuser: Boolean = UserKind.isSuperuser(tenant, kind)
 
 /** The account kinds a row may hold, and the one spelling each is stored under. */
 object UserKind:
@@ -36,6 +38,13 @@ object UserKind:
     */
   val Staff: String    = "staff"
   val All: Set[String] = Set(Admin, User, Staff)
+
+  /** A row is a superuser exactly when it has no tenant and its kind is `admin` (any case). The one
+    * definition: a tenant-less row of another kind (a demoted superuser, a platform `staff` row) is
+    * never a superuser.
+    */
+  def isSuperuser(tenant: Option[String], kind: String): Boolean =
+    tenant.isEmpty && kind.trim.equalsIgnoreCase(Admin)
 
   /** `raw` trimmed and lowercased when it names a kind; else why not. Every writer stores the
     * normalized value: a guard that compares a trimmed value while the row keeps the raw one (`"

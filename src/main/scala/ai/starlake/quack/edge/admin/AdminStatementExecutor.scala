@@ -8,7 +8,8 @@ import ai.starlake.quack.ondemand.state.{
   RbacRole,
   RbacUser,
   RoleColumnPolicy,
-  RoleRowPolicy
+  RoleRowPolicy,
+  UserKind
 }
 import ai.starlake.quack.ondemand.{PoolSupervisor, SupervisorError}
 import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
@@ -140,7 +141,8 @@ final class AdminStatementExecutor(
           case None    => Left(RouterFailure.Internal(s"unknown tenant '${poolKey.tenant}'"))
           case Some(t) =>
             val superuser   = e.user.tenant.isEmpty
-            val tenantAdmin = e.user.kind == "admin" && e.user.tenant.contains(t.id)
+            val tenantAdmin =
+              e.user.kind.equalsIgnoreCase(UserKind.Admin) && e.user.tenant.contains(t.id)
             if superuser || tenantAdmin then Right(Ctx(t.id, poolKey.tenant, superuser, user))
             else Left(RouterFailure.AccessDenied("admin_required"))
 

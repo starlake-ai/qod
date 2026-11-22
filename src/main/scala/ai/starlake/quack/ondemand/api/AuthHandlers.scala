@@ -813,7 +813,7 @@ final class AuthHandlers(
       case LoginRealm.Tenant(t) if !verifiedRow => authenticated.copy(tenant = Some(t))
       case _                                    => authenticated
 
-    val superuser = grants.exists(g => g.tenant.isEmpty && g.kind.equalsIgnoreCase("admin"))
+    val superuser                      = grants.exists(_.isSuperuser)
     val manageableTenants: Set[String] = grants.collect {
       case UserGrant(Some(t), r) if r.equalsIgnoreCase("admin") => t
     }.toSet

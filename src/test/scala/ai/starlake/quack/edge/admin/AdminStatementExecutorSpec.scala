@@ -281,6 +281,22 @@ class AdminStatementExecutorSpec extends AnyFlatSpec with Matchers:
     exec.execute("root", poolKey, "CREATE ROLE r1", superEff).unsafeRunSync().isRight shouldBe true
     run(exec, sup, "CREATE ROLE r2").isRight shouldBe true
 
+  it should "admit a tenant admin whose stored kind reads Admin, ignoring case" in:
+    val (sup, _, exec) = setup()
+    val mixedCaseAdmin = Some(
+      EffectiveSet(
+        user = RbacUser("u-admin", Some(tenantId(sup)), "boss", kind = "Admin"),
+        roles = Nil,
+        groups = Nil,
+        permissions = Nil,
+        poolPerms = Nil
+      )
+    )
+    exec
+      .execute("boss", poolKey, "CREATE ROLE r1", mixedCaseAdmin)
+      .unsafeRunSync()
+      .isRight shouldBe true
+
   it should "deny a tenant admin whose tenant is not the session tenant" in:
     val (sup, _, exec) = setup()
     // role = "admin", but tenant is some OTHER tenant id, not the session's poolKey.tenant.

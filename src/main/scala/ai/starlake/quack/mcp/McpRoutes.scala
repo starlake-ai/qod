@@ -229,8 +229,7 @@ object McpRoutes:
     * data plane and no MCP tool, so it is refused like a token that did not resolve.
     */
   def admitsPat(p: PatPrincipal): Boolean =
-    p.user.tenant.isDefined ||
-      p.user.kind.equalsIgnoreCase(ai.starlake.quack.ondemand.state.UserKind.Admin)
+    p.user.tenant.isDefined || p.user.isSuperuser
 
   /** The tools a token with a ceiling of `RO` may use. A tool not named here is closed to it, so a
     * new tool stays closed until someone decides it only reads. `run_sql` is here because the

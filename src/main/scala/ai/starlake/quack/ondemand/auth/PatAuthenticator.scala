@@ -160,7 +160,7 @@ final class PatAuthenticator(
       case UserGrant(Some(t), r) if r.equalsIgnoreCase("admin") => t
     }.toSet
     SessionScope(
-      superuser = user.tenant.isEmpty && user.kind.equalsIgnoreCase("admin"),
+      superuser = user.isSuperuser,
       manageableTenants = manageable
     )
 

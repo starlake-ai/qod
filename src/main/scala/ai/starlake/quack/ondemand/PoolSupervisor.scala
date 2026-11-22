@@ -4255,10 +4255,8 @@ final class PoolSupervisor(
               // before anything is written.
               val keepsSuperuser: Either[SupervisorError, Unit] =
                 val demotes = existedBefore && resolvedTenantId.isEmpty &&
-                  prior.exists(
-                    _.kind.trim.equalsIgnoreCase(ai.starlake.quack.ondemand.state.UserKind.Admin)
-                  ) &&
-                  kind != ai.starlake.quack.ondemand.state.UserKind.Admin
+                  prior.exists(_.isSuperuser) &&
+                  !ai.starlake.quack.ondemand.state.UserKind.isSuperuser(resolvedTenantId, kind)
                 if demotes then
                   Left(
                     SupervisorError.NameTaken(
@@ -5472,11 +5470,7 @@ final class PoolSupervisor(
                         s"user '$username' is not registered in tenant '${key.tenant}'"
                       )
                     )
-                  case Some(user)
-                      if user.tenant.isEmpty &&
-                        !user.kind.equalsIgnoreCase(
-                          ai.starlake.quack.ondemand.state.UserKind.Admin
-                        ) =>
+                  case Some(user) if user.tenant.isEmpty && !user.isSuperuser =>
                     // A tenant-less row is a data-plane superuser only when its kind is admin. Any
                     // other (a superuser demoted to kind user, a platform staff row) would get the
                     // empty EffectiveSet that bypasses ACL, RLS/CLS and the node decision. Same

@@ -20,6 +20,4 @@ final case class AuthorizedHandshake(
     effectiveSet: EffectiveSet
 ):
   /** Convenience: a superuser bypasses pool access AND the node's per-statement decision. */
-  def isSuperuser: Boolean =
-    user.tenant.isEmpty &&
-      user.kind.equalsIgnoreCase(ai.starlake.quack.ondemand.state.UserKind.Admin)
+  def isSuperuser: Boolean = user.isSuperuser
