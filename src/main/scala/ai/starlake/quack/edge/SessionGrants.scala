@@ -45,8 +45,8 @@ sealed trait SessionGrants:
 
 object SessionGrants extends LazyLogging:
 
-  /** Grants never resolved again: a superuser's (no tenant, no grants to follow) and the system
-    * principal's. Also what a spec binds when it builds a session without a handshake.
+  /** Grants never resolved again: the system principal's. Also what a spec binds when it builds a
+    * session without a handshake.
     */
   def fixed(set: EffectiveSet): SessionGrants = Fixed(set)
 
@@ -82,7 +82,10 @@ object SessionGrants extends LazyLogging:
     val generation = versions.generation
     gates(request).map { auth =>
       val set = auth.effectiveSet
-      if set.user.tenant.isEmpty || set.system then (auth, Fixed(set))
+      // A superuser's session follows too: its row has no grants, but it can be demoted, disabled
+      // or deleted, which moves this replica's policy generation (and a peer's, through the
+      // qod_rbac NOTIFY's restore), and the gates then refuse it on its next statement.
+      if set.system then (auth, Fixed(set))
       else
         val tenant = auth.poolKey.tenant
         // A version read under another key vouches for nothing: the first statement resolves again.
@@ -102,9 +105,11 @@ object SessionGrants extends LazyLogging:
   private final case class Snapshot(version: Long, generation: Long, set: EffectiveSet):
     def covers(v: Long, g: Long): Boolean = v <= version && g <= generation
 
-  /** A tenant principal's grants. `userId` is the row the handshake bound: the gates finding
-    * another row under the same name (the user deleted and created again) refuse the session, whose
-    * credential was checked against the first one.
+  /** A tenant principal's or a superuser's grants. `tenant` is the pool's tenant, whose version a
+    * superuser's set does not depend on but follows all the same (one gate call per move). `userId`
+    * is the row the handshake bound: the gates finding another row under the same name (the user
+    * deleted and created again) refuse the session, whose credential was checked against the first
+    * one.
     */
   private final class Following(
       request: AuthzRequest,
