@@ -253,6 +253,8 @@ object ManifestImporter extends LazyLogging:
       UserKind.normalize(u.kind).left.foreach(msg => errs += s"user '${u.username}': $msg")
     }
 
+    errs ++= platformRoleErrors(m)
+
     // Database kinds: apply() would refuse one only after the replace passes ran.
     m.tenants.foreach { t =>
       t.tenantDbs.foreach { d =>
@@ -309,6 +311,42 @@ object ManifestImporter extends LazyLogging:
     }
 
     if errs.isEmpty then Right(()) else Left(errs.toList)
+
+  /** The manifest's platform roles and staff users (issue #274), as the platform role endpoints and
+    * `user/create` judge them: a role name is non-blank, unpadded, not the reserved `superuser` and
+    * unique ignoring case; only a tenant-less staff user holds platform roles, a staff user has no
+    * tenant, and a staff user's role names one of the manifest's roles, ignoring case. Permissions
+    * are not checked against the loaded modules: a backup always restores, and boot reports a
+    * permission no module declares.
+    */
+  private def platformRoleErrors(m: ConfigManifest): List[String] =
+    val errs     = scala.collection.mutable.ListBuffer.empty[String]
+    val reserved = ai.starlake.quack.ondemand.rbac.PlatformPermissions.ReservedRoleName
+    val names    = m.platformRoles.map(_.name)
+    names.zipWithIndex.foreach { (n, i) =>
+      if n.trim.isEmpty then errs += s"platform role '$n': a platform role needs a name"
+      else if n != n.trim then
+        errs += s"platform role '$n': the name has leading or trailing spaces"
+      else if n.equalsIgnoreCase(reserved) then
+        errs += s"platform role '$n': the name '$reserved' is reserved: superusers hold every " +
+          "permission"
+      names.take(i).find(_.equalsIgnoreCase(n)).foreach { prev =>
+        val pair = List(prev, n).sorted.map(x => s"'$x'").mkString(" and ")
+        errs += s"platform roles $pair: names are unique ignoring case"
+      }
+    }
+    m.users.foreach { u =>
+      val staff = UserKind.normalize(u.kind).contains(UserKind.Staff)
+      if staff && u.tenant.isDefined then
+        errs += s"user '${u.username}': a staff user has no tenant"
+      if u.platformRoles.nonEmpty && (u.tenant.isDefined || !staff) then
+        errs += s"user '${u.username}': platform roles are held only by a tenant-less staff user"
+      u.platformRoles.filterNot(r => names.exists(_.equalsIgnoreCase(r))).foreach { r =>
+        errs += s"user '${u.username}' references platform role '$r', which the manifest's " +
+          "platformRoles do not define"
+      }
+    }
+    errs.toList
 
   /** One error per manifest tenant-db whose metastore holds a key outside
     * [[TenantDb.KnownMetastoreKeys]], naming the tenant, the tenant-db and every such key, never a
@@ -1017,6 +1055,24 @@ object ManifestImporter extends LazyLogging:
               }
       }
 
+      // 4b. Platform roles (issue #274), before the staff users naming them. Upserted by name,
+      //     ignoring case as the names are unique so: a stored match is updated and takes the
+      //     manifest's spelling, anything else is inserted. A stored role the manifest does not
+      //     list is left as it is.
+      val platformRoleIds: List[(String, String)] =
+        val stored = store.listPlatformRoles()
+        m.platformRoles.map { mr =>
+          val perms = mr.permissions.toSet
+          val id    = stored
+            .find(_.name.equalsIgnoreCase(mr.name))
+            .flatMap(r => store.updatePlatformRole(r.id, mr.name, mr.description, perms))
+            .getOrElse(store.insertPlatformRole(mr.name, mr.description, perms))
+            .id
+          mr.name -> id
+        }
+      def platformRoleId(name: String): Option[String] =
+        platformRoleIds.collectFirst { case (n, id) if n.equalsIgnoreCase(name) => id }
+
       // 5. Users (with password snapshot fallback).
       m.users.foreach { mu =>
         // Priority: an explicit passwordHash is applied verbatim (no
@@ -1078,6 +1134,16 @@ object ManifestImporter extends LazyLogging:
                   if !keepUserGroups.contains(gid) then store.removeUserGroup(userId, gid)
                 }
                 keepUserGroups.foreach(gid => store.addUserGroup(userId, gid))
+
+                // --- Platform roles: every tenant-less row the manifest lists gets exactly its
+                // manifest set, a staff row its roles (possibly none) and any other row none, so a
+                // row moved to staff never keeps edges it held before. validate() admitted only
+                // names of the manifest's roles.
+                if mu.tenant.isEmpty then
+                  val staff = UserKind.normalize(mu.kind).contains(UserKind.Staff)
+                  val ids   =
+                    if staff then mu.platformRoles.flatMap(platformRoleId).toSet else Set.empty
+                  store.setUserPlatformRoles(userId, ids)
 
                 // --- Pool permissions: full replace.
                 store.listPoolPermissionsForUser(userId).foreach { p =>

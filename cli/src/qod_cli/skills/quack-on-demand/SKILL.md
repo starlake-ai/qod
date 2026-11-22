@@ -799,6 +799,17 @@ qod membership user-role add --user-id <userId> --role-id <roleId>
 qod pool permission list --tenant acme
 qod pool permission grant --tenant acme --pool-id <poolId> --group-id <groupId>
 qod pool permission revoke <id>
+
+# Platform staff (superuser only). A staff user has no tenant and no data access, signs in through
+# the system login, and holds only the permissions of its platform roles. Manager modules declare
+# the permissions; only superusers manage platform roles. (qod user create --superuser makes kind admin.)
+qod platform permission list
+qod platform role create --name support --permission hosted.tenant.read --permission hosted.quota.extra
+qod user create --kind staff --username sam@example.com --platform-role support
+qod user update <USER_ID> --platform-role support --platform-role accounting   # replaces the set
+qod user update <USER_ID> --clear-platform-roles
+qod platform staff list
+qod platform role list
 ```
 
 ### Built-in roles and groups (every tenant)

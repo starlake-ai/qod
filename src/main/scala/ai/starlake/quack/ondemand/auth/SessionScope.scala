@@ -7,8 +7,17 @@ package ai.starlake.quack.ondemand.auth
   *
   * `superuser = false && manageableTenants.isEmpty` is intentionally rejected at login
   * (`admin_required`); the type allows it so tests can construct an "empty" scope.
+  *
+  * `platformPermissions`: the permissions of a staff caller's platform roles (issue #274), filled
+  * live by [[CredentialScopes]] (a session) or [[PatAuthenticator]] (a PAT); empty for every other
+  * caller. A superuser holds every permission without listing any, so read it through [[has]].
   */
-final case class SessionScope(superuser: Boolean, manageableTenants: Set[String])
+final case class SessionScope(
+    superuser: Boolean,
+    manageableTenants: Set[String],
+    platformPermissions: Set[String] = Set.empty
+):
+  def has(permission: String): Boolean = superuser || platformPermissions.contains(permission)
 
 object SessionScope:
   /** Convenience: a superuser scope (no tenant restriction). */

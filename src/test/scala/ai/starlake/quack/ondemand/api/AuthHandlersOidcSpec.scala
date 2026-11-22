@@ -254,7 +254,8 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
       audit = audit,
       events = events,
       starlakeNotifier = starlakeNotifier,
-      patSessionOf = _ => None
+      patSessionOf = _ => None,
+      enrichSession = s => Some(s)
     )
 
   // ---- helper: run a real startAuth + callback round-trip ----
@@ -408,7 +409,8 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
       authModeResolver =
         new ManagementAuthModeResolver(Map(acmeOidc.id -> acmeOidc).get, ManagementAuthMode.Db),
       oidc = Some(buildSvc("s4b")),
-      patSessionOf = _ => None
+      patSessionOf = _ => None,
+      enrichSession = s => Some(s)
     )
     handlers.authMode(None).unsafeRunSync().map(_.mode) shouldBe Right("db")
     handlers.authMode(Some("acme")).unsafeRunSync().map(_.mode) shouldBe Right("oidc")
@@ -557,6 +559,36 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
     location shouldBe "/ui/?error=admin_required"
     session.get.value shouldBe "" // no session set
   }
+
+  // Issue #274: a tenant-less staff row signs in through the system OIDC login too, as a staff
+  // session; a tenant admin stays refused there, staff row or not.
+  it should "mint a staff session on the system scope for a tenant-less staff row" in {
+    val directory                         = new RecordingDirectory(List(UserGrant(None, "staff")))
+    val (status, location, token, tokens) =
+      callbackWith(OidcScope.System, "/ui/", "s6-staff", directory.lookup)
+    status shouldBe StatusCode.Found
+    location shouldBe "/ui/"
+    val s = tokens.get(token).get
+    s.profile.role shouldBe "staff"
+    s.profile.tenant shouldBe None
+    s.scope.superuser shouldBe false
+    s.scope.manageableTenants shouldBe empty
+  }
+
+  it should "302 to /ui/?error=admin_required on the system scope for a tenant admin, with or without a staff row" in
+    Seq(
+      List(UserGrant(Some("acme"), "admin")),
+      List(UserGrant(None, "staff"), UserGrant(Some("acme"), "admin"))
+    ).zipWithIndex.foreach { (grants, i) =>
+      withClue(s"[$grants] ") {
+        val directory                    = new RecordingDirectory(grants)
+        val (status, location, token, _) =
+          callbackWith(OidcScope.System, "/ui/", s"s6-admin-$i", directory.lookup)
+        status shouldBe StatusCode.Found
+        location shouldBe "/ui/?error=admin_required"
+        token shouldBe ""
+      }
+    }
 
   // ================================================================
   // 7. oidcCallback with mismatched state cookie -> invalid_state
@@ -1088,7 +1120,8 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
       grantsForIdentity = (_, _, _) => Nil,
       authModeResolver = new ManagementAuthModeResolver(_ => None, ManagementAuthMode.Db),
       sqlToken = svc,
-      patSessionOf = _ => None
+      patSessionOf = _ => None,
+      enrichSession = s => Some(s)
     )
 
   private val sqlTokenDiscovery = new OidcDiscovery(httpGet =
@@ -1167,7 +1200,8 @@ class AuthHandlersOidcSpec extends AnyFlatSpec with Matchers:
       authModeResolver = new ManagementAuthModeResolver(loadTenant, ManagementAuthMode.Db),
       oidc = oidcSvc,
       sqlToken = sqlSvc,
-      patSessionOf = _ => None
+      patSessionOf = _ => None,
+      enrichSession = s => Some(s)
     )
 
   /** An SSO service whose stub IdP echoes `nonce`, and answers `idToken` at the token endpoint. */

@@ -4,7 +4,7 @@ import ai.starlake.quack.{FleetConfig, FlightConfig, ManagerConfig}
 import ai.starlake.quack.edge.{BoundedBody, ConnectionBudget}
 import ai.starlake.quack.ondemand.auth.ReadOnlyCeilingRoutes
 import ai.starlake.quack.ondemand.api._
-import ai.starlake.quack.ondemand.state.PatStore
+import ai.starlake.quack.ondemand.state.{PatStore, UserKind}
 import ai.starlake.quack.ondemand.telemetry.{
   AuditActions,
   AuditRateLimiter,
@@ -117,7 +117,21 @@ final class ManagerServer(
     tenantLocations: Option[TenantLocationHandlers] = None,
     // Users' own S3 credentials (profile/s3/*, self-scoped, on the profile allowlist; user/s3/*,
     // TenantScopeCheck inside the handler). None leaves the routes unmounted; Main always wires it.
-    s3Credentials: Option[UserS3CredentialHandlers] = None
+    s3Credentials: Option[UserS3CredentialHandlers] = None,
+    // The live staff row of a name and its platform permissions (issue #274,
+    // PoolSupervisor.staffPrincipal). The default answers nothing, so every staff session
+    // resolves to no session at all: closed.
+    staffPrincipal: String => Option[ai.starlake.quack.ondemand.rbac.StaffPrincipal] = _ => None,
+    // Path prefixes modules declare for staff callers (issue #274): a staff session or PAT reaches
+    // a module route only under one of these, matched on whole segments. Empty keeps every module
+    // route closed to staff.
+    moduleStaffPrefixes: Set[String] = Set.empty,
+    // Platform staff roles and staff users (issue #274, /api/platform/*, superuser-only). None
+    // leaves those routes unmounted; Main always wires it.
+    platform: Option[PlatformHandlers] = None,
+    // The modules' console pages (ModuleSurfaces.pages), listed by GET /api/console/pages, which is
+    // always mounted: with none, every caller reads an empty list.
+    consolePages: List[ai.starlake.quack.ondemand.module.ResolvedConsolePage] = Nil
 ) extends LazyLogging:
 
   // The bearer-credential lookups, composed session-first: the JWT verify is a
@@ -129,12 +143,16 @@ final class ManagerServer(
   // stopped resolving between the guard and the handler, is `SessionScope.NoAccess` (see
   // SessionScope.resolver). The guard itself does not use it; it resolves once through
   // `sessionOfToken`.
+  //
+  // Both come from the one resolver, CredentialScopes, which also checks a staff session against
+  // its live row (issue #274).
+  private val credentials =
+    new ai.starlake.quack.ondemand.auth.CredentialScopes(sessions, patAuth, staffPrincipal)
   private val scopeOfToken: ai.starlake.quack.ondemand.auth.SessionScope.Resolver =
-    ai.starlake.quack.ondemand.auth.SessionScope.resolver(t =>
-      sessions.scopeOf(t).orElse(patAuth.flatMap(_.scopeOf(t)))
-    )
-  private val sessionOfToken: String => Option[SessionTokenStore.Session] =
-    t => sessions.get(t).orElse(patAuth.flatMap(_.sessionOf(t)))
+    credentials.scopeOf
+  private val sessionOfToken: String => Option[SessionTokenStore.Session] = credentials.sessionOf
+
+  private val console = new ConsoleHandlers(consolePages, credentials.platformCallerOf)
 
   extension [I, E, O](e: sttp.tapir.PublicEndpoint[I, E, O, Any])
     /** Binds `e` to a handler of the common shape `handler(inputs...)(scopeOf)`: the endpoint's
@@ -194,6 +212,32 @@ final class ManagerServer(
       // exactly as before this feature existed, not a silent profile-allowlist grant
       // ahead of the route ever being wired.
       (cfg.auth.management.slIntegrationOn && path == "/api/auth/sso/ticket")
+
+  /** The staff prefixes modules declared, each split into segments once. An empty one (`""` or
+    * `"/"`) is dropped: it would cover every path.
+    */
+  private val staffPrefixSegments: Set[Vector[String]] =
+    moduleStaffPrefixes
+      .map(_.split('/').toVector.filter(_.nonEmpty))
+      .filter(_.nonEmpty)
+
+  /** Whether the request's decoded segments lie at or under a staff prefix. Segments, as the router
+    * reads them (see [[isBranchApi]]), never the joined path: `%2F` inside a segment decodes to
+    * `/`, so `staff%2Fx` would read as `staff/x` in the joined path while the router sees one
+    * segment that is not the prefix's.
+    */
+  private def underStaffPrefix(segments: Vector[String]): Boolean =
+    staffPrefixSegments.exists(segments.startsWith(_))
+
+  /** What a staff session or PAT may reach (issue #274): `ManagerServer.StaffProfilePaths`, the
+    * console page list and the paths modules declare for staff. Everything else is
+    * `403 admin_required`, so a module route written for superusers stays closed to staff, and so
+    * do the branch routes: staff hold no pool. An explicit list: a profile path added later stays
+    * closed to staff until someone adds it there.
+    */
+  private def isStaffApi(method: Method, path: String, segments: Vector[String]): Boolean =
+    ManagerServer.StaffProfilePaths.contains(path) ||
+      ManagerServer.isConsolePages(method, path) || underStaffPrefix(segments)
 
   /** The branch routes a NON-ADMIN session may reach, and the only paths whose tenant the guard
     * leaves to the handler: any principal who may connect may branch, in its own tenant, which
@@ -306,15 +350,22 @@ final class ManagerServer(
     )
 
   /** The session behind `token`. A session JWT needs only an HMAC, so it stays on the compute
-    * thread; a PAT costs database lookups, so it does not.
+    * thread; a PAT costs database lookups, so it does not, nor does a staff session's check of its
+    * live row (cached, but a miss reads the control plane).
     */
   private def resolveCredential(
       token: Option[String]
   ): IO[Option[SessionTokenStore.Session]] =
     token match
       case Some(t) if t.startsWith(PatStore.TokenPrefix) => IO.blocking(sessionOfToken(t))
-      case Some(t)                                       => IO(sessionOfToken(t))
-      case None                                          => IO.pure(None)
+      case Some(t)                                       =>
+        // The HMAC check runs here; only a staff JWT goes through sessionOfToken again, off the
+        // compute thread. Either way the answer is sessionOfToken's.
+        IO(sessions.get(t)).flatMap {
+          case Some(s) if credentials.readsRow(s) => IO.blocking(sessionOfToken(t))
+          case other                              => IO.pure(other)
+        }
+      case None => IO.pure(None)
 
   /** Writes a denial's audit row, at most one per `key` and interval. The write blocks on the
     * database, so it runs off the compute threads; a refused one costs no thread hop.
@@ -331,8 +382,10 @@ final class ManagerServer(
     * `role=admin`), which reach the whole namespace, and non-admin sessions minted by a
     * tenant-scoped login for a `role=user` principal, which are demoted here to the
     * [[isProfileApi]] and [[isBranchApi]] allowlists and get `403 admin_required` everywhere else.
-    * The 403 (rather than the anonymous 401) is what tells a client its session is valid but
-    * under-privileged.
+    * A staff session or PAT (role `staff`, issue #274) gets [[isStaffApi]] instead: no data-plane
+    * profile route, no branch route, only the module paths declared for staff, where the URL tenant
+    * check is left to the module. The 403 (rather than the anonymous 401) is what tells a client
+    * its session is valid but under-privileged.
     *
     * Always-open paths: `/api/auth/login`, `/api/auth/change-password` (the current password is the
     * credential, and a user blocked by must_change_password has no session to present),
@@ -415,11 +468,19 @@ final class ManagerServer(
         // then an absent scope skipped the tenant check. A PAT's synthetic session carries
         // role "admin" exactly when PatAuthenticator.isAdmin holds.
         OptionT.liftF(resolveCredential(provided)).flatMap { resolved =>
-          val sessionAdmin    = resolved.exists(_.profile.role.equalsIgnoreCase("admin"))
+          val sessionAdmin = resolved.exists(_.profile.role.equalsIgnoreCase("admin"))
+          // A staff session or PAT (issue #274): its own allowlist, never the tenant user's.
+          val staffSession    = resolved.exists(ManagerServer.isStaffSession)
           val tokenScope      = resolved.map(_.scope)
-          val nonAdminSession = resolved.isDefined && !sessionAdmin
+          val nonAdminSession = resolved.isDefined && !sessionAdmin && !staffSession
 
-          val admitted = sessionAdmin || (nonAdminSession && (isProfileApi(path) || branchApi))
+          // A tenant user reads the console page list too, and gets no page.
+          val admitted =
+            sessionAdmin ||
+              (staffSession && isStaffApi(req.method, path, segments)) ||
+              (nonAdminSession &&
+                (isProfileApi(path) || branchApi ||
+                  ManagerServer.isConsolePages(req.method, path)))
           // A session of a disabled tenant's user (every tenant it holds disabled) is refused
           // everything but signing out, until a superuser enables the tenant. A PAT of one already
           // resolves to nothing (PatAuthenticator).
@@ -459,7 +520,7 @@ final class ManagerServer(
                 )
               )
           else if !admitted then
-            if nonAdminSession then
+            if nonAdminSession || staffSession then
               // A real, valid session without an admin grant. Answer with the
               // same stable code the login gate uses so clients treat both alike
               // -- and not with the anonymous 401, which would send a browser
@@ -479,7 +540,8 @@ final class ManagerServer(
               auditDenial("session:" + username)(
                 audit.restAs(
                   username,
-                  "tenant",
+                  // A staff caller has no tenant: it signs in through the system login.
+                  if staffSession then "system" else "tenant",
                   "auth",
                   AuditActions.AuthAdminRequired,
                   "denied",
@@ -543,9 +605,15 @@ final class ManagerServer(
             // Body-tenant endpoints do their own check via TenantScopeCheck.reject, and the branch
             // routes through their one gate: a plain member reaches their own tenant there, which
             // holds no admin grant for this check to find.
-            val queryTenant = req.uri.query.params.get("tenant")
-            val pathTenant  =
-              if branchApi then None
+            //
+            // A staff caller on a module's staff prefix is left to the module too: staff hold no
+            // tenant, and their platform permissions cross tenants by design (issue #274), so the
+            // module's own permission check decides which tenant a `?tenant=` may name. Only that
+            // caller on that path: an admin there, and staff anywhere else, keep the check.
+            val staffOnStaffPrefix = staffSession && underStaffPrefix(segments)
+            val queryTenant        = req.uri.query.params.get("tenant")
+            val pathTenant         =
+              if branchApi || staffOnStaffPrefix then None
               else
                 TenantScopeGuard
                   .extractTenant(path, queryTenant)
@@ -946,8 +1014,18 @@ final class ManagerServer(
       RbacEndpoints.createRowPolicy.scoped(rowPolicies.create(_, _)),
       RbacEndpoints.updateRowPolicy.scoped(rowPolicies.update(_, _)),
       RbacEndpoints.deleteRowPolicy.scoped(rowPolicies.delete(_, _)),
-      RbacEndpoints.listRowPolicies.scoped(rowPolicies.list(_, _))
-    )
+      RbacEndpoints.listRowPolicies.scoped(rowPolicies.list(_, _)),
+      PlatformEndpoints.consolePages.serverLogic(console.list)
+    ) ++ platform.toList.flatMap { p =>
+      List[ServerEndpoint[Any, IO]](
+        PlatformEndpoints.listPermissions.scoped(p.listPermissions(_)),
+        PlatformEndpoints.listRoles.scoped(p.listRoles(_)),
+        PlatformEndpoints.createRole.scoped(p.createRole(_, _)),
+        PlatformEndpoints.updateRole.scoped(p.updateRole(_, _)),
+        PlatformEndpoints.deleteRole.scoped(p.deleteRole(_, _)),
+        PlatformEndpoints.listStaff.scoped(p.listStaff(_))
+      )
+    }
 
     val metricsEndpoints: List[ServerEndpoint[Any, IO]] = metricsEndpoint.serverEndpoints
 
@@ -1226,7 +1304,7 @@ object ManagerServer extends com.typesafe.scalalogging.LazyLogging:
     * SPI modules mount their own prefixes under `/api`, and a prefix match would hand every one of
     * them to regular users.
     */
-  private[ondemand] val ProfileApiPaths: Set[String] = Set(
+  private[quack] val ProfileApiPaths: Set[String] = Set(
     "/api/auth/whoami",
     "/api/auth/logout",
     "/api/profile/usage",
@@ -1250,6 +1328,34 @@ object ManagerServer extends com.typesafe.scalalogging.LazyLogging:
     // The names valid on a token's tools axis: the same static list for every caller.
     "/api/auth/pat/tools"
   )
+
+  /** The profile routes a staff caller reaches (issue #274): who it is, signing out and its own
+    * personal access tokens. Staff have no data plane, so none of the S3, pool, usage, statement or
+    * undrop routes, and no Starlake grant, so no Starlake SSO ticket. An explicit list, never
+    * `ProfileApiPaths` minus some: a profile path added later stays closed to staff.
+    */
+  val StaffProfilePaths: Set[String] = Set(
+    "/api/auth/whoami",
+    "/api/auth/logout",
+    "/api/auth/pat/create",
+    "/api/auth/pat/list",
+    "/api/auth/pat/revoke",
+    "/api/auth/pat/delete",
+    "/api/auth/pat/tools"
+  )
+
+  /** The console's module page list, which every signed-in caller may read (issue #274). */
+  val ConsolePagesPath: String = "/api/console/pages"
+
+  /** Whether the guard treats `s` as a staff caller (issue #274): its role reads `staff` and it
+    * names no tenant, as no staff row has one.
+    */
+  private[quack] def isStaffSession(s: SessionTokenStore.Session): Boolean =
+    s.profile.tenant.isEmpty && s.profile.role.equalsIgnoreCase(UserKind.Staff)
+
+  /** A read of the console page list: `GET` only. */
+  private[ondemand] def isConsolePages(method: Method, path: String): Boolean =
+    method == Method.GET && path == ConsolePagesPath
 
   /** The branch routes a NON-ADMIN session may reach (see `isBranchApi`), as a method and a path
     * template split into segments. A `{name}` segment matches any non-empty segment; every other

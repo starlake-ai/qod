@@ -37,18 +37,34 @@
 - An OPA tenant whose Rego compares table, schema, catalog or column names holding a non-ASCII
   uppercase letter: update it to the new folding (below) before upgrading. A deny rule written
   against the old lowercased form stops matching, and so allows.
+- **This release is one way.** Rolling back from it needs a restore of the control-plane database
+  backup taken before the upgrade: an older manager reads every staff user as a superuser, with
+  full data access. The release gate records that, so an older release with the gate refuses to
+  boot on the upgraded control plane.
+- In an HA deployment, finish the rollout before creating staff users: a replica still on an older
+  release reads each staff user as a superuser.
+- Before upgrading, check that no tenant row has the kind `staff`, which Liquibase 0061 refuses
+  (a kind was free text before 0.11.0): on the control-plane database,
+  `SELECT tenant, username, kind FROM qodstate_user WHERE tenant IS NOT NULL AND lower(kind) = 'staff'`
+  must return nothing. Change the kind of any such row first (`qod user update --kind user`, or an
+  `UPDATE` of the row).
+- A tenant-less account whose kind is not `admin` (one seeded with `QOD_ADMIN_KIND=user`, one
+  created with `qod user create --superuser` on an earlier release, which sent kind `user`, or a
+  superuser demoted earlier) loses data access with this release. Its refusal reads like an
+  unknown user, and the WARN line naming the reason is below the default ERROR log level. Find
+  such accounts before upgrading, on the control-plane database, with
+  `SELECT username, kind FROM qodstate_user WHERE tenant IS NULL AND lower(kind) <> 'admin'`,
+  and set the kind of each one that should stay a superuser back to `admin`.
 
 ### Security
 
 - **Names compare as DuckDB binds them, folding ASCII letters only.** DuckDB folds identifier case
-  for `A`-`Z` only, so `"Clés"` and `"clÉs"` are two tables one schema can hold, and a CTE named
-  `"clÉs"` does not shadow the table `"Clés"`. The gateway folded every cased letter, so for a
-  holder of column policies `WITH "clÉs" AS (...) SELECT c.secret FROM "Clés" c` was read as a
-  CTE reference and its masked column went out raw, and an `INSERT` or `CREATE TABLE AS` reading
-  the table that way could copy masked values, or rows a row policy hides, into a table of the
-  user's own. CTE scoping, column and table bindings, grants (`*.*.*` aside, a grant on `"Clés"`
-  also covered `"clÉs"`), the `system` and `temp` catalog rules (a catalog named `ſystem` was read
-  as `system`), column and row policies and the metadata filter's schema checks now all compare
+  for `A`-`Z` only, so `"Clés"` and `"clÉs"` are two tables one schema can hold. The gateway folded
+  every cased letter, so a name holding a non-ASCII letter could be matched to the wrong object:
+  a holder of column or row policies could read a masked column unmasked, or copy masked values
+  or filtered rows into a table of their own, and a grant could cover a second table spelled
+  with another case. CTE scoping, column and table bindings, grants, the `system` and `temp`
+  catalog rules, column and row policies and the metadata filter's schema checks now all compare
   names that way. ASCII names behave exactly as before.
   - A column policy or row policy spelled with another case of a non-ASCII letter than its
     object's (`"CLÉS"` for the table `"Clés"`) no longer masks, denies or filters it: it fails
@@ -58,14 +74,40 @@
     as DuckDB folds them (`"SECRET_ÉTÉ"` arrives as `secret_ÉtÉ`, formerly `secret_été`); a Rego
     rule written against the old lowercased form must be updated.
 - **Several column policies on one column: a deny wins, a policy naming the table beats a
-  wildcard one, and two different masks are refused.** The first matching policy used to apply,
-  and the order of the policies followed the roles and the order the statement named its tables,
-  so a CTE the node never binds, listed first, could make a wildcard mask displace a deny or a
-  stronger mask. A column two different masks still cover is now refused with `conflicting
-  column policies on <table>.<column>`; give the column one mask, or a deny.
+  wildcard one, and two different masks are refused.** The policy applied used to depend on the
+  order of roles and of the tables a statement named, so a weaker policy could apply in place of
+  a deny or a stronger mask. A column two different masks still cover is now refused with
+  `conflicting column policies on <table>.<column>`; give the column one mask, or a deny.
   A column covered by both a wildcard mask and a named mask can now also be refused when it is
   read through a derived table or a CTE, or by a correlated subquery whose unqualified column
   binds to the outer table; give such a column one mask.
+- **A tenant-less account that is not a superuser no longer reaches data.** A superuser demoted to
+  `kind user` left the management plane but still connected to every pool as a superuser, over
+  FlightSQL and the native front door (`superuser=true` and the password) and through a personal
+  access token on `/mcp`, bypassing grants, row and column policies. The handshake now binds a
+  tenant-less row only when its kind is `admin` and refuses any other as an unknown user, logging
+  the reason at WARN. A superuser's session already open when its row is demoted, disabled or
+  deleted is refused on its next statement on the replica that made the change, and on another
+  replica once that one has seen the change, through its NOTIFY or its periodic snapshot refresh.
+
+### Changed
+
+- `qod user create --superuser` now creates an account of kind `admin`. Earlier releases created
+  kind `user`, which was not a superuser on the management plane.
+
+### Added
+
+- **Platform staff roles for modules.** A superuser can create tenant-less `staff` users and give
+  them platform roles, named bundles of the permissions that manager modules declare
+  (`qod platform permission list`, `qod platform role create`, `qod user create --kind staff
+  --platform-role NAME`, the console's Settings > Staff page). A staff user signs in through the
+  system login and reaches only the module routes its permissions allow: no tenant, pool, node or
+  user in core, and no data. Revoking a role or disabling the user takes effect on the next
+  request. Modules declare `permissions`, `staffPathPrefixes` and `consolePages` and check a caller
+  with `ManagerContext.platformCallerOf`; the manager refuses to boot on a malformed declaration.
+- **Module pages in the admin console.** A module's page appears in a Platform section, at
+  `/ui/x/<module>/<page>`, for superusers and for staff holding its permission, inside the console's
+  layout and session (console page contract 1).
 
 ## 0.14.1
 

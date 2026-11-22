@@ -1,4 +1,7 @@
 import type {
+  ConsolePagesResponse,
+  PlatformPermissionView,
+  PlatformRoleView,
   TrendsResponse,
   CreatePoolRequest,
   ScalePoolRequest,
@@ -212,6 +215,15 @@ export const api = {
   ssoTicket: () => post<{ ticket: string }>('/auth/sso/ticket'),
   changePassword: (req: ChangePasswordRequest) => post<void>('/auth/change-password', req),
   whoami:  () => get<WhoamiResponse>('/auth/whoami'),
+  consolePages: () => get<ConsolePagesResponse>('/console/pages'),
+  platformPermissions: () => get<{ permissions: PlatformPermissionView[] }>('/platform/permission/list'),
+  platformRoles: () => get<{ roles: PlatformRoleView[] }>('/platform/role/list'),
+  createPlatformRole: (req: { name: string; description?: string; permissions: string[] }) =>
+    post<PlatformRoleView>('/platform/role/create', req),
+  updatePlatformRole: (req: { id: string; name?: string; description?: string; permissions?: string[] }) =>
+    post<PlatformRoleView>('/platform/role/update', req),
+  deletePlatformRole: (id: string) => post<void>('/platform/role/delete', { id }),
+  staffUsers: () => get<{ users: UserResponse[] }>('/platform/staff/list'),
   // Public, pre-session: reachable without a X-API-Key or session cookie
   // (server-side isPublicApi allowlist). Always 200 on forgotPassword
   // regardless of account existence - anti-enumeration.

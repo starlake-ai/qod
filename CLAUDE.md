@@ -598,6 +598,9 @@ restores it without a reconnect, and a user disabled, deleted or without the poo
 statement inside a client transaction ends that transaction ("transaction aborted: <reason>; ROLLBACK
 to continue"), and only a lone ROLLBACK is admitted, under no grants. A native client transaction
 whose pinned node leaves the pool is fenced the same way (`FlightSqlRouter.PinLostAnswer`).
+Superuser sessions follow it too (only the system principal's grants stay fixed), and a tenant-less
+row whose kind is not `admin` is refused at the handshake (`PoolSupervisor.authorizeHandshakeDetailed`),
+so a superuser demoted, disabled or deleted is refused on its next statement.
 
 **Accepted over-refusals** (owner rulings, CONTRACT Addendum 4 items 13-21, 24, 30-32a: changing one
 needs the owner; never loosen a rule to fix one). For non-superusers: an unclassified name (a typo
@@ -994,7 +997,7 @@ The auth/ACL/session config types and the DuckLake catalog resolver live under [
 
 ### Grant matching (the node decider)
 
-Table grants are matched in one place, the node decision pipeline: `AuthzDecider` (`edge/authz/`, behind `DecideRoute`) judges the objects of the plan qod-node bound against the session's cached **EffectiveSet** (closure of roles · groups · `qodstate_role_permission` rows reachable through them) through `GrantMatch` (`edge/sql/`). Superusers (`qodstate_user.tenant IS NULL`) and the system principal are allowed by the node locally and never reach it; an OPA tenant's objects go to its OPA instead (below). There is no gateway validator and no switch to turn the check off: `PostgresAclValidator`, `OpaValidator`, `TenantRoutingValidator` and `StatementValidator.allowAll` were deleted in Phase D (decision 29).
+Table grants are matched in one place, the node decision pipeline: `AuthzDecider` (`edge/authz/`, behind `DecideRoute`) judges the objects of the plan qod-node bound against the session's cached **EffectiveSet** (closure of roles · groups · `qodstate_role_permission` rows reachable through them) through `GrantMatch` (`edge/sql/`). Superusers (`qodstate_user.tenant IS NULL` and kind `admin`) and the system principal are allowed by the node locally and never reach it; an OPA tenant's objects go to its OPA instead (below). There is no gateway validator and no switch to turn the check off: `PostgresAclValidator`, `OpaValidator`, `TenantRoutingValidator` and `StatementValidator.allowAll` were deleted in Phase D (decision 29).
 
 The `EffectiveSet` is cached in `PoolSupervisor` (`qod_effective_sets`, at most 10000 entries) with a 60s TTL keyed by `(userId, jwtRoles.hashCode, jwtGroups.hashCode)`; every RBAC mutator (`createRole`, `addUserRole`, `grantPoolPermission`, etc.) calls `invalidateEffectiveCache()` so a freshly-granted role takes effect on the next statement without waiting on the TTL: a new handshake resolves it, and an open session resolves it again on its first statement after the policy version moved ("Open sessions follow the policy version" above).
 
@@ -1073,8 +1076,9 @@ is the credential; new must differ; clears the flag). The auth queries MUST proj
 `QOD_AUTH_DB_SYSTEM_QUERY` / `QOD_AUTH_DB_TENANT_QUERY` fails boot and every login.
 
 **Regular-user profile sessions.** The manager UI is not admin-exclusive: a tenant-scoped
-`kind=user` principal can log in through their tenant (the blank/system login and OIDC SSO
-stay admin-only). `AuthHandlers.mintSessionFor` accepts a DB-mode `Tenant(t)` login from any
+`kind=user` principal can log in through their tenant (the blank/system login, by password or
+system OIDC, serves only tenant-scoped admins, superusers and staff, and a tenant's OIDC SSO only
+its admins). `AuthHandlers.mintSessionFor` accepts a DB-mode `Tenant(t)` login from any
 principal holding a grant on `t`, not just an admin, and mints a non-admin, profile-only
 session (`LoginResponse.admin = false`). `ManagerServer.apiKeyGuard` demotes such sessions (and
 a non-admin's PATs) to a fixed allowlist (`isProfileApi`: `/api/auth/whoami`,
@@ -1194,6 +1198,111 @@ public path prefixes / static SPA mounts to `ManagerServer`, receive async
 register HA-leader-gated recurring tasks. Zero-module boot is unchanged OSS
 behavior. See docs/superpowers/specs/2026-07-18-manager-module-spi-design.md.
 
+### Platform staff and console pages (issue #274)
+
+A **staff** user is a `qodstate_user` row of kind `staff` with tenant NULL (a CHECK constraint,
+`ck_qodstate_user_staff_tenantless`, in changeset `0061-platform-roles`, which the supervisor
+checks first, `400 invalid_kind`). It holds platform roles, never tenant roles or groups. Three tables
+(`0061`): `qodstate_platform_role` (names unique ignoring case, a `lower(name)` index),
+`qodstate_platform_role_permission` and `qodstate_user_platform_role`, both cascading. A role
+bundles permission names that manager modules declare, `<module name>.<rest>` over `[a-z0-9._]`;
+the `platform.` prefix is reserved for core, which declares none, so a staff user can do nothing in
+core that a non-admin cannot. A superuser stays tenant NULL + kind `admin` and holds every
+permission implicitly. A stored permission no loaded module declares is kept, inert, and boot prints
+one stderr `WARN:` line per such role and permission (`PlatformPermissionReport`). Superusers manage
+it all (`403 superuser_required` otherwise): REST `GET /api/platform/permission/list`,
+`GET /api/platform/role/list`, `POST /api/platform/role/create|update|delete`,
+`GET /api/platform/staff/list`, and `user/create` / `user/update` with `kind: "staff"` and
+`platformRoles` (omitted on update keeps the set, `[]` clears it, a kind change away from staff drops
+it, `admin` to `staff` meets the `last_superuser` guard, and a `user/create` naming an existing
+superuser with another kind is `409 name_taken`, nothing written, as the create upserts and would
+otherwise demote it past that guard); CLI `qod platform permission list`,
+`qod platform role list|create|update|delete`, `qod platform staff list`, `qod user create|update
+--kind staff --platform-role NAME` / `--clear-platform-roles`; the console's Settings > Staff page.
+No MCP tool (`McpCoverageSpec` exclusion).
+
+**Resolution.** `PoolSupervisor.staffPrincipal(username)` reads the enabled tenant-less staff row and
+its permissions through a cache (60 s, 10000 entries, served only under the policy generation it was
+loaded in) cleared with the effective-set cache in `invalidateEffectiveCacheLocal`, so every RBAC or
+user write, a peer's `qod_rbac` and the snapshot refresh drop it. `CredentialScopes`
+(`ondemand/auth/`) is the one resolver from a credential (session JWT, then PAT) to its session and
+scope, used by the guard, the handlers, whoami and `ManagerContext`: a staff session is checked
+against its live row on every request, so it ends at once when the row stops qualifying (disabled,
+deleted, no longer staff) although its JWT is still valid, and its scope is built from the row alone
+(never superuser, no tenant, the row's permissions), never copied into the JWT. A staff PAT gets its
+owner's permissions unless it has `dropAdmin`, which collapses it to none. Staff sign in through the
+bare `/ui/` login (`LoginRealm.System`: password, or system OIDC under `identitySource=oidc`); a
+tenant login never binds a staff row, and an identity holding an admin grant signs in as that admin.
+The session's role is `staff`, `LoginResponse.staff` and whoami's `staff` / `permissions` say so.
+Under system OIDC a staff user's QoD user name must equal the IdP's `preferred_username`: a row
+matched only by verified email signs in, then every request answers 401, as the live check looks the
+row up by name (it fails closed). Only staff sessions are checked live: an admin session whose row is
+demoted to staff keeps its REST superuser rights until its JWT expires (the known session revocation
+gap). Staff is read from a tenant-less row only: a session or PAT naming a tenant is never staff,
+whatever its role or kind reads (`ManagerServer.isStaffSession`, `PatAuthenticator.sessionOf`).
+
+**Guard.** `ManagerServer.apiKeyGuard` gives a staff session or PAT its own allowlist, everything
+else `403 admin_required`: `StaffProfilePaths` (whoami, logout, its own PATs; an explicit list, so
+the S3, pool, usage, statement and undrop profile routes stay closed, and so does the Starlake SSO
+ticket: staff hold no Starlake grant), `GET /api/console/pages` (`ConsolePagesPath`) and the
+`staffPathPrefixes` modules declare, matched on whole decoded segments, never the joined path. On a
+staff prefix the guard skips the URL tenant check for staff, so the module decides with
+`PermissionCheck`. **A module route under a staff prefix that forgets its permission check is
+therefore open to staff holding no permission and to every tenant admin**, since the guard admits
+admins to every `/api` route.
+
+**Data plane.** Staff have none. `PoolSupervisor.authorizeHandshakeDetailed`, the gate of every data
+path, binds a tenant-less row only when its kind is `admin` and refuses any other as an unknown user
+(PR #275), so a staff row is refused on FlightSQL, the native front door, MCP `run_sql` and the admin
+REST SQL routes; `/mcp` refuses a tenant-less PAT whose owner is not `admin`
+(`McpRoutes.admitsPat`, 401), and `RestAuth` refuses every tenant-less PAT on `/data/v1`. A staff
+row therefore never reaches `AuthzDecider`, which is why the platform role tables carry no
+policy-version trigger.
+
+**SPI.** `ManagerModule` gains `permissions: List[PlatformPermission]`, `staffPathPrefixes` and
+`consolePages: List[ConsolePage]`, all defaulted and read after `start()`.
+`ModuleSurfaces.validate(modules, ModuleSurfaces.coreApiSegments)` runs in Main after
+`moduleStart` and before the server is built, and its refusal aborts the boot naming the module and
+the item. A module that declares any of the three needs a `[a-z0-9-]+` name, unique among such
+modules, that is not a core `/api/<segment>` (`coreApiSegments`: every core endpoint's first segment
+plus the reserved `platform` and `console`), since the guard trusts a staff prefix to cover only that
+module's routes. Its permissions must be `<module name>.<rest>`, not `platform.`, declared once
+across all modules; each staff prefix must lie under `/api/<module name>/`; each page id is
+`[a-z0-9-]+`, once per module, its permission one the module declares, its bundle under one of the
+module's own static mounts. Prefixes and bundles are checked segment by segment (plain segments over
+`[A-Za-z0-9._-]`, none empty, `.` or `..`; a root mount covers no bundle). `ManagerContext` gains
+`platformCallerOf: Option[String] => Option[PlatformCaller]` (stable SPI, in `spi/Platform.scala`
+with `PermissionCheck.require`, `403 permission_required` naming the permission, and
+`PlatformCaller.auditDetail(p)` for the module's audit row). It answers None for a tenant user or a
+credential that does not resolve, and may answer `Some` with no permissions (a staff user whose roles
+grant nothing): check `has`, never `isDefined`. It can read the database (a PAT, a cold staff cache),
+so call it inside `IO.blocking`.
+
+**Console pages.** `GET /api/console/pages` answers the pages whose permission the caller `has`
+(`{pages: [{module, id, label, path, bundle}]}`, module load order then declaration order; a tenant
+user gets none). The page route is `/ui/x/<module>/<id>` (`ModulePage`, `ui/src/modules/`). A
+superuser sees a Platform section beside the rest of the nav; a staff user gets a staff layout,
+the Platform section and Settings > Profile only, lands on their first page or on Profile when they
+have none, and a route they cannot see redirects there. Console contract 1: the bundle exports
+`qodConsoleContract = 1` and `mount(el, ctx)`, which returns its unmount function or a Promise of
+it; `ctx` holds `contract`, `apiBase` (`/api`), `basePath`, `user` (`{username, superuser,
+permissions}`), `subpath`, `onLocationChange(cb)`, `navigate(path)` (relative to `basePath`, never
+leaving the page, or an absolute `/ui/...` path), `theme` (always `dark`: the console has no light
+theme) and `onUnauthorized()`, which ends the session the way the console's Sign out does, under
+OIDC a full IdP logout. The CSS tokens of `ui/src/styles.css` (`--bg`, `--bg-elev`, `--bg-card`,
+`--border`, `--text`, `--text-mute`, `--text-soft`, `--accent`, `--accent-fg`, `--good`, `--warn`,
+`--bad`, `--link`, `--shadow`, `--radius`, `--mono`, `--sans`) are the styling contract. A failed
+import, another contract, a throwing mount or a mount returning no function shows an error panel
+naming the module; each mount renders into an element of its own, so a slow mount the viewer left
+cannot overwrite the next page. Full contract: the SPI design doc's "Console page contract 1".
+
+**Manifest.** A top-level `platformRoles` section (`name`, `description`, `permissions`) and each
+tenant-less user's `platformRoles`. Import upserts the listed roles by name, ignoring case, and
+leaves unlisted roles in place; every tenant-less user the manifest lists gets exactly its listed
+set (a non-staff row none). A staff user's role must be defined in the manifest's own
+`platformRoles`, else the import is refused. An undeclared permission imports, inert.
+Design: docs/superpowers/specs/2026-11-21-platform-staff-roles-console-pages-design.md.
+
 ## Configuration
 
 Every scalar in [src/main/resources/application.conf](src/main/resources/application.conf) accepts a `QOD_*` env-var override (or `PROXY_*` for FlightSQL edge keys). Prefer env vars over editing the conf - the conf is bundled into the jar at build time. Defaults: `:20900` REST, `:31338` FlightSQL (TLS on), Postgres `localhost:5432` user `postgres` / `azizam`, admin users `admin@localhost.local` and `admin` with NO built-in password (chosen at the first `qod start` / `qod serve`, or `QOD_ADMIN_PASSWORD` on first boot; `scripts/run-jar.sh` exports `admin` for dev only). `quack-on-demand.defaultMetastore.dataPath` ships with a developer machine's absolute path - override it before running outside that environment.
@@ -1231,7 +1340,9 @@ Every scalar in [src/main/resources/application.conf](src/main/resources/applica
   change to the data-path deny set, a row's object-store keys included (`0057`; attach a new source of data folders to that one); a table that changes what a principal may do but is not attached (a new
   grant or policy table, a new tenant ACL column, a new source of data folders) never invalidates
   cached verdicts, so nodes keep allowing for up to the verdict's 60 s. Attach it in the same changeset
-  that creates it.
+  that creates it. The one exception is the platform role tables (`0061`): staff never reach the
+  node decider, so they change no verdict, and bumping every tenant on a staff edit would flush
+  every node's verdict cache for nothing.
 - **List every new Liquibase changelog file in `src/main/resources/release/upgrades.json`**, under
   the entry of the release it ships in (`changesets`), and set that entry's
   `rollback_without_restore` false with a reason in `rollback_blocked_by` when the change is one way

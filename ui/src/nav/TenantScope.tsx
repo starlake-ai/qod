@@ -22,7 +22,7 @@ export function useTenantScope(): TenantScopeValue {
 
 /** The signed-in principal, as scope routing sees it. */
 export function usePrincipal(): Principal {
-  const { superuser, tenant, manageableTenants } = useAuth();
+  const { superuser, tenant, manageableTenants, role } = useAuth();
   // An OIDC admin may hold admin grants on several tenants (whoami's manageableTenants) and may
   // switch among exactly those; a DB-login tenant admin has just their own.
   const allowed = manageableTenants.length > 0 ? [...manageableTenants] : tenant ? [tenant] : [];
@@ -30,9 +30,9 @@ export function usePrincipal(): Principal {
   // A tenant sign-in, through the database or the tenant's own SSO, is never superuser, so the
   // case whoami's flag used to cover (a superuser signed in through a tenant URL) is gone.
   // `tenant === null` is a looser test than the flag: a multi-tenant admin session from the
-  // system login has no tenant either.
+  // system login has no tenant either. A staff session has no tenant too, but is never superuser.
   return {
-    superuser: superuser || tenant === null,
+    superuser: superuser || (tenant === null && role?.toLowerCase() === 'admin'),
     ownTenant: tenant,
     allowedTenants: allowed,
   };

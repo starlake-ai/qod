@@ -40,12 +40,17 @@ final class AuditRecorder(
 
   /** (actor, realm) for a REST caller: the user a session or PAT resolves to; a token that resolves
     * to no one, or no token at all, is `anonymous`. The guard admits only sessions and PATs, so an
-    * admitted call always carries a user.
+    * admitted call always carries a user. A superuser and a tenant-less staff session (issue #274)
+    * are in the `system` realm; the realm is attribution only, so a staff session is not checked
+    * against its row here.
     */
   def actorOf(token: Option[String]): (String, String) =
     token.flatMap(sessionLookup) match
-      case Some(s) => (s.profile.username, if s.scope.superuser then "system" else "tenant")
-      case None    => ("anonymous", "system")
+      case Some(s) =>
+        val staff = s.profile.tenant.isEmpty &&
+          s.profile.role.equalsIgnoreCase(ai.starlake.quack.ondemand.state.UserKind.Staff)
+        (s.profile.username, if s.scope.superuser || staff then "system" else "tenant")
+      case None => ("anonymous", "system")
 
   def rest(
       token: Option[String],

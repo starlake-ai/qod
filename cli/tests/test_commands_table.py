@@ -286,7 +286,7 @@ CASES = [
     (
         ["user", "create", "--superuser", "--username", "root", "--password", "pw"],
         "POST", "/api/user/create", {},
-        {"tenant": None, "username": "root", "password": "pw", "kind": "user", "mustChangePassword": False, "email": None},
+        {"tenant": None, "username": "root", "password": "pw", "kind": "admin", "mustChangePassword": False, "email": None},
     ),
     (
         [

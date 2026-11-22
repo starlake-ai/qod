@@ -35,4 +35,6 @@ object SupervisorErrorHttp:
           m
         )
       )
+    case SupervisorError.NameTaken(m) =>
+      Some(StatusCode.Conflict -> ErrorResponse("name_taken", m))
     case _ => None

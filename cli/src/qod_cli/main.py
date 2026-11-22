@@ -119,13 +119,14 @@ from .commands import fleet  # noqa: E402
 
 app.add_typer(fleet.app, name="fleet")
 
-from .commands import admin, group, membership, role, user  # noqa: E402
+from .commands import admin, group, membership, platform, role, user  # noqa: E402
 
 app.add_typer(user.app, name="user")
 app.add_typer(admin.app, name="admin")
 app.add_typer(role.app, name="role")
 app.add_typer(group.app, name="group")
 app.add_typer(membership.app, name="membership")
+app.add_typer(platform.app, name="platform")
 
 from .commands import catalog, tag  # noqa: E402
 

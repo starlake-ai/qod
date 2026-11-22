@@ -27,6 +27,7 @@ EXCLUSIONS = {
     # Postgres" section. The CLI has no create-form to prefill, and the same
     # values are operator config (QOD_PG_*), so no CLI command is warranted.
     "/api/database/metastore-defaults",
+    "/api/console/pages",  # the console's module page list: UI-only, like metastore-defaults
     # SCIM 2.0 provisioning surface: driven machine-to-machine by an identity
     # provider's connector (Okta, Entra, Google), speaking the RFC 7644 wire
     # format with Authorization: Bearer. Humans manage users/groups through the

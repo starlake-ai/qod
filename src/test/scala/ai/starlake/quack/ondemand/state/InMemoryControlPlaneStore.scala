@@ -314,6 +314,7 @@ class InMemoryControlPlaneStore extends ControlPlaneStore:
   private val users                         = TrieMap.empty[String, RbacUser]
   private val passwordHashes                = TrieMap.empty[String, String]
   def upsertUserIdentity(u: RbacUser): Unit =
+    require(!(u.kind == UserKind.Staff && u.tenant.isDefined), "a staff user has no tenant")
     val existing = users.get(u.id)
     val now      = Instant.now()
     // Mirror the Postgres impl: the identity upsert writes (tenant, username, kind) only, so
@@ -341,6 +342,7 @@ class InMemoryControlPlaneStore extends ControlPlaneStore:
       mustChangePassword: Boolean = false,
       email: Option[String] = None
   ): String =
+    require(!(kind == UserKind.Staff && tenant.isDefined), "a staff user has no tenant")
     val now                         = Instant.now()
     val existing                    = findUser(tenant, username)
     val (id, createdAt, externalId) = existing match
@@ -389,6 +391,7 @@ class InMemoryControlPlaneStore extends ControlPlaneStore:
     passwordHashes.remove(id)
     userGroups.filterInPlace((u, _) => u != id)
     userRoles.filterInPlace((u, _) => u != id)
+    userPlatformRoles.keys.filter(_._1 == id).foreach(userPlatformRoles.remove)
     poolPermissions.values.filter(_.userId.contains(id)).foreach(p => poolPermissions.remove(p.id))
 
   // ---------------- RBAC: roles ----------------
@@ -479,6 +482,58 @@ class InMemoryControlPlaneStore extends ControlPlaneStore:
   def addUserMemberships(userId: String, roleIds: List[String], groupIds: List[String]): Unit =
     roleIds.foreach(addUserRole(userId, _))
     groupIds.foreach(addUserGroup(userId, _))
+  private val platformRoles     = TrieMap.empty[String, PlatformRole]
+  private val userPlatformRoles = TrieMap.empty[(String, String), Unit]
+
+  def listPlatformRoles(): List[PlatformRole]           = platformRoles.values.toList.sortBy(_.name)
+  def getPlatformRole(id: String): Option[PlatformRole] = platformRoles.get(id)
+  def findPlatformRoleByName(name: String): Option[PlatformRole] =
+    platformRoles.values.find(_.name == name)
+  def insertPlatformRole(
+      name: String,
+      description: Option[String],
+      permissions: Set[String]
+  ): PlatformRole = synchronized {
+    refuseTakenPlatformRoleName(name, None)
+    val r = PlatformRole(java.util.UUID.randomUUID().toString, name, description, permissions)
+    platformRoles(r.id) = r
+    r
+  }
+
+  /** Mirrors Postgres' unique index on `lower(name)`, raising the same SQLState. */
+  private def refuseTakenPlatformRoleName(name: String, exceptId: Option[String]): Unit =
+    if platformRoles.values.exists(o =>
+        !exceptId.contains(o.id) &&
+          o.name.toLowerCase(java.util.Locale.ROOT) == name.toLowerCase(java.util.Locale.ROOT)
+      )
+    then throw new java.sql.SQLException(s"duplicate platform role name: $name", "23505")
+  def updatePlatformRole(
+      id: String,
+      name: String,
+      description: Option[String],
+      permissions: Set[String]
+  ): Option[PlatformRole] = synchronized {
+    platformRoles.get(id).map { _ =>
+      refuseTakenPlatformRoleName(name, Some(id))
+      val r = PlatformRole(id, name, description, permissions)
+      platformRoles(id) = r
+      r
+    }
+  }
+  def deletePlatformRole(id: String): Boolean =
+    userPlatformRoles.keys.filter(_._2 == id).foreach(userPlatformRoles.remove)
+    platformRoles.remove(id).isDefined
+  def listUserPlatformRoleIds(userId: String): List[String] =
+    userPlatformRoles.keys.collect { case (u, r) if u == userId => r }.toList.sorted
+  def setUserPlatformRoles(userId: String, roleIds: Set[String]): Unit = synchronized {
+    require(users.contains(userId), s"unknown user: $userId")
+    roleIds.foreach(r => require(platformRoles.contains(r), s"unknown platform role: $r"))
+    userPlatformRoles.keys.filter(_._1 == userId).foreach(userPlatformRoles.remove)
+    roleIds.foreach(r => userPlatformRoles.put((userId, r), ()))
+  }
+  def platformPermissionsOfUser(userId: String): Set[String] =
+    listUserPlatformRoleIds(userId).flatMap(platformRoles.get).flatMap(_.permissions).toSet
+
   def listDirectRolesForUser(userId: String): List[String] =
     userRoles.collect { case (u, r) if u == userId => r }.toList.sorted
 

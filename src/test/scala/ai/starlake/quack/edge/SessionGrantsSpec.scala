@@ -211,15 +211,38 @@ class SessionGrantsSpec extends AnyFlatSpec with Matchers:
     rb.system shouldBe false
   }
 
-  "a superuser's or the system principal's grants" should "never be resolved again" in
-    List(set(root, "su"), set(alice, "sys").copy(system = true)).foreach { s =>
-      val v     = new Versions
-      val gates = new Gates(() => ok(s))
-      val g     = open(gates, v)
-      v.bump()
-      g.current().map(_.claims("tag")) shouldBe Right(s.claims("tag"))
-      gates.calls shouldBe 1
-    }
+  "the system principal's grants" should "never be resolved again" in {
+    val s     = set(alice, "sys").copy(system = true)
+    val v     = new Versions
+    val gates = new Gates(() => ok(s))
+    val g     = open(gates, v)
+    v.bump()
+    v.advance()
+    g.current().map(_.claims("tag")) shouldBe Right("sys")
+    gates.calls shouldBe 1
+  }
+
+  "a superuser's grants" should "be resolved again, once, after the generation moved" in {
+    // A superuser demoted, disabled or deleted moves the replica's generation: the gates then
+    // refuse the open session on its next statement, not at its reconnect.
+    val v     = new Versions
+    val gates = new Gates(() => ok(set(root, "su")))
+    val g     = open(gates, v)
+    (1 to 3).foreach(_ => g.current().map(_.claims("tag")) shouldBe Right("su"))
+    gates.calls shouldBe 1
+    gates.next =
+      () => Left(HandshakeDenial.Denied("user 'root' is not registered in tenant 'acme'"))
+    v.advance()
+    g.current() shouldBe Left(
+      RouterFailure.AccessDenied(
+        "permission denied: user 'root' is not registered in tenant 'acme'"
+      )
+    )
+    gates.next = () => ok(set(root, "back"))
+    g.current().map(_.claims("tag")) shouldBe Right("back")
+    g.current().map(_.claims("tag")) shouldBe Right("back")
+    gates.calls shouldBe 3
+  }
 
   "a refused handshake" should "give the gates' refusal" in {
     val gates = new Gates(() => Left(HandshakeDenial.Denied("nope")))

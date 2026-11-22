@@ -1404,6 +1404,164 @@ final class PostgresControlPlaneStore(
     listEdgeRight(c, "qodstate_user_role", "user_id", "role_id", userId)
   }
 
+  // ----- Platform roles (issue #274) -----
+  private def readPlatformRole(c: java.sql.Connection, rs: java.sql.ResultSet): PlatformRole =
+    val id = rs.getString("id")
+    PlatformRole(
+      id,
+      rs.getString("name"),
+      Option(rs.getString("description")),
+      permissionsOfRole(c, id)
+    )
+
+  private def permissionsOfRole(c: java.sql.Connection, roleId: String): Set[String] =
+    val ps = c.prepareStatement(
+      "SELECT permission FROM qodstate_platform_role_permission WHERE role_id = ?"
+    )
+    try
+      ps.setString(1, roleId)
+      val rs  = ps.executeQuery()
+      val out = Set.newBuilder[String]
+      while rs.next() do out += rs.getString(1)
+      out.result()
+    finally ps.close()
+
+  private def writePermissions(
+      c: java.sql.Connection,
+      roleId: String,
+      permissions: Set[String]
+  ): Unit =
+    val del = c.prepareStatement("DELETE FROM qodstate_platform_role_permission WHERE role_id = ?")
+    try { del.setString(1, roleId); del.executeUpdate() }
+    finally del.close()
+    val ins = c.prepareStatement(
+      "INSERT INTO qodstate_platform_role_permission (role_id, permission) VALUES (?, ?)"
+    )
+    try
+      permissions.toList.sorted.foreach { p =>
+        ins.setString(1, roleId); ins.setString(2, p); ins.addBatch()
+      }
+      if permissions.nonEmpty then ins.executeBatch()
+    finally ins.close()
+
+  private def inTx[A](c: java.sql.Connection)(f: => A): A =
+    c.setAutoCommit(false)
+    try
+      val a = f
+      c.commit()
+      a
+    catch
+      case t: Throwable =>
+        try c.rollback()
+        catch case _: Throwable => ()
+        throw t
+    finally c.setAutoCommit(true)
+
+  def listPlatformRoles(): List[PlatformRole] = withConn { c =>
+    val ps =
+      c.prepareStatement("SELECT id, name, description FROM qodstate_platform_role ORDER BY name")
+    try
+      val rs  = ps.executeQuery()
+      val out = List.newBuilder[PlatformRole]
+      while rs.next() do out += readPlatformRole(c, rs)
+      out.result()
+    finally ps.close()
+  }
+
+  private def onePlatformRole(sql: String, arg: String): Option[PlatformRole] = withConn { c =>
+    val ps = c.prepareStatement(sql)
+    try
+      ps.setString(1, arg)
+      val rs = ps.executeQuery()
+      if rs.next() then Some(readPlatformRole(c, rs)) else None
+    finally ps.close()
+  }
+
+  def getPlatformRole(id: String): Option[PlatformRole] =
+    onePlatformRole("SELECT id, name, description FROM qodstate_platform_role WHERE id = ?", id)
+
+  def findPlatformRoleByName(name: String): Option[PlatformRole] =
+    onePlatformRole("SELECT id, name, description FROM qodstate_platform_role WHERE name = ?", name)
+
+  def insertPlatformRole(
+      name: String,
+      description: Option[String],
+      permissions: Set[String]
+  ): PlatformRole =
+    withConn { c =>
+      val id = java.util.UUID.randomUUID().toString
+      inTx(c) {
+        val ps = c.prepareStatement(
+          "INSERT INTO qodstate_platform_role (id, name, description) VALUES (?, ?, ?)"
+        )
+        try
+          ps.setString(1, id); ps.setString(2, name); ps.setString(3, description.orNull)
+          ps.executeUpdate()
+        finally ps.close()
+        writePermissions(c, id, permissions)
+      }
+      PlatformRole(id, name, description, permissions)
+    }
+
+  def updatePlatformRole(
+      id: String,
+      name: String,
+      description: Option[String],
+      permissions: Set[String]
+  ): Option[PlatformRole] = withConn { c =>
+    inTx(c) {
+      val ps = c.prepareStatement(
+        "UPDATE qodstate_platform_role SET name = ?, description = ? WHERE id = ?"
+      )
+      val n =
+        try
+          ps.setString(1, name); ps.setString(2, description.orNull); ps.setString(3, id)
+          ps.executeUpdate()
+        finally ps.close()
+      if n == 0 then None
+      else
+        writePermissions(c, id, permissions)
+        Some(PlatformRole(id, name, description, permissions))
+    }
+  }
+
+  def deletePlatformRole(id: String): Boolean = withConn { c =>
+    val ps = c.prepareStatement("DELETE FROM qodstate_platform_role WHERE id = ?")
+    try { ps.setString(1, id); ps.executeUpdate() > 0 }
+    finally ps.close()
+  }
+
+  def listUserPlatformRoleIds(userId: String): List[String] = withConn { c =>
+    listEdgeRight(c, "qodstate_user_platform_role", "user_id", "role_id", userId)
+  }
+
+  def setUserPlatformRoles(userId: String, roleIds: Set[String]): Unit = withConn { c =>
+    inTx(c) {
+      val del = c.prepareStatement("DELETE FROM qodstate_user_platform_role WHERE user_id = ?")
+      try { del.setString(1, userId); del.executeUpdate() }
+      finally del.close()
+      roleIds.foreach(r =>
+        insertEdge(c, "qodstate_user_platform_role", "user_id", "role_id", userId, r)
+      )
+    }
+  }
+
+  def platformPermissionsOfUser(userId: String): Set[String] = withConn { c =>
+    val ps = c.prepareStatement(
+      """SELECT DISTINCT p.permission
+        |FROM qodstate_user_platform_role ur
+        |JOIN qodstate_platform_role_permission p ON p.role_id = ur.role_id
+        |WHERE ur.user_id = ?""".stripMargin
+    )
+    try
+      ps.setString(1, userId)
+      val rs  = ps.executeQuery()
+      val out = Set.newBuilder[String]
+      while rs.next() do out += rs.getString(1)
+      out.result()
+    finally ps.close()
+  }
+
   def listDirectRolesByUsers(userIds: List[String]): Map[String, Set[String]] =
     bulkEdgeByLeft(userIds, "qodstate_user_role", "user_id", "role_id")
 

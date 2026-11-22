@@ -553,13 +553,14 @@ export interface UserResponse {
   id: string;
   tenant: string | null;            // null = superuser (manager UI + every FlightSQL tenant)
   username: string;
-  kind: string;                     // account kind: admin | user (management rights), NOT an RBAC role
+  kind: string;                     // account kind: admin | user | staff (management rights), NOT an RBAC role
   enabled: boolean;
   roles:  string[];                 // effective role NAMES (direct and via groups)
   groups: string[];                 // group NAMES (a user's groups are all direct)
   poolGrants: string[];             // human "tenant/pool" or "tenant/*" labels
   email?: string | null;
   directRoles?: string[];           // role NAMES granted to the user itself, not via a group
+  platformRoles?: string[];         // platform role NAMES of a staff row
 }
 
 export interface UserCreateRequest {
@@ -572,6 +573,7 @@ export interface UserCreateRequest {
   email?: string | null;
   roles?: string[];                 // RBAC role names; omit = qod_all_tables; never []
   groups?: string[];                // group names; omit = qod_all_pools; never []
+  platformRoles?: string[];         // platform role names, for kind=staff
 }
 
 export interface UserUpdateRequest {
@@ -585,6 +587,7 @@ export interface UserUpdateRequest {
   // Omit = unchanged. false locks the account (sign-in refused, tokens stop
   // working); true unlocks. The UI presents this inverted as "Locked".
   enabled?: boolean;
+  platformRoles?: string[];         // omit = unchanged; for kind=staff
 }
 
 export interface UserDeleteRequest { id: string; }
@@ -869,7 +872,15 @@ export interface WhoamiResponse {
   tenant?: string | null;
   superuser?: boolean;
   manageableTenants?: string[];
+  staff?: boolean;
+  permissions?: string[];
 }
+
+// ----- Console pages and platform roles (issue #274) -----
+export interface ConsolePageView { module: string; id: string; label: string; path: string; bundle: string }
+export interface ConsolePagesResponse { pages: ConsolePageView[] }
+export interface PlatformPermissionView { name: string; module?: string | null; description?: string | null; declared: boolean }
+export interface PlatformRoleView { id: string; name: string; description?: string | null; permissions: string[] }
 
 // ----- Recent statement history -----
 export interface StatementHistoryEntry {

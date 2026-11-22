@@ -351,6 +351,34 @@ trait ControlPlaneStore:
   def removeUserRole(userId: String, roleId: String): Boolean
   def listDirectRolesForUser(userId: String): List[String]
 
+  // ----- Platform roles (issue #274) -----
+  def listPlatformRoles(): List[PlatformRole]
+  def getPlatformRole(id: String): Option[PlatformRole]
+  def findPlatformRoleByName(name: String): Option[PlatformRole]
+
+  /** A new role with a fresh id. A duplicate name raises (unique constraint). */
+  def insertPlatformRole(
+      name: String,
+      description: Option[String],
+      permissions: Set[String]
+  ): PlatformRole
+
+  /** Replaces name, description and the whole permission set. None when no such role. */
+  def updatePlatformRole(
+      id: String,
+      name: String,
+      description: Option[String],
+      permissions: Set[String]
+  ): Option[PlatformRole]
+  def deletePlatformRole(id: String): Boolean
+  def listUserPlatformRoleIds(userId: String): List[String]
+
+  /** Replaces the user's platform roles with exactly `roleIds`, in one transaction. */
+  def setUserPlatformRoles(userId: String, roleIds: Set[String]): Unit
+
+  /** The union of the permissions of the user's platform roles. */
+  def platformPermissionsOfUser(userId: String): Set[String]
+
   /** Bulk-fetch direct role ids for a batch of users. Empty input returns `Map.empty`; users with
     * no roles are omitted from the result so callers can `getOrElse(uid, Set.empty)`.
     */
