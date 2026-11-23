@@ -93,20 +93,33 @@
 - **Column policies hold for a column named like a SQL keyword.** A mask or deny on a column
   named `current_date`, `current_time`, `current_timestamp`, `current` or `current_timezone` (a
   CSV or Parquet header can create one) did not apply: the policy rewriter read the bare name as
-  the keyword, while DuckDB reads the column, so its raw value reached the client. Such a name is
-  now read as DuckDB binds it: the column when the select's own FROM has it, so its mask or deny
-  applies in every clause, and the function otherwise. A column named `current_user`,
-  `session_user`, `user`, `current_role`, `current_schema`, `current_catalog`, `localtime` or
-  `localtimestamp`, read bare in a subquery whose own FROM does not have it, is now the function,
-  as DuckDB reads it, instead of a refusal.
+  the keyword, while DuckDB reads the column, so its raw value reached the client. The same held
+  for a column named `key`, `prior`, `nextval`, `connect_by_root`, `exists`, `minus`,
+  `distinctrow`, `high_priority`, `straight_join` or one of the `sql_*` select modifiers when
+  another word follows it (`key k`), and for one named `year`, `month`, `day`, `hour`, `minute` or
+  `second` read as a function's argument (`max(year)`). Each is now read as DuckDB reads it, so its
+  mask or deny applies in every clause. A SQL value name (`current_date`, `current_user`, `user`,
+  `localtime` and the others) binds the column when the select's own FROM has it and the function
+  otherwise, except inside an aggregate's arguments, where DuckDB can bind an enclosing query's
+  column: there it is refused when an enclosing table has a protected column of that name. Read
+  bare in a subquery outside an aggregate, a column named `current_user`, `session_user`, `user`,
+  `current_role`, `current_schema`, `current_catalog`, `localtime` or `localtimestamp` is now the
+  function, as DuckDB reads it, instead of a refusal. Under column policies, a statement using
+  `@` (DuckDB's absolute value operator, which the rewriter read as no column) or a column named
+  `interval` followed by another word is refused; write `abs(<column>)` or quote the name.
 - **A mask now reads the same column as the reference it replaces.** A mask names its column
   bare, and was spliced as stored, so in a subquery or beside another table holding a column of
   the same name it could read that other column, part of a denied one included, or fail as
   ambiguous. Each column the mask names is now written as the reference it replaces, qualifier and
-  quoting included, so the mask reads exactly the column the statement named. A mask that calls
-  `current_date`, `current_time` or `current_timestamp` keeps calling the function beside a column
-  of that name. A stored mask reading any column but its own is refused, as its validator refuses
-  it when it is created.
+  quoting included, so the mask reads exactly the column the statement named; a lambda's
+  parameters are left as written. A mask that calls `current_date`, `current_time` or
+  `current_timestamp` keeps calling the function beside a column of that name.
+  - Creating or updating a mask that reads another column than its own is now refused wherever the
+    column appears (inside `IN`, `IS NULL`, `BETWEEN`, `NOT`, a list, or through `@`); the check
+    used to follow functions, operators, `CASE` and `CAST` only. A mask stored before, or imported
+    from a manifest (which does not check masks), that reads another column is refused when a
+    statement reads its column: that refusal is what guards such a row. Review stored masks before
+    upgrading.
 - **A tenant-less account that is not a superuser no longer reaches data.** A superuser demoted to
   `kind user` left the management plane but still connected to every pool as a superuser, over
   FlightSQL and the native front door (`superuser=true` and the password) and through a personal

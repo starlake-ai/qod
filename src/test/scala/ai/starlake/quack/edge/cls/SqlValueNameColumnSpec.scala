@@ -17,9 +17,10 @@ import scala.util.{Try, Using}
   * and `current` and `current_timezone` too, never as a column. DuckDB 2.0 binds each of DuckDB's
   * SQL value names (those three and `current_user`, `session_user`, `user`, `current_role`,
   * `current_schema`, `current_catalog`, `localtime`, `localtimestamp`), quoted or not, to a column
-  * of the select's own FROM that has it, and to the function otherwise, never to an enclosing
-  * query's column; `current` and `current_timezone` are plain identifiers there. The gateway must
-  * read every one of them as DuckDB does.
+  * of the select's own FROM that has it, and to the function otherwise; an enclosing query's column
+  * only from an aggregate's arguments, which DuckDB moves to that query when they name nothing of
+  * the subquery's own FROM. `current` and `current_timezone` are plain identifiers there. The
+  * gateway must read every one of them as DuckDB does, and refuse where it cannot tell.
   */
 class SqlValueNameColumnSpec extends AnyFlatSpec with Matchers:
   import ColumnPolicyRewriter._
@@ -268,6 +269,69 @@ class SqlValueNameColumnSpec extends AnyFlatSpec with Matchers:
           Passthrough
       }
     }
+
+  // ---- an aggregate in a subquery binds the enclosing query (review round 2, C1) -------------
+
+  private def refused(outcome: Outcome): Boolean =
+    outcome match
+      case Denied(_) | DeniedUnresolvedTable | PassthroughParseFailed => true
+      case _                                                          => false
+
+  /** `(table, word)` with the word's own column on that table. */
+  private val valueColumns = TimeKeys.map("u" -> _) ++ Specials.map("sp" -> _)
+
+  /** Subqueries whose aggregate DuckDB 2.0 moves to the enclosing query, so the name in it reads
+    * the enclosing query's column (CLI, review round 2), and a window, which the rewriter cannot
+    * tell from one.
+    */
+  private val outerAggregates = List(
+    "SELECT (SELECT max({c})) AS r FROM {t}",
+    "SELECT (SELECT max({c}) FROM o) AS r FROM {t}",
+    "SELECT (SELECT string_agg({c}, ',') FROM o) AS r FROM {t}",
+    "SELECT (SELECT first({c})) AS r FROM {t}",
+    "SELECT (SELECT list({c})) AS r FROM {t}",
+    "SELECT (SELECT arg_max({c}, 1)) AS r FROM {t}",
+    "SELECT (SELECT max(\"{c}\")) AS r FROM {t}",
+    "SELECT (SELECT coalesce(max({c}), 'x') FROM o) AS r FROM {t}",
+    "SELECT (SELECT count(*) FILTER (WHERE {c} = 'x')) AS r FROM {t}",
+    "SELECT EXISTS (SELECT 1 FROM o HAVING max({c}) = 'x') AS r FROM {t}",
+    "SELECT id FROM {t} WHERE (SELECT max({c}) FROM o) = 'x'",
+    "SELECT (SELECT max({c}) OVER () FROM o LIMIT 1) AS r FROM {t}"
+  )
+
+  "a SQL value name inside an aggregate of a subquery" should
+    "be refused under a mask or a deny on the enclosing query's column, in both modes" in {
+      for
+        (table, word) <- valueColumns
+        tpl           <- outerAggregates
+        policy        <- List(mask(table, word), deny(table, word))
+        rewriter      <- List(rw, strict)
+      do
+        val sql = tpl.replace("{c}", word).replace("{t}", table)
+        withClue(s"$sql under ${policy.action}")(
+          refused(rewrite(sql, List(policy), rewriter)) shouldBe true
+        )
+    }
+
+  it should "still be the function without a column of that name anywhere" in
+    TimeKeys.foreach { word =>
+      val sql = s"SELECT (SELECT max($word) FROM o) AS r FROM o UNION ALL SELECT ssn FROM u"
+      rewrite(sql, List(mask("u", word))) shouldBe Passthrough
+    }
+
+  "the protected-write guard" should "refuse a write reading one through an outer aggregate" in {
+    val guard = new ProtectedWriteGuard(catalog, clsEnabled = true, rlsEnabled = true)
+    (TimeKeys.map("u" -> _) ++ List("sp" -> "current_user")).foreach { (table, word) =>
+      withClue(word)(
+        guard.check(
+          s"INSERT INTO w SELECT (SELECT max($word) FROM o) FROM $table",
+          StatementKind.Dml,
+          eff(List(mask(table, word))),
+          ctx
+        ) shouldBe a[GuardOutcome.Deny]
+      )
+    }
+  }
 
   // ---- the backstop --------------------------------------------------------------------------
 

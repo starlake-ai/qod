@@ -27,6 +27,7 @@ class MaskBindingSpec extends AnyFlatSpec with Matchers:
   private val ctx     = SchemaContext(Some(Catalog), Some("main"), attachedCatalogs = Set.empty)
 
   private val columns = Map(
+    (Catalog, "main", "lists")  -> List("id", "l"),
     (Catalog, "main", "secret") -> List("id", "region"),
     (Catalog, "main", "t")      -> List("id", "region"),
     (Catalog, "main", "u")      -> List("id", "current_date", "ssn"),
@@ -59,6 +60,8 @@ class MaskBindingSpec extends AnyFlatSpec with Matchers:
       "CREATE TABLE t (id INTEGER, region VARCHAR)",
       "CREATE TABLE u (id INTEGER, current_date VARCHAR, ssn VARCHAR)",
       "CREATE TABLE o (id INTEGER)",
+      "CREATE TABLE lists (id INTEGER, l VARCHAR[])",
+      "INSERT INTO lists VALUES (1, ['a', 'topsecret'])",
       "INSERT INTO secret VALUES (1, 'Secret-EU')",
       "INSERT INTO t VALUES (1, 'Topsecret')",
       "INSERT INTO u VALUES (1, 'cd-secret', 'ssn-secret')",
@@ -149,4 +152,29 @@ class MaskBindingSpec extends AnyFlatSpec with Matchers:
       val out = rewritten("SELECT d.e FROM (SELECT region AS e FROM secret) d", List(maskRegion))
       out should include("left(d.e, 1) || '***'")
       rowsOf(conn, out).map(_.head.head.endsWith("***")) shouldBe Right(true)
+    }
+
+  // ---- lambdas in a mask (review round 2, I1) ------------------------------------------------
+
+  "a lambda mask whose parameter shares its column's name" should
+    "keep the parameter and read the reference only where the column is" in
+    Using.resource(database()) { conn =>
+      val mask = policy("lists", "l", "mask", Some("list_filter(l, lambda l: len(l) < 3)"))
+      val out  = rewritten("SELECT lists.l FROM lists", List(mask))
+      out shouldBe "SELECT list_filter(lists.l, lambda l : len(l) < 3) AS l FROM lists"
+      rowsOf(conn, out) shouldBe Right(List(List("[a]")))
+      val arrow = policy("lists", "l", "mask", Some("list_filter(l, l -> len(l) < 3)"))
+      rewritten("SELECT lists.l FROM lists", List(arrow)) shouldBe
+        "SELECT list_filter(lists.l, l -> len(l) < 3) AS l FROM lists"
+    }
+
+  "a lambda mask with a parameter of another name" should "be applied, not refused" in
+    Using.resource(database()) { conn =>
+      val mask = policy("lists", "l", "mask", Some("list_transform(l, lambda x: concat(x, '*'))"))
+      val out  = rewritten("SELECT lists.l FROM lists", List(mask))
+      out shouldBe "SELECT list_transform(lists.l, lambda x : concat(x, '*')) AS l FROM lists"
+      rowsOf(conn, out) shouldBe Right(List(List("[a*, topsecret*]")))
+      val arrow = policy("lists", "l", "mask", Some("list_transform(l, x -> concat(x, '*'))"))
+      rewritten("SELECT l FROM lists", List(arrow)) shouldBe
+        "SELECT list_transform(l, x -> concat(x, '*')) AS l FROM lists"
     }

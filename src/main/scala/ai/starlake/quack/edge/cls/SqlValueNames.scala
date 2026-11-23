@@ -8,7 +8,10 @@ import net.sf.jsqlparser.expression.TimeKeyExpression
   * DuckDB's binder falls back to a SQL value function (`GetSQLValueFunction`) for an unqualified
   * column reference of one of [[Names]], quoted or not, that no binding of the select's own FROM
   * resolves: the column (or the whole row of a FROM binding of that name) when the select's own
-  * FROM has it, the function otherwise, and never a column of an enclosing query.
+  * FROM has it, the function otherwise. It binds an enclosing query's column only from an
+  * aggregate's arguments, which DuckDB moves to the enclosing query when they name nothing of the
+  * subquery's own FROM ([[MisreadNames.aggregateContext]]); the rewriter then binds it as any other
+  * name.
   *
   * JSqlParser reads three of those names (`current_date`, `current_time`, `current_timestamp`), and
   * also `current` and `current_timezone`, which DuckDB reads as plain identifiers, as a

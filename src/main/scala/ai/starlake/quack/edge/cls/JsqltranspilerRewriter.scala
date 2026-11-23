@@ -43,20 +43,22 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
             homes
           )
 
-  /** `sql` printed with each time keyword DuckDB may bind to a column written as that column's
-    * quoted reference ([[ResidualColumns.bindTimeKeys]]), or `sql` itself when there is none or it
-    * cannot be parsed (the steps below then refuse what they cannot read).
+  /** `sql` with each word JSqlParser misreads where DuckDB reads a column quoted
+    * ([[MisreadNames.quoteWords]]), then printed with each time keyword and date part DuckDB may
+    * bind to a column written as that column's quoted reference ([[ResidualColumns.bindTimeKeys]]);
+    * the quoted text when it cannot be parsed (the steps below then refuse what they cannot read).
     */
   private def withTimeKeyColumns(sql: String, schema: Map[String, List[String]]): String =
+    val words = MisreadNames.quoteWords(sql)
     try
-      ai.starlake.sql.JSqlStatements.parseFirst(sql) match
+      ai.starlake.sql.JSqlStatements.parseFirst(words) match
         case select: Select if ResidualColumns.bindTimeKeys(select, schema) =>
           val builder = new java.lang.StringBuilder()
           (select: net.sf.jsqlparser.statement.Statement)
             .accept(new net.sf.jsqlparser.util.deparser.StatementDeParser(builder))
           builder.toString
-        case _ => sql
-    catch case _: Throwable => sql
+        case _ => words
+    catch case _: Throwable => words
 
   private def rewriteWithPolicies(
       sql: String,
@@ -587,7 +589,11 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
       * it at creation.
       */
     private def boundMask(p: RoleColumnPolicy, ref: net.sf.jsqlparser.schema.Column): Expression =
-      val mask = CCJSqlParserUtil.parseExpression(p.transformSql.get)
+      val mask =
+        try ResidualColumns.parseStoredExpression(p.transformSql.get)
+        catch
+          case _: net.sf.jsqlparser.JSQLParserException =>
+            throw DenyException(s"the mask of column ${ref.getFullyQualifiedName} does not parse")
       // A policy derived for a derived table's output keeps its base policy's id and mask.
       val column  = unquoteName(policies.find(_.id == p.id).getOrElse(p).columnName)
       val refusal = DenyException(
@@ -597,6 +603,7 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
       references.unknown.foreach(cls =>
         throw DenyException(s"column policy rewrite cannot walk a $cls node of a mask")
       )
+      if references.opaque.nonEmpty then throw refusal
       def bindToRef(c: net.sf.jsqlparser.schema.Column): net.sf.jsqlparser.schema.Column =
         c.setTable(Option(ref.getTable).map(_.clone()).orNull)
         c.setColumnName(ref.getColumnName)
@@ -1045,7 +1052,12 @@ private[cls] object ResidualColumns:
 
   /** Every column reference with the scopes it sits in (innermost first), every table node, and the
     * first child of an unknown type. `timeKeys`: every time keyword ([[SqlValueNames]]), which
-    * JSqlParser holds as no column though DuckDB may bind it to one.
+    * JSqlParser holds as no column though DuckDB may bind it to one. `inAggregate`: the column
+    * references and time keywords inside an aggregate's arguments of their own select
+    * ([[MisreadNames.aggregateContext]]), by identity. `lambdaBound`: the unqualified column nodes
+    * naming a parameter of an enclosing lambda. `opaque`: the reasons of the nodes JSqlParser made
+    * of a column reference it does not hold as one ([[MisreadNames.opaqueReading]]). `dateUnits`:
+    * the expression lists holding a date part (`count(year)`), which DuckDB reads as a column.
     */
   private final case class Scan(
       columns: List[(Column, List[Scope])],
@@ -1053,7 +1065,11 @@ private[cls] object ResidualColumns:
       unknown: Option[String],
       forms: List[(Form, List[Scope])],
       methodCalls: List[(net.sf.jsqlparser.expression.Function, List[Scope])],
-      timeKeys: List[(TimeKeyExpression, List[Scope])]
+      timeKeys: List[(TimeKeyExpression, List[Scope])],
+      inAggregate: java.util.Set[AnyRef],
+      lambdaBound: java.util.Set[Column],
+      opaque: List[String],
+      dateUnits: List[java.util.List[Any]]
   )
 
   /** Nodes that read columns with no column node of their own for the visitor to mask. */
@@ -1196,8 +1212,20 @@ private[cls] object ResidualColumns:
     val counted = java.util.Collections.newSetFromMap(
       new java.util.IdentityHashMap[AnyRef, java.lang.Boolean]()
     )
-    val timeKeys = scala.collection.mutable.ListBuffer.empty[(TimeKeyExpression, List[Scope])]
-    var unknown  = Option.empty[String]
+    val timeKeys    = scala.collection.mutable.ListBuffer.empty[(TimeKeyExpression, List[Scope])]
+    var unknown     = Option.empty[String]
+    val inAggregate = java.util.Collections.newSetFromMap(
+      new java.util.IdentityHashMap[AnyRef, java.lang.Boolean]()
+    )
+    val lambdaBound = java.util.Collections.newSetFromMap(
+      new java.util.IdentityHashMap[Column, java.lang.Boolean]()
+    )
+    val opaque    = scala.collection.mutable.ListBuffer.empty[String]
+    val dateUnits = scala.collection.mutable.ListBuffer.empty[java.util.List[Any]]
+    // Whether the node walked sits in an aggregate's arguments of its own select, and the lambda
+    // parameters in scope: set around each node's children, restored after.
+    var aggregate = false
+    var lambdas   = Set.empty[String]
     // TABLE statements a FROM clause reads (`FROM (TABLE t)`), marked by identity when the walk
     // reaches the select that holds them, which is before it reaches the statements themselves.
     val inTablePosition = java.util.Collections.newSetFromMap(
@@ -1205,6 +1233,13 @@ private[cls] object ResidualColumns:
     )
     def walk(node: AnyRef, scopes: List[Scope], ctes: Map[String, Option[Set[String]]]): Unit =
       if visited.add(node) then
+        MisreadNames.opaqueReading(node).foreach(opaque += _)
+        if aggregate then inAggregate.add(node): Unit
+        node match
+          case c: Column
+              if c.getTable == null && lambdas.contains(lower(unquote(c.getColumnName))) =>
+            lambdaBound.add(c): Unit
+          case _ => ()
         node match
           case c: Column             => columns += (c   -> scopes)
           case tk: TimeKeyExpression => timeKeys += (tk -> scopes)
@@ -1313,16 +1348,35 @@ private[cls] object ResidualColumns:
               case _                                                     => ()
           case _ => ()
         }
+        val (outerAggregate, outerLambdas) = (aggregate, lambdas)
+        node match
+          case _: Select                                        => aggregate = false
+          case l: net.sf.jsqlparser.expression.LambdaExpression =>
+            lambdas = lambdas ++ Option(l.getIdentifiers).toList
+              .flatMap(_.asScala)
+              .map(n => lower(unquote(n)))
+          case other if MisreadNames.aggregateContext(other) => aggregate = true
+          case _                                             => ()
         AstChildren.accessors(node.getClass).foreach { m =>
           AstChildren.read(m, node) match
             // A column's qualifier is not a table the statement reads.
             case _: Table if node.isInstanceOf[Column] => ()
             case value                                 => route(value, inner, inCtes)
         }
+        aggregate = outerAggregate
+        lambdas = outerLambdas
     def route(value: Any, scopes: List[Scope], ctes: Map[String, Option[Set[String]]]): Unit =
       value match
-        case null                         => ()
-        case it: java.lang.Iterable[?]    => it.forEach(route(_, scopes, ctes))
+        case null                      => ()
+        case it: java.lang.Iterable[?] =>
+          it match
+            case l: java.util.List[?]
+                if l.stream.anyMatch(
+                  _.isInstanceOf[net.sf.jsqlparser.expression.DateUnitExpression]
+                ) =>
+              dateUnits += l.asInstanceOf[java.util.List[Any]]
+            case _ => ()
+          it.forEach(route(_, scopes, ctes))
         case arr: Array[?]                => arr.foreach(route(_, scopes, ctes))
         case e: java.util.Map.Entry[?, ?] =>
           route(e.getKey, scopes, ctes); route(e.getValue, scopes, ctes)
@@ -1331,26 +1385,48 @@ private[cls] object ResidualColumns:
         case leaf if AstChildren.isLeaf(leaf)      => ()
         case other => unknown = unknown.orElse(Some(other.getClass.getName))
     walk(root, Nil, Map.empty)
-    Scan(columns.toList, tables.toList, unknown, forms.toList, calls.toList, timeKeys.toList)
+    Scan(
+      columns.toList,
+      tables.toList,
+      unknown,
+      forms.toList,
+      calls.toList,
+      timeKeys.toList,
+      inAggregate,
+      lambdaBound,
+      opaque.toList,
+      dateUnits.toList
+    )
 
   /** Every table node of `root` except column qualifiers, by identity. */
   def tablesOf(root: AnyRef): List[Table] = scan(root).tables
 
-  /** The column nodes and time keywords of an expression, and the first child of a type the walk
-    * cannot follow.
+  /** The column nodes of an expression but those naming a parameter of an enclosing lambda, its
+    * time keywords, the reasons of its nodes holding a column reference as another node
+    * ([[MisreadNames.opaqueReading]]), and the first child of a type the walk cannot follow.
     */
   final case class References(
       columns: List[Column],
       timeKeys: List[TimeKeyExpression],
+      opaque: List[String],
       unknown: Option[String]
   )
 
   def references(root: AnyRef): References =
     val s = scan(root)
-    References(s.columns.map(_._1), s.timeKeys.map(_._1), s.unknown)
+    References(
+      s.columns.map(_._1).filterNot(s.lambdaBound.contains),
+      s.timeKeys.map(_._1),
+      s.opaque,
+      s.unknown
+    )
 
-  /** The scope of the select a reference sits in, the only one a SQL value name binds in. */
-  private def ownScope(scopes: List[Scope]): List[Scope] = scopes.take(1)
+  /** The scopes an unqualified SQL value name at `at` binds in: its own select's only, except
+    * inside an aggregate's arguments, which DuckDB may move to an enclosing query, where the name
+    * binds as any other name does ([[MisreadNames.aggregateContext]]).
+    */
+  private def valueScope(scan: Scan, at: AnyRef, scopes: List[Scope]): List[Scope] =
+    if scan.inAggregate.contains(at) then scopes else scopes.take(1)
 
   /** How a policy covers the column references of one scan: DuckDB's binding of each name. */
   private final class Coverage(
@@ -1431,7 +1507,7 @@ private[cls] object ResidualColumns:
         // A SQL value name binds its own select's FROM, else the function (SqlValueNames): a
         // policy on it covers the reference only through a binding there.
         case None if SqlValueNames.isName(name) =>
-          byName.nonEmpty && unqualifiedCovered(name, ownScope(scopes), byName)
+          byName.nonEmpty && unqualifiedCovered(name, valueScope(before, col, scopes), byName)
         case None => nameCovered(name, scopes)
 
     /** The policies covering `col` where DuckDB binds it, as [[covered]] finds its binding: the
@@ -1463,8 +1539,9 @@ private[cls] object ResidualColumns:
           scopes.map(_.filter(_.names.contains(lower(q)))).filter(_.nonEmpty) match
             case Nil   => aliases.collect { case (a, t) if a == lower(q) => t } :+ q
             case named => innermost(named, Nil)
-        case None if SqlValueNames.isName(name) => innermost(ownScope(scopes), Nil)
-        case None                               => innermost(scopes, Nil)
+        case None if SqlValueNames.isName(name) =>
+          innermost(valueScope(before, col, scopes), Nil)
+        case None => innermost(scopes, Nil)
       wildcard ++ onTables(tables)
 
   /** DuckDB's method call `x.f(args)` is `f(x, args)`; JSqlParser holds it as a function with the
@@ -1541,7 +1618,10 @@ private[cls] object ResidualColumns:
     // A time keyword DuckDB binds to a covered column: the visitor masks only the column node
     // bindTimeKeys makes of it, so one left as a time keyword is refused below.
     val keyColumns = before.timeKeys.flatMap { (tk, scopes) =>
-      timeKeyColumn(tk).map(c => (tk, c, scopes))
+      timeKeyColumn(tk).map { c =>
+        if before.inAggregate.contains(tk) then before.inAggregate.add(c): Unit
+        (tk, c, scopes)
+      }
     }
     val notedKeys = java.util.Collections.newSetFromMap(
       new java.util.IdentityHashMap[TimeKeyExpression, java.lang.Boolean]()
@@ -1598,23 +1678,30 @@ private[cls] object ResidualColumns:
     def wholeRow(col: Column, scopes: List[Scope]): Boolean =
       val name  = lower(unquote(Option(col.getColumnName).getOrElse("")))
       val bound =
-        if col.getTable == null && SqlValueNames.isName(name) then ownScope(scopes) else scopes
+        if col.getTable == null && SqlValueNames.isName(name) then valueScope(before, col, scopes)
+        else scopes
       val sources = bound.flatten
       sources.exists(src => src.table.exists(policyTable) && src.names.contains(name)) &&
       !sources.exists(src => has(src, name).contains(true))
     // `c.to_json()` is `to_json(c)`: a method call's receiver binds like any column reference, so
     // a receiver naming a policy table's binding hands the whole row to the function.
-    val receivers       = before.methodCalls.map((f, scopes) => receiverOf(f) -> scopes)
+    val receivers = before.methodCalls.map { (f, scopes) =>
+      val c = receiverOf(f)
+      if before.inAggregate.contains(f) then before.inAggregate.add(c): Unit
+      c -> scopes
+    }
     val keyRefs         = keyColumns.map((_, c, scopes) => c -> scopes)
     val wholeRowRefusal = (before.columns ++ receivers ++ keyRefs).collectFirst {
       case (c, scopes) if wholeRow(c, scopes) =>
         "a table referenced as a column (the whole row as a struct) cannot be masked under " +
           "column policies; name the columns instead"
     }
+    // A column reference JSqlParser holds as another node: nothing masks it, whatever it reads.
+    val opaqueRefusal = before.opaque.headOption.map(MisreadNames.refusal)
     new Suspects(
       noted,
       before.unknown,
-      formRefusal.orElse(wholeRowRefusal),
+      opaqueRefusal.orElse(formRefusal).orElse(wholeRowRefusal),
       required,
       notedKeys
     )
@@ -1629,24 +1716,51 @@ private[cls] object ResidualColumns:
   /** Rewrites, in place, each time keyword of `sel` that DuckDB may bind to a column into the
     * quoted column reference DuckDB reads it as ([[SqlValueNames.quote]]), so that the statement
     * printed and read again holds a column node there, which every policy step judges like any
-    * other: a SQL value name when its own select's FROM has a source that may have the column (its
-    * columns unknown, or a binding of that name for the whole row), `current` and
-    * `current_timezone` (plain identifiers) always. A word no such source can bind is the function
-    * and stays as written. True when one was rewritten.
+    * other: a SQL value name when a scope it may bind in ([[valueScope]]) has a source that may
+    * have the column (its columns unknown, or a binding of that name for the whole row), `current`
+    * and `current_timezone` (plain identifiers) always. A word no such source can bind is the
+    * function and stays as written. Each date part in an expression list (`count(year)`), which
+    * DuckDB reads as a column, becomes that column's quoted reference too. True when one was
+    * rewritten.
     */
   def bindTimeKeys(sel: AnyRef, schema: Map[String, List[String]]): Boolean =
+    val units    = bindDateUnits(sel)
     val before   = scan(sel)
     val coverage = new Coverage(before, Nil, schema)
-    before.timeKeys.foldLeft(false) { case (changed, (tk, scopes)) =>
+    before.timeKeys.foldLeft(units) { case (changed, (tk, scopes)) =>
       val binds = SqlValueNames.reading(tk) match
         case SqlValueNames.Reading.Reference(name) if SqlValueNames.isName(name) =>
-          ownScope(scopes).flatten.exists(src =>
+          valueScope(before, tk, scopes).flatten.exists(src =>
             !coverage.has(src, name).contains(false) || src.names.contains(lower(name))
           )
         case SqlValueNames.Reading.Call => false
         case _                          => true
       (binds && SqlValueNames.quote(tk)) || changed
     }
+
+  /** Rewrites, in place, each date part of `root` in an expression list (`count(year)`), which
+    * DuckDB reads as a column, into that column's quoted reference. True when one was rewritten.
+    */
+  def bindDateUnits(root: AnyRef): Boolean =
+    scan(root).dateUnits.foldLeft(false) { (changed, list) =>
+      val it  = list.listIterator()
+      var any = changed
+      while it.hasNext do
+        it.next() match
+          case du: net.sf.jsqlparser.expression.DateUnitExpression =>
+            it.set(new Column("\"" + du.toString.trim + "\""))
+            any = true
+          case _ => ()
+      any
+    }
+
+  /** A stored mask or policy expression parsed as DuckDB reads it: the words of
+    * [[MisreadNames.quoteWords]] quoted and its date parts made columns ([[bindDateUnits]]).
+    */
+  def parseStoredExpression(text: String): net.sf.jsqlparser.expression.Expression =
+    val expr = CCJSqlParserUtil.parseExpression(MisreadNames.quoteWords(text))
+    bindDateUnits(expr): Unit
+    expr
 
   /** Some(deny reason) when a noted reference is still in `sel` after the rewrite, or the statement
     * holds a node the walk cannot follow.

@@ -119,7 +119,9 @@ final class ColumnPolicyRewriter(
         ParserInput.render(sql) match
           case Left(_)      => IO.pure(PassthroughParseFailed)
           case Right(input) =>
-            carryTimeTravel(input.text, eff, ctx).map {
+            // A word JSqlParser misreads where DuckDB reads a column is quoted first, so the table
+            // walk and every step after it parse the statement DuckDB runs (MisreadNames).
+            carryTimeTravel(MisreadNames.quoteWords(input.text), eff, ctx).map {
               // The rewrite is printed from the parser input, which is not the caller's statement
               // here (ParserInput.Rendered.exact): shipping it would run a different statement.
               case Rewritten(_) if !input.exact => Denied(InexactRefusal)
