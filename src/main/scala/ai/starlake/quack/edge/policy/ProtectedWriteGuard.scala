@@ -1,7 +1,7 @@
 package ai.starlake.quack.edge.policy
 
 import ai.starlake.acl.model.{Config, DenyReason, TableRef}
-import ai.starlake.acl.parser.{SqlParser, StatementResult, TableExtractor, Verb}
+import ai.starlake.acl.parser.{SqlParser, StatementResult, TableExtractor, TableQualifier, Verb}
 import ai.starlake.quack.edge.cls.{
   ColumnCatalog,
   ColumnPolicyRewriter,
@@ -31,6 +31,11 @@ enum GuardOutcome:
   * policies, denies when the read side exposes a protected table: any read of an RLS table, or a
   * CLS table whose masked columns actually appear in the read. Any read it cannot isolate denies
   * fail-closed. Never rewrites; only allows or denies.
+  *
+  * A write aimed at a protected table is judged too (owner ruling D27), since neither rewriter
+  * reads a write ([[DirectWrites]]): for a row-policy table only a plain INSERT of new rows is
+  * allowed, and a write to a column-policy table may not read a masked or denied column of it. A
+  * write's RETURNING and ON CONFLICT clauses count as reads.
   *
   * On EVERY statement kind, a plain SELECT included, it also denies what the rewriters cannot read
   * as DuckDB does (spec decision 27): a quoted name holding a dot ([[DottedIdentifierScreen]]), a
@@ -101,7 +106,7 @@ final class ProtectedWriteGuard(
             case Some(reason) => Deny(s"access denied: $reason")
             case None if kind == StatementKind.Select && !isBatch(sql) => Allow
             case None                                                  =>
-              checkWrite(sql, results, eff, ctx, colPolicies, rowPolicies, clientDataScans)
+              checkWrite(sql, results, config, eff, ctx, colPolicies, rowPolicies, clientDataScans)
 
   /** The first two-part name headed by an attached catalog, in any statement. The policy match keys
     * it on the session catalog with the head as its schema, while DuckDB reads the head as the
@@ -154,6 +159,7 @@ final class ProtectedWriteGuard(
   private def checkWrite(
       sql: String,
       results: List[StatementResult],
+      config: Config,
       eff: EffectiveSet,
       ctx: SchemaContext,
       colPolicies: List[ai.starlake.quack.ondemand.state.RoleColumnPolicy],
@@ -165,11 +171,12 @@ final class ProtectedWriteGuard(
     // we cannot isolate, so it denies.
     parseAsts(sql) match
       case Some(asts) if asts.size == results.size =>
-        evaluate(results.zip(asts), eff, ctx, colPolicies, rowPolicies, clientDataScans)
+        evaluate(results.zip(asts), config, eff, ctx, colPolicies, rowPolicies, clientDataScans)
       case _ => Deny(IncompleteDeny)
 
   private def evaluate(
       pairs: List[(StatementResult, Statement)],
+      config: Config,
       eff: EffectiveSet,
       ctx: SchemaContext,
       colPolicies: List[ai.starlake.quack.ondemand.state.RoleColumnPolicy],
@@ -193,7 +200,19 @@ final class ProtectedWriteGuard(
     // First statement that denies wins; Allow only when every statement is clean.
     val firstDeny = pairs.iterator
       .map { case (result, ast) =>
-        evaluateOne(result, ast, eff, ctx, rowKeys, colKeys, covers, clientDataScans, denial(ast))
+        evaluateOne(
+          result,
+          ast,
+          config,
+          eff,
+          ctx,
+          colPolicies,
+          rowKeys,
+          colKeys,
+          covers,
+          clientDataScans,
+          denial(ast)
+        )
       }
       .collectFirst { case d: Deny => d }
     firstDeny.getOrElse(Allow)
@@ -201,8 +220,10 @@ final class ProtectedWriteGuard(
   private def evaluateOne(
       result: StatementResult,
       ast: Statement,
+      config: Config,
       eff: EffectiveSet,
       ctx: SchemaContext,
+      colPolicies: List[ai.starlake.quack.ondemand.state.RoleColumnPolicy],
       rowKeys: List[(String, String, String)],
       colKeys: List[(String, String, String)],
       covers: (List[(String, String, String)], TableRef) => Boolean,
@@ -211,22 +232,72 @@ final class ProtectedWriteGuard(
   ): GuardOutcome =
     result match
       case e: StatementResult.Extracted =>
-        val reads =
-          e.accesses.filter(_.verb == Verb.Read).map(_.table).toSet
-        val rowHit = reads.exists(t => covers(rowKeys, t))
-        val colHit = reads.exists(t => covers(colKeys, t))
-        if rowHit then GuardOutcome.Deny(deny(firstCovered(reads, rowKeys)))
-        else if colHit then preciseCls(ast, eff, ctx, firstCovered(reads, colKeys), deny)
-        else if TableExtractor
-            .gatedUnsupported(e.accesses, e.unsupported, clientDataScans)
-            .nonEmpty ||
-          e.qualificationErrors.nonEmpty
-        then
-          // Extraction is incomplete, so a protected read may be unaccounted for. Fail closed.
-          GuardOutcome.Deny(IncompleteDeny)
-        else GuardOutcome.Allow
+        clauseReads(ast, config) match
+          case None               => GuardOutcome.Deny(IncompleteDeny)
+          case Some(clauseTables) =>
+            val reads =
+              e.accesses.filter(_.verb == Verb.Read).map(_.table).toSet ++ clauseTables
+            val writes = e.accesses.filter(_.verb == Verb.Write).map(_.table).toSet
+            // Owner ruling D27: the row rewriter never sees a write, so a write aimed at a table
+            // the principal's row policy covers would reach the rows the policy hides. Only a
+            // plain INSERT of new rows is let through.
+            val rowTarget =
+              if DirectWrites.plainInsert(ast) then None
+              else writes.find(t => covers(rowKeys, t))
+            // A write aimed at a table with column policies reads that table's columns where it
+            // filters, computes or returns: one of those reads must not name a masked or denied
+            // column, whose raw value would steer the write or come back in its result.
+            val colTarget        = writes.filter(t => covers(colKeys, t))
+            val protectedColumns = colPolicies
+              .filter(p =>
+                colTarget.exists(t =>
+                  PolicyCoverage.covers(
+                    p.catalogName,
+                    p.schemaName,
+                    p.tableName,
+                    t.database,
+                    t.schema,
+                    t.table
+                  )
+                )
+              )
+              .map(_.columnName)
+            val rowHit = reads.exists(t => covers(rowKeys, t))
+            val colHit = reads.exists(t => covers(colKeys, t))
+            rowTarget match
+              case Some(t) => GuardOutcome.Deny(rowWriteDeny(t.table))
+              case None    =>
+                if rowHit then GuardOutcome.Deny(deny(firstCovered(reads, rowKeys)))
+                else if colTarget.nonEmpty &&
+                  DirectWrites.readsProtectedColumn(ast, protectedColumns)
+                then GuardOutcome.Deny(colWriteDeny(colTarget.head.table))
+                else if colHit then preciseCls(ast, eff, ctx, firstCovered(reads, colKeys), deny)
+                else extractedRest(e, clientDataScans)
       case _: StatementResult.ParseError  => GuardOutcome.Deny(IncompleteDeny)
       case _: StatementResult.ControlFlow => GuardOutcome.Allow
+
+  /** The tables a write's RETURNING and ON CONFLICT clauses read, qualified like the extraction's,
+    * which does not walk them; None when that read is incomplete.
+    */
+  private def clauseReads(ast: Statement, config: Config): Option[Set[TableRef]] =
+    DirectWrites.clauseExpressions(ast) match
+      case Nil   => Some(Set.empty)
+      case exprs =>
+        val extraction =
+          TableExtractor.extract(DirectWrites.asSelect(exprs, DirectWrites.withItems(ast)))
+        val (tables, errors) = TableQualifier.qualify(extraction.tables, config)
+        if extraction.unsupported.nonEmpty || errors.nonEmpty then None else Some(tables)
+
+  private def extractedRest(
+      e: StatementResult.Extracted,
+      clientDataScans: Boolean
+  ): GuardOutcome =
+    if TableExtractor.gatedUnsupported(e.accesses, e.unsupported, clientDataScans).nonEmpty ||
+      e.qualificationErrors.nonEmpty
+    then
+      // Extraction is incomplete, so a protected read may be unaccounted for. Fail closed.
+      GuardOutcome.Deny(IncompleteDeny)
+    else GuardOutcome.Allow
 
   /** CLS arm: allow only if this statement's inner SELECT masks nothing. */
   private def preciseCls(
@@ -299,6 +370,15 @@ final class ProtectedWriteGuard(
 
   private def deny(table: String): String =
     s"access denied: $table is protected by a column/row policy and cannot be read into a write statement; query it directly instead"
+
+  private def rowWriteDeny(table: String): String =
+    s"access denied: $table is protected by a row policy, and writes to a row-policy table are " +
+      "refused: UPDATE, DELETE, MERGE, TRUNCATE, an upsert or RETURNING; only a plain INSERT of " +
+      "new rows is allowed"
+
+  private def colWriteDeny(table: String): String =
+    s"access denied: $table is protected by a column policy, and a write to it cannot read a " +
+      "masked or denied column of it in a WHERE, a SET value, RETURNING or ON CONFLICT"
 
   private def batchDeny(table: String): String =
     s"access denied: $table is protected by a column/row policy and cannot be read in a multi-statement batch; send that query on its own"

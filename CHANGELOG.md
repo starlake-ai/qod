@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Security
+
+- **A row-policy holder's UPDATE, DELETE and MERGE on a table their policy covers are now
+  refused.** Neither policy rewriter reads a write, so such a write reached every row of the
+  table, the rows the policy hides included, and its WHERE or RETURNING read them. The
+  protected-write guard now refuses, for a principal holding a row policy on the target table:
+  UPDATE (with or without WHERE, FROM or RETURNING), DELETE (with or without WHERE, USING or
+  RETURNING), MERGE INTO it, TRUNCATE, an upsert (`ON CONFLICT DO UPDATE`, `INSERT OR REPLACE`)
+  and an INSERT with RETURNING, with `<table> is protected by a row policy, and writes to a
+  row-policy table are refused`. A plain INSERT of new rows (VALUES, or a SELECT over tables
+  with no policy) is allowed as before.
+- **A column-policy holder's write can no longer read a masked or denied column of its target.**
+  An UPDATE, DELETE, MERGE or INSERT whose WHERE, SET value, ON clause, ON CONFLICT clause or
+  RETURNING names such a column of the table it writes (or the whole row, a star or
+  `COLUMNS(...)` over it) read the column's true value; it is now refused with `<table> is
+  protected by a column policy, and a write to it cannot read a masked or denied column`. A
+  write that assigns that column without reading it stays allowed.
+- A write's RETURNING and ON CONFLICT clauses now count as reads for the protected-write guard,
+  so one that reads a protected table is refused like any other read into a write (DuckDB 2.0
+  refuses a subquery there too).
+
 ## 0.14.2
 
 ### Upgrading

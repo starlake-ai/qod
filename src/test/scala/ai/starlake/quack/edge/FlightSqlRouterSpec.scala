@@ -1787,6 +1787,70 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     out.left.get shouldBe a[RouterFailure.AccessDenied]
     capturedSql() shouldBe ""
 
+  it should "refuse a row-policy holder's UPDATE, DELETE and MERGE on its policy table" in:
+    // Owner ruling D27: neither rewriter reads a write, so these reached every row of customer.
+    List(
+      "UPDATE main.customer SET c_id = 0 WHERE c_region = 'Y'",
+      "UPDATE main.customer SET c_id = 0 RETURNING c_email",
+      "DELETE FROM main.customer WHERE c_region = 'Y'",
+      "MERGE INTO main.customer t USING main.scratch s ON t.c_id = s.id WHEN MATCHED THEN DELETE",
+      "INSERT INTO main.customer VALUES (1, 'e', 'X') ON CONFLICT (c_id) DO UPDATE SET c_id = 2",
+      "TRUNCATE main.customer"
+    ).foreach { sql =>
+      val (router, capturedSql, _) =
+        setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)
+      val out = router
+        .execute("pw-d27", "alice", poolKey, sql, Some(effWithRowPolicies(List(rowPolicyCustomer))))
+        .unsafeRunSync()
+      withClue(sql) {
+        out.left.toOption.get.reason should include(
+          "customer is protected by a row policy, and writes to a row-policy table are refused"
+        )
+        capturedSql() shouldBe ""
+      }
+    }
+
+  it should "still route a row-policy holder's plain INSERT into the policy table" in:
+    val (router, capturedSql, _) =
+      setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)
+    val sql = "INSERT INTO main.customer VALUES (1, 'e', 'X')"
+    router
+      .execute(
+        "pw-d27-ok",
+        "alice",
+        poolKey,
+        sql,
+        Some(effWithRowPolicies(List(rowPolicyCustomer)))
+      )
+      .unsafeRunSync() shouldBe a[Right[?, ?]]
+    capturedSql() should include(sql)
+
+  it should "refuse a column-policy holder's write reading the masked column of its target" in:
+    List(
+      "UPDATE main.customer SET c_id = 0 WHERE c_email = 'x'",
+      "DELETE FROM main.customer WHERE c_email LIKE 'a%'",
+      "UPDATE main.customer SET c_id = 0 RETURNING c_email"
+    ).foreach { sql =>
+      val (router, capturedSql, _) =
+        setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)
+      val out = router
+        .execute("pw-d27-c", "alice", poolKey, sql, Some(effWithPolicies(List(maskCustomerEmail))))
+        .unsafeRunSync()
+      withClue(sql) {
+        out.left.toOption.get.reason should include("cannot read a masked or denied column")
+        capturedSql() shouldBe ""
+      }
+    }
+
+  it should "still route a column-policy holder's write that only assigns the masked column" in:
+    val (router, capturedSql, _) =
+      setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)
+    val sql = "UPDATE main.customer SET c_email = 'x' WHERE c_id = 1"
+    router
+      .execute("pw-d27-c-ok", "alice", poolKey, sql, Some(effWithPolicies(List(maskCustomerEmail))))
+      .unsafeRunSync() shouldBe a[Right[?, ?]]
+    capturedSql() should include(sql)
+
   it should "deny a batch led by a read whose later write reads a protected table (audit F18)" in:
     // The classifier reads the first statement only (Select), the rewriters' parse keeps only
     // `SELECT 1`, and the node runs both statements: without the guard the masked or filtered
