@@ -262,6 +262,13 @@
   `inserted` / `deleted` / `updated` count one event per snapshot a row changed in (a row set
   back to its fork value still counts), where a proposal's counts are net. The `branch_changes`
   and `diff` tool descriptions say so.
+- **The Quack door serves clients that send each statement as `<alias>.query('<sql>')`** (#299),
+  such as Columnar's `quack` ADBC driver: they signed in, then every statement failed with
+  `Catalog Error: Table Function with name query does not exist!`. The DuckDB client binds that
+  macro through the attached catalog's `main` schema, which it builds from `duckdb_schemas()`, and
+  the metadata filter hid `main` from a principal holding no grant in it (an admin's attach
+  worked). The filtered `duckdb_schemas()` now always keeps the session catalog's `main` row; the
+  tables in it stay filtered.
 
 ## 0.14.1
 
