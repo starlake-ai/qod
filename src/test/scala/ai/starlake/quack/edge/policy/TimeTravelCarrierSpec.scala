@@ -139,7 +139,7 @@ class TimeTravelCarrierSpec extends AnyFlatSpec with Matchers:
       val out = stacked(sql)
       withClue(s"$sql\n -> $out\n") {
         out should include("'***'")
-        out should include(s"FROM $Ref $At WHERE (c_region = 'X')")
+        out should include(s"FROM $Ref AS __qod_rls $At WHERE (__qod_rls.c_region = 'X')")
         out.split(java.util.regex.Pattern.quote(At), -1).length - 1 shouldBe 1
       }
     }

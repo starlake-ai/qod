@@ -170,7 +170,7 @@ class RowPolicyCteScopeSpec extends AnyFlatSpec with Matchers:
       go("SELECT * FROM secret r, (WITH secret AS (SELECT 1 AS y) SELECT * FROM secret) c")
     )
     wraps(sql, "region = 'eu'") shouldBe 1
-    sql should include("(SELECT * FROM secret WHERE (region = 'eu')) r")
+    sql should include("(SELECT * FROM secret AS __qod_rls WHERE (__qod_rls.region = 'eu')) r")
     sql should include("(WITH secret AS (SELECT 1 AS y) SELECT * FROM secret) c")
   }
 
@@ -197,7 +197,9 @@ class RowPolicyCteScopeSpec extends AnyFlatSpec with Matchers:
       )
     )
     wraps(sql, "region = 'eu'") shouldBe 1
-    sql should include("SELECT id AS y FROM (SELECT * FROM secret WHERE (region = 'eu')) AS secret")
+    sql should include(
+      "SELECT id AS y FROM (SELECT * FROM secret AS __qod_rls WHERE (__qod_rls.region = 'eu')) AS secret"
+    )
   }
 
   "a reference to the real table outside the CTE's scope" should "be wrapped" in {
@@ -213,7 +215,9 @@ class RowPolicyCteScopeSpec extends AnyFlatSpec with Matchers:
       go("SELECT (WITH secret AS (SELECT 1 AS y) SELECT max(y) FROM secret) AS m FROM secret")
     )
     wraps(outer, "region = 'eu'") shouldBe 1
-    outer should include("FROM (SELECT * FROM secret WHERE (region = 'eu')) AS secret")
+    outer should include(
+      "FROM (SELECT * FROM secret AS __qod_rls WHERE (__qod_rls.region = 'eu')) AS secret"
+    )
   }
 
   "a qualified reference" should "be wrapped although a CTE has the table's name" in
@@ -231,13 +235,16 @@ class RowPolicyCteScopeSpec extends AnyFlatSpec with Matchers:
     )
     wraps(qualified, "region = 'eu'") shouldBe 1
     qualified should include("secret c")
-    qualified should include("(SELECT * FROM tpch1.secret WHERE (region = 'eu')) r")
+    qualified should include(
+      "(SELECT * FROM tpch1.secret AS __qod_rls WHERE (__qod_rls.region = 'eu')) r"
+    )
     val body = rewritten(
       go("WITH secret AS (SELECT id FROM secret WHERE id > 0) SELECT * FROM t, secret s")
     )
     wraps(body, "region = 'eu'") shouldBe 1
     body should include(
-      "SELECT id FROM (SELECT * FROM secret WHERE (region = 'eu')) AS secret WHERE"
+      "SELECT id FROM (SELECT * FROM secret AS __qod_rls WHERE (__qod_rls.region = 'eu')) AS secret " +
+        "WHERE"
     )
     body should include("FROM t, secret s")
   }

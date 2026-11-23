@@ -117,7 +117,7 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
   it should "wrap a matched base table in a filtered subselect" in {
     val sql =
       rewritten(go("SELECT c_id FROM customer", eff(tenantUser, List(policy("c_region = 'eu'")))))
-    sql should include("select * from customer where")
+    sql should include("select * from customer as __qod_rls where")
     sql should include("c_region = 'eu'")
   }
 
@@ -223,7 +223,7 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
         eff(tenantUser, List(policy("tenant_id = ${tenantId}", table = "*")))
       )
     )
-    sql should include("select * from orders where")
+    sql should include("select * from orders as __qod_rls where")
     sql should include("tenant_id = 'acme'")
   }
 
@@ -503,7 +503,8 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
     raw(
       go("SELECT * FROM tpch1.customer AT (VERSION => 7)", eff(tenantUser, List(regionEu)))
     ) shouldBe
-      "SELECT * FROM (SELECT * FROM tpch1.customer AT (VERSION => 7) WHERE (c_region = 'eu')) " +
+      "SELECT * FROM (SELECT * FROM tpch1.customer AS __qod_rls AT (VERSION => 7) WHERE " +
+      "(__qod_rls.c_region = 'eu')) " +
       "AS customer"
   }
 
@@ -511,8 +512,8 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
     raw(
       go("SELECT c.c_id FROM tpch1.customer c AT (VERSION => 7)", eff(tenantUser, List(regionEu)))
     ) shouldBe
-      "SELECT c.c_id FROM (SELECT * FROM tpch1.customer AT (VERSION => 7) WHERE " +
-      "(c_region = 'eu')) c"
+      "SELECT c.c_id FROM (SELECT * FROM tpch1.customer AS __qod_rls AT (VERSION => 7) WHERE " +
+      "(__qod_rls.c_region = 'eu')) c"
   }
 
   it should "keep each table's own clause when several tables carry one" in {
@@ -524,8 +525,12 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
         eff(tenantUser, policies)
       )
     )
-    sql should include("FROM customer AT (VERSION => 7) WHERE (c_region = 'eu')) AS c")
-    sql should include("FROM orders AT (VERSION => 9) WHERE (o_year = 2024)) o")
+    sql should include(
+      s"FROM customer AS __qod_rls AT (VERSION => 7) WHERE (__qod_rls.c_region = 'eu')) AS c"
+    )
+    sql should include(
+      s"FROM orders AS __qod_rls AT (VERSION => 9) WHERE (__qod_rls.o_year = 2024)) o"
+    )
   }
 
   it should "leave the clause after the alias on a table no policy covers" in {
@@ -535,19 +540,21 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
         eff(tenantUser, List(regionEu))
       )
     )
-    sql should include("FROM customer AT (VERSION => 7) WHERE (c_region = 'eu')) c")
+    sql should include(
+      s"FROM customer AS __qod_rls AT (VERSION => 7) WHERE (__qod_rls.c_region = 'eu')) c"
+    )
     sql should include("orders o AT (VERSION => 9)")
   }
 
   it should "keep the caller's spelling of the clause, case and spacing included" in {
     raw(go("SELECT * FROM customer x at(version=>7)", eff(tenantUser, List(regionEu)))) should
-      include("FROM customer at(version=>7) WHERE (c_region = 'eu')) x")
+      include(s"FROM customer AS __qod_rls at(version=>7) WHERE (__qod_rls.c_region = 'eu')) x")
   }
 
   it should "keep an AT (TIMESTAMP => expr) clause the same way" in {
     val clause = "AT (TIMESTAMP => TIMESTAMP '2026-01-01 10:00:00')"
     raw(go(s"SELECT * FROM customer c $clause", eff(tenantUser, List(regionEu)))) should
-      include(s"FROM customer $clause WHERE (c_region = 'eu')) c")
+      include(s"FROM customer AS __qod_rls $clause WHERE (__qod_rls.c_region = 'eu')) c")
   }
 
   it should "keep the clause on a table inside a subquery and a CTE" in {
@@ -558,8 +565,12 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
         eff(tenantUser, List(regionEu))
       )
     )
-    sql should include("FROM customer AT (VERSION => 3) WHERE (c_region = 'eu')) AS customer")
-    sql should include("FROM customer AT (VERSION => 4) WHERE (c_region = 'eu')) z")
+    sql should include(
+      s"FROM customer AS __qod_rls AT (VERSION => 3) WHERE (__qod_rls.c_region = 'eu')) AS customer"
+    )
+    sql should include(
+      s"FROM customer AS __qod_rls AT (VERSION => 4) WHERE (__qod_rls.c_region = 'eu')) z"
+    )
   }
 
   it should "pass through, clause intact in the caller's text, when no policy covers the table" in {
@@ -665,7 +676,9 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
         "SELECT * FROM customer c JOIN orders o AT (TIMESTAMP => '2026-01-01') ON true",
         frOnly
       )
-    ) should (include("FROM (SELECT * FROM customer WHERE (c_nation = 'FR')) c") and
+    ) should (include(
+      s"FROM (SELECT * FROM customer AS __qod_rls WHERE (__qod_rls.c_nation = 'FR')) c"
+    ) and
       include("orders o AT (TIMESTAMP => '2026-01-01')"))
   }
 
@@ -682,7 +695,7 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
       withClue(sql) {
         val out = raw(go(sql, frOnly))
         out should include("TIMESTAMP => '2026-01-01")
-        out should include("WHERE (c_nation = 'FR')")
+        out should include(s"WHERE (__qod_rls.c_nation = 'FR')")
         out should not include "__qod_time_travel_"
       }
     }
@@ -703,23 +716,30 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
 
   "a sample of a filtered subquery" should "be rewritten (the way out for a sample or a pivot)" in {
     go("SELECT * FROM (SELECT * FROM customer) USING SAMPLE 10%", frOnly) shouldBe Rewritten(
-      "SELECT * FROM (SELECT * FROM (SELECT * FROM customer WHERE (c_nation = 'FR')) AS customer) " +
+      "SELECT * FROM (SELECT * FROM (SELECT * FROM customer AS __qod_rls WHERE (__qod_rls.c_nation = 'FR')) " +
+        "AS customer) " +
         "USING SAMPLE 10%"
     )
   }
 
   "a row-policy table read with no clause" should "be wrapped exactly as before" in {
     go("SELECT * FROM customer", frOnly) shouldBe
-      Rewritten("SELECT * FROM (SELECT * FROM customer WHERE (c_nation = 'FR')) AS customer")
+      Rewritten(
+        s"SELECT * FROM (SELECT * FROM customer AS __qod_rls WHERE (__qod_rls.c_nation = 'FR')) AS customer"
+      )
     go("SELECT c.c_id FROM customer c", frOnly) shouldBe
-      Rewritten("SELECT c.c_id FROM (SELECT * FROM customer WHERE (c_nation = 'FR')) c")
+      Rewritten(
+        s"SELECT c.c_id FROM (SELECT * FROM customer AS __qod_rls WHERE (__qod_rls.c_nation = 'FR')) c"
+      )
     go("SELECT * FROM acme_tpch.tpch1.customer AS c", frOnly) shouldBe
       Rewritten(
-        "SELECT * FROM (SELECT * FROM acme_tpch.tpch1.customer WHERE (c_nation = 'FR')) AS c"
+        "SELECT * FROM (SELECT * FROM acme_tpch.tpch1.customer AS __qod_rls WHERE " +
+          "(__qod_rls.c_nation = 'FR')) AS c"
       )
     go("SELECT * FROM \"tpch1\".\"customer\"", frOnly) shouldBe
       Rewritten(
-        "SELECT * FROM (SELECT * FROM \"tpch1\".\"customer\" WHERE (c_nation = 'FR')) " +
+        "SELECT * FROM (SELECT * FROM \"tpch1\".\"customer\" AS __qod_rls WHERE " +
+          "(__qod_rls.c_nation = 'FR')) " +
           "AS \"customer\""
       )
   }
