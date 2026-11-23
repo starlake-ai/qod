@@ -44,6 +44,9 @@ class ProtectedWriteGuardDirectWriteSpec extends AnyFlatSpec with Matchers:
 
   private val RowWrite   = "writes to a row-policy table are refused"
   private val ColWrite   = "cannot read a masked or denied column"
+  // The method-call screen every policy step runs first refuses a method call on a name of more
+  // than two parts, naming no table.
+  private val MethodScreen = "cannot be read under column policies; write it as a function call"
   private val ReadInto   = "cannot be read into a write statement"
   private val Positional =
     "cannot use a positional reference (#n); name the columns instead"
@@ -261,21 +264,21 @@ class ProtectedWriteGuardDirectWriteSpec extends AnyFlatSpec with Matchers:
       leaks = true
     ),
     // DuckDB refuses these as written; the guard refuses them first.
-    Refused("UPDATE secret SET a = a RETURNING main.secret.email.upper()", ColWrite, false),
+    Refused("UPDATE secret SET a = a RETURNING main.secret.email.upper()", MethodScreen, false),
     Refused(
       "UPDATE secret SET a = a WHERE id = 2 RETURNING email.count() OVER ()",
-      ColWrite,
+      MethodScreen,
       false
     ),
     Refused(
       "UPDATE secret SET a = (SELECT email.count() FILTER (WHERE id > 0)) WHERE id = 2",
-      ColWrite,
+      MethodScreen,
       leaks = false
     ),
     Refused(
       "UPDATE secret SET owner = (SELECT email.string_agg(',') WITHIN GROUP (ORDER BY id)) " +
         "WHERE id = 2",
-      ColWrite,
+      MethodScreen,
       leaks = false
     )
   )
@@ -612,7 +615,7 @@ class ProtectedWriteGuardDirectWriteSpec extends AnyFlatSpec with Matchers:
         guarded(f.sql, e) match
           case GuardOutcome.Deny(reason) =>
             reason should include(f.reason)
-            reason should include("secret")
+            if f.reason != MethodScreen then reason should include("secret")
           case other => fail(s"expected a refusal, got $other")
       }
   }

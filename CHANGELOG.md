@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Upgrading
+
+- **Check the boot output for row policies that name a column their table no longer has.** From
+  this release such a policy denies every statement reading its table under its role (see the
+  second Security entry), where it used to apply unchecked. At each boot the manager prints one
+  `WARN:` line on stderr per such policy and DuckLake database, naming the tenant, the role, the
+  policy id, the table and the missing columns, and one per policy whose predicate cannot be
+  applied at all; update or delete each. It checks policies that name their schema and table, a
+  wildcard catalog against each of the tenant's DuckLake databases holding the table; a wildcard
+  schema or table is not checked.
+
 ### Security
 
 - **A row policy no longer filters a reference that DuckDB binds to a CTE.** A statement whose
@@ -24,7 +35,13 @@
   renamed after the policy was written) therefore read a column of an item the caller placed
   beside the table, and could admit every row. Two changes close it:
   - Such a policy now fails to apply, and the statement is denied with `row policy failed to
-    apply - contact an administrator`, which names neither the predicate nor the column. The
+    apply (ref <12 hex digits>) - contact an administrator`, which names neither the policy, the
+    predicate nor the column. The manager logs the reference at ERROR with the tenant, pool,
+    user, table, roles, policy ids, cause and missing columns, and the denial's `data-denial`
+    audit event carries the same under `rowPolicyRef`, `rowPolicyTable`, `rowPolicies`,
+    `rowPolicyRoles`, `rowPolicyCause` and `rowPolicyMissingColumns`, so a tenant admin finds
+    the policy a user's reference names. Every other failure to apply a row policy reads the same
+    way. The
     gateway reads the table's columns from the catalog the column policies use. A time-travel
     read `AT (VERSION => n)` is judged on the columns of snapshot `n`, any other clause on the
     current columns. A table whose columns cannot be read is handled as
@@ -49,6 +66,69 @@
   `duckdb_prepared_statements()` and `pg_catalog.pg_prepared_statements` showed such a principal
   the administrator's predicates and the filters' aliases. A statement naming one of them is now
   refused to such a principal, on every statement kind.
+- **Column policies hold for a column named like a SQL keyword.** A mask or deny on a column
+  named `current_date`, `current_time`, `current_timestamp`, `current` or `current_timezone` (a
+  CSV or Parquet header can create one) did not apply: the policy rewriter read the bare name as
+  the keyword, while DuckDB reads the column, so its raw value reached the client. The same held
+  for a column named `key`, `prior`, `nextval`, `connect_by_root`, `exists`, `minus`,
+  `distinctrow`, `high_priority`, `straight_join` or one of the `sql_*` select modifiers when
+  another word follows it (`key k`), and for one named `year`, `month`, `day`, `hour`, `minute` or
+  `second` read as a function's argument (`max(year)`), and for one named `output`, `preferring` or
+  `xor` before `ORDER BY` in an aggregate's arguments (`list(output ORDER BY id)`), which the
+  rewriter read as no argument at all. Each is now read as DuckDB reads it, so its mask or deny
+  applies in every clause, and the protected-write guard and the row policy rewriter read the
+  statement the same way, so an `INSERT ... SELECT` or `CREATE TABLE ... AS SELECT` can no longer
+  copy such a column out. Under column or row policies, a statement whose parse keeps fewer
+  arguments of a call than its text gives is refused. A SQL value name (`current_date`, `current_user`, `user`,
+  `localtime` and the others) binds the column when the select's own FROM has it and the function
+  otherwise, except inside an aggregate's arguments (a method call such as `user.max()` included),
+  where DuckDB can bind an enclosing query's column: there it is refused when an enclosing table
+  has a protected column of that name. Read
+  bare in a subquery outside an aggregate, a column named `current_user`, `session_user`, `user`,
+  `current_role`, `current_schema`, `current_catalog`, `localtime` or `localtimestamp` is now the
+  function, as DuckDB reads it, instead of a refusal. Under column policies, a statement using
+  `@` (DuckDB's absolute value operator, which the rewriter read as no column) or a column named
+  `interval` followed by another word is refused; write `abs(<column>)` or quote the name.
+- **Method-call syntax is read as DuckDB reads it under column policies.** DuckDB reads
+  `<expression>.f(args)` as `f(<expression>, args)`, chains included (`user.upper().max()`), and
+  the policy rewriter held such a call as a dotted name with no column in it. A chained method-call
+  aggregate in a subquery read the enclosing query's column, and `ssn.max() FILTER (WHERE true)`
+  read any masked or denied column raw, in the select list, as a `HAVING` test or inside an
+  `INSERT`. With a receiver named `pg_catalog`, `information_schema`, `temp`, `memory` or the
+  catalog's alias, it read a whole row. For a column policy holder, a method call on anything but a
+  name (a call, a subscript, a parenthesized expression, a list, struct or string literal) is now
+  written as the plain call DuckDB makes of it before any policy step reads the statement. A
+  method call on a name is judged against the names in scope: its column's mask or deny applies
+  when the name is a column, and an aggregate, window or ordered-set call in that form is refused
+  whenever its qualifier may name a column, a table or an alias of the statement. A call's
+  dotted name is judged whole: only `<fn>`, `main.<fn>` and `system.main.<fn>` are DuckDB's own
+  functions, and a name with a part left over after `main` or `system.main` (`main.t.max()`, the
+  table `main.t`) is a method call, refused with `FILTER`, `OVER` or `WITHIN GROUP` after it. A call qualified by another
+  schema or catalog that nothing in scope is named after (a function of the tenant's own) is left
+  as written. Also refused: a method call followed by `FILTER`, `OVER` or `WITHIN GROUP` on
+  anything but a name, and one with `DISTINCT` or `ALL` in its arguments or on a typed literal, a
+  cast, a `CASE` or a name of more than two parts. Write those as function calls. A statement whose
+  parse keeps fewer arguments of a call than its text gives is refused, call by call. The words of
+  the entry above are no longer quoted in `PRIMARY KEY`, `FOREIGN KEY` and `IF [NOT] EXISTS`, nor
+  after `$` or `::`.
+  - A stored mask or row predicate written in method form (`ssn.left(2) || '***'`,
+    `region.upper() = 'EU'`) is read the same way, when it is created and when it is applied. A
+    method-form mask reading another column is refused at creation. If it was stored before, it is
+    refused when its column is read.
+- **A mask now reads the same column as the reference it replaces.** A mask names its column
+  bare, and was spliced as stored, so in a subquery or beside another table holding a column of
+  the same name it could read that other column, part of a denied one included, or fail as
+  ambiguous. Each column the mask names is now written as the reference it replaces, qualifier and
+  quoting included, so the mask reads exactly the column the statement named; a lambda's
+  parameters are left as written. A mask that calls `current_date`, `current_time` or
+  `current_timestamp` keeps calling the function beside a column of that name.
+  - Creating or updating a mask that reads another column than its own is now refused wherever the
+    column appears (inside `IN`, `IS NULL`, `BETWEEN`, `NOT`, a list, or through `@`), and so is one
+    holding a star, a `COLUMNS(..)` expression or a statement parameter; the check used to follow
+    functions, operators, `CASE` and `CAST` only. A mask stored before, or imported
+    from a manifest (which does not check masks), that reads another column is refused when a
+    statement reads its column: that refusal is what guards such a row. Review stored masks before
+    upgrading.
 
 - **A row-policy holder's UPDATE, DELETE and MERGE on a table their policy covers are now
   refused.** Neither policy rewriter reads a write, so such a write reached every row of the
@@ -102,6 +182,11 @@
   `inserted` / `deleted` / `updated` count one event per snapshot a row changed in (a row set
   back to its fork value still counts), where a proposal's counts are net. The `branch_changes`
   and `diff` tool descriptions say so.
+- **The admin console shows the row-conflict status and what the counts mean** (#298). The
+  change set of a branch now says, under its table, that the row conflicts are out of date (`stale`:
+  propose again) or are computed when the merge is proposed (`not_computed`), where the row
+  conflicts section was simply missing; and the Inserted / Deleted / Updated headers carry a
+  tooltip saying they count change events, not net changes.
 - **The MCP discovery tools answer a plain tenant member** (#297). `list_databases`,
   `list_tables`, `describe_table` and `table_history` read through the catalog handlers' admin
   gate, so every member who was not an admin got `tenant_forbidden: session has no admin grant on

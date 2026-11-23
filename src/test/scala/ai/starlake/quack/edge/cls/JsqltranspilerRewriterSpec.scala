@@ -716,7 +716,7 @@ class JsqltranspilerRewriterSpec extends AnyFlatSpec with Matchers:
     )
     rewrittenTo(
       "SELECT c_email.lower().upper() FROM customer",
-      "SELECT lower('***').upper() FROM customer"
+      "SELECT upper(lower('***')) FROM customer"
     )
   }
 

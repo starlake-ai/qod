@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 import { ApiError } from './client';
 import {
   actionErrorText,
@@ -6,15 +6,21 @@ import {
   branchCount,
   branchMergeCell,
   conflictPolicyText,
+  ChangeEventsTitle,
   CountsUnavailableTitle,
+  countsTitle,
   diffChangeType,
   noOpenProposal,
   NotCountedTitle,
   proposalErrorNote,
   rowConflictsHint,
+  RowConflictsNotComputedNote,
+  rowConflictsNote,
+  RowConflictsStaleNote,
   rowConflictsText,
+  RowConflictsUnknownNote,
 } from './branchCounts';
-import type { BranchRowConflicts } from './types';
+import type { BranchChangesResponse, BranchRowConflicts, BranchTableChange } from './types';
 
 describe('branchCount', () => {
   const row = { kind: 'modified', inserted: 7, deleted: 1, updated: 2 };
@@ -326,5 +332,171 @@ describe('noOpenProposal', () => {
     expect(noOpenProposal('b', [{ status: 'merged' }])).toEqual({
       note: "branch 'b' is already merged: main snapshot ?, tag ?",
     });
+  });
+});
+
+describe('rowConflictsNote', () => {
+  const orders: BranchTableChange = {
+    schema: 'main', table: 'orders', kind: 'modified', inserted: 2, deleted: 0, updated: 1, mergeable: true,
+  };
+  const tables = [orders];
+
+  it('says the row conflicts are out of date when the proposal is stale', () => {
+    expect(rowConflictsNote('stale', tables)).toBe(
+      'Row conflicts are out of date: main or the branch moved since the proposal. Propose again to recompute them.',
+    );
+    expect(rowConflictsNote('stale', tables)).toBe(RowConflictsStaleNote);
+  });
+
+  it('says they are computed at proposal when none is open', () => {
+    expect(rowConflictsNote('not_computed', tables)).toBe('Row conflicts are computed when the merge is proposed.');
+    expect(rowConflictsNote('not_computed', tables)).toBe(RowConflictsNotComputedNote);
+  });
+
+  it('adds no note for current or a missing status: the row conflicts show as they are', () => {
+    expect(rowConflictsNote('current', tables)).toBeNull();
+    expect(rowConflictsNote(undefined, tables)).toBeNull();
+  });
+
+  it('names a status this console does not know, never reading it as current', () => {
+    expect(rowConflictsNote('later' as never, tables)).toBe(
+      "Row conflicts: the server says 'later', a status this console does not know.",
+    );
+    expect(rowConflictsNote('later' as never, tables)).toBe(RowConflictsUnknownNote('later'));
+  });
+
+  it('names the status the server sent, whatever it is', () => {
+    expect(rowConflictsNote('partial' as never, tables)).toBe(
+      "Row conflicts: the server says 'partial', a status this console does not know.",
+    );
+  });
+
+  it('gives the note to a change set of several tables as to one', () => {
+    const two = [orders, { ...orders, table: 'customers' }];
+    expect(rowConflictsNote('stale', two)).toBe(RowConflictsStaleNote);
+    expect(rowConflictsNote('not_computed', two)).toBe(RowConflictsNotComputedNote);
+    expect(rowConflictsNote('current', two)).toBeNull();
+    expect(rowConflictsNote(undefined, two)).toBeNull();
+    expect(rowConflictsNote('later' as never, two)).toBe(RowConflictsUnknownNote('later'));
+  });
+
+  it('takes the table list itself as a required second argument, not a boolean', () => {
+    expectTypeOf(rowConflictsNote).parameter(1).toMatchTypeOf<readonly unknown[]>();
+    expectTypeOf(rowConflictsNote).parameter(1).not.toEqualTypeOf<boolean>();
+    expectTypeOf(rowConflictsNote).parameters.toMatchTypeOf<
+      [BranchChangesResponse['rowConflictsStatus'], readonly unknown[]]
+    >();
+    // Checked by tsc only, never run.
+    const wrongCalls = [
+      // @ts-expect-error: the table list is required.
+      () => rowConflictsNote('stale'),
+      // @ts-expect-error: a boolean is no table list.
+      () => rowConflictsNote('stale', true),
+    ];
+    expect(wrongCalls).toHaveLength(2);
+  });
+});
+
+describe('countsTitle', () => {
+  it('explains change events when the server says the counts are', () => {
+    expect(countsTitle('change_events')).toBe(
+      'Change events: one per snapshot a row changed in; a proposal counts net changes.',
+    );
+    expect(countsTitle('change_events')).toBe(ChangeEventsTitle);
+  });
+
+  it('has no title when the server does not say, or says something this console does not know', () => {
+    expect(countsTitle(undefined)).toBeUndefined();
+    expect(countsTitle('later' as never)).toBeUndefined();
+  });
+});
+
+describe('rowConflictsNote with no table', () => {
+  const tables: BranchTableChange[] = [
+    { schema: 'main', table: 'orders', kind: 'modified', inserted: 2, deleted: 0, updated: 1, mergeable: true },
+  ];
+
+  it('adds no note, whatever the status: the change set has no row conflict to speak of', () => {
+    expect(rowConflictsNote('stale', [])).toBeNull();
+    expect(rowConflictsNote('not_computed', [])).toBeNull();
+  });
+
+  it('adds none either for current or a missing status', () => {
+    expect(rowConflictsNote('current', [])).toBeNull();
+    expect(rowConflictsNote(undefined, [])).toBeNull();
+  });
+
+  it('adds none either for a status this console does not know', () => {
+    expect(rowConflictsNote('later' as never, [])).toBeNull();
+  });
+
+  it('gives the note to a change set that has tables', () => {
+    expect(rowConflictsNote('stale', tables)).toBe(RowConflictsStaleNote);
+    expect(rowConflictsNote('not_computed', tables)).toBe(RowConflictsNotComputedNote);
+    expect(rowConflictsNote('current', tables)).toBeNull();
+    expect(rowConflictsNote(undefined, tables)).toBeNull();
+    expect(rowConflictsNote('later' as never, tables)).toBe(RowConflictsUnknownNote('later'));
+  });
+});
+
+// The two fields are optional on the reply: a server from before #298 omits them. These checks are
+// at the type level (tsc -b in `npm run build` fails on them) and at run time on whole replies.
+describe('BranchChangesResponse from a server before and after #298', () => {
+  const table: BranchTableChange = {
+    schema: 'main', table: 'orders', kind: 'modified', inserted: 2, deleted: 0, updated: 1, mergeable: true,
+  };
+  const older: BranchChangesResponse = {
+    branch: 'b', forkSnapshot: 1, headSnapshot: 3, mainSnapshot: 2,
+    tables: [table], conflicts: [], unsupported: [], mergeable: true,
+  };
+
+  it('types the row-conflict status and the counts meaning as optional, with the values the server sends', () => {
+    expectTypeOf<BranchChangesResponse['rowConflictsStatus']>().toEqualTypeOf<
+      'current' | 'stale' | 'not_computed' | undefined
+    >();
+    expectTypeOf<BranchChangesResponse['countsAre']>().toEqualTypeOf<'change_events' | undefined>();
+  });
+
+  // Each case calls the helpers as the branch panel does on a whole reply:
+  // rowConflictsNote(reply.rowConflictsStatus, reply.tables), countsTitle(reply.countsAre).
+
+  it('reads an older reply as current with counts of unknown meaning: no note, no title', () => {
+    expect(rowConflictsNote(older.rowConflictsStatus, older.tables)).toBeNull();
+    expect(countsTitle(older.countsAre)).toBeUndefined();
+  });
+
+  it('reads a newer reply with a stale status and change events: the note and the title', () => {
+    const newer: BranchChangesResponse = { ...older, rowConflictsStatus: 'stale', countsAre: 'change_events' };
+    expect(rowConflictsNote(newer.rowConflictsStatus, newer.tables)).toBe(RowConflictsStaleNote);
+    expect(countsTitle(newer.countsAre)).toBe(ChangeEventsTitle);
+  });
+
+  it('gives a newer reply with no table no note, even not computed', () => {
+    const empty: BranchChangesResponse = { ...older, tables: [], rowConflictsStatus: 'not_computed' };
+    expect(rowConflictsNote(empty.rowConflictsStatus, empty.tables)).toBeNull();
+  });
+
+  it('gives a stale reply with no table no note: "no table changes" already shows', () => {
+    const empty: BranchChangesResponse = { ...older, tables: [], rowConflictsStatus: 'stale' };
+    expect(rowConflictsNote(empty.rowConflictsStatus, empty.tables)).toBeNull();
+  });
+
+  it('gives a not computed reply with tables its note', () => {
+    const open: BranchChangesResponse = { ...older, rowConflictsStatus: 'not_computed' };
+    expect(rowConflictsNote(open.rowConflictsStatus, open.tables)).toBe(RowConflictsNotComputedNote);
+  });
+
+  it('gives a current reply with tables no note: its row conflicts show as they are', () => {
+    const current: BranchChangesResponse = { ...older, rowConflictsStatus: 'current' };
+    expect(rowConflictsNote(current.rowConflictsStatus, current.tables)).toBeNull();
+  });
+
+  it('names a status a later server adds when the reply has tables, and says nothing without', () => {
+    const later = { ...older, rowConflictsStatus: 'later' } as unknown as BranchChangesResponse;
+    expect(rowConflictsNote(later.rowConflictsStatus, later.tables)).toBe(
+      "Row conflicts: the server says 'later', a status this console does not know.",
+    );
+    const laterEmpty = { ...older, tables: [], rowConflictsStatus: 'later' } as unknown as BranchChangesResponse;
+    expect(rowConflictsNote(laterEmpty.rowConflictsStatus, laterEmpty.tables)).toBeNull();
   });
 });
