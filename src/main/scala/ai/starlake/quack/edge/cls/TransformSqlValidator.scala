@@ -78,7 +78,8 @@ object TransformSqlValidator:
     // no column; a time keyword or a node JSqlParser makes of a column reference is read as DuckDB
     // reads it).
     val stored = Try(ResidualColumns.parseStoredExpression(trimmed)) match
-      case Success(e)  => e
+      case Success(e)                                          => e
+      case Failure(e: ResidualColumns.StoredExpressionRefused) => return Invalid(e.reason)
       case Failure(ex) => return Invalid(s"transformSql does not parse: ${ex.getMessage}")
     val references                  = ResidualColumns.references(stored)
     def protectedName(name: String) =

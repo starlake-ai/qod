@@ -29,7 +29,8 @@ class MethodCallSpec extends AnyFlatSpec with Matchers:
     (Catalog, "main", "sp") -> List("id", "user", "current_user"),
     (Catalog, "main", "u")  -> List("id", "current_date"),
     (Catalog, "main", "o")  -> List("id"),
-    (Catalog, "main", "w")  -> List("a", "b")
+    (Catalog, "main", "w")  -> List("a", "b"),
+    (Catalog, "main", "q")  -> List("id", "main", "pg_catalog")
   )
   private val catalog = new ColumnCatalog.MapCatalog(columns)
   private val rw      = new ColumnPolicyRewriter(catalog)
@@ -58,53 +59,87 @@ class MethodCallSpec extends AnyFlatSpec with Matchers:
 
   // ---- the desugaring, form by form (each checked on the DuckDB 2.0.0 CLI) --------------------
 
-  "a method call" should "be written as the plain call DuckDB makes of it" in
-    List(
-      "SELECT s.upper() FROM u"                   -> "SELECT upper(s) FROM u",
-      "SELECT u.s.upper() FROM u"                 -> "SELECT upper(u.s) FROM u",
-      "SELECT \"s\".upper() FROM u"               -> "SELECT upper(\"s\") FROM u",
-      "SELECT s . upper ( ) FROM u"               -> "SELECT upper(s) FROM u",
-      "SELECT s.upper().lower() FROM u"           -> "SELECT lower(upper(s)) FROM u",
-      "SELECT s.upper().lower().length() FROM u"  -> "SELECT length(lower(upper(s))) FROM u",
-      "SELECT s.replace('A', 'Z').upper() FROM u" -> "SELECT upper(replace(s, 'A', 'Z')) FROM u",
-      "SELECT s.string_agg(',' ORDER BY id) FROM u" -> "SELECT string_agg(s, ',' ORDER BY id) FROM u",
-      "SELECT s.list(ORDER BY id) FROM u"        -> "SELECT list(s ORDER BY id) FROM u",
-      "SELECT 'abc'.upper()"                     -> "SELECT upper('abc')",
-      "SELECT (s || 'x').upper() FROM u"         -> "SELECT upper((s || 'x')) FROM u",
-      "SELECT l[1].upper() FROM u"               -> "SELECT upper(l[1]) FROM u",
-      "SELECT [3, 1, 2].list_sort()"             -> "SELECT list_sort([3, 1, 2])",
-      "SELECT {'a': 1}.struct_extract('a')"      -> "SELECT struct_extract({'a': 1}, 'a')",
-      "SELECT -n.abs() FROM u"                   -> "SELECT -abs(n) FROM u",
-      "SELECT j->'a'.upper() FROM u"             -> "SELECT j->upper('a') FROM u",
-      "SELECT upper(s).lower() FROM u"           -> "SELECT lower(upper(s)) FROM u",
-      "SELECT CAST(n AS VARCHAR).upper() FROM u" -> "SELECT upper(CAST(n AS VARCHAR)) FROM u",
-      "SELECT l.list_transform(lambda x: x.upper()) FROM u" ->
-        "SELECT list_transform(l, lambda x: upper(x)) FROM u",
-      "SELECT max(s.upper()) FROM u" -> "SELECT max(upper(s)) FROM u"
-    ).foreach((sql, expected) => withClue(sql)(desugared(sql) shouldBe expected))
+  /** Forms DuckDB writes as a plain call, each checked on the DuckDB 2.0.0 CLI. */
+  private val nameReceiverForms = List(
+    "SELECT s.upper() FROM u"                     -> "SELECT upper(s) FROM u",
+    "SELECT u.s.upper() FROM u"                   -> "SELECT upper(u.s) FROM u",
+    "SELECT \"s\".upper() FROM u"                 -> "SELECT upper(\"s\") FROM u",
+    "SELECT s . upper ( ) FROM u"                 -> "SELECT upper(s) FROM u",
+    "SELECT s.upper().lower() FROM u"             -> "SELECT lower(upper(s)) FROM u",
+    "SELECT s.upper().lower().length() FROM u"    -> "SELECT length(lower(upper(s))) FROM u",
+    "SELECT s.replace('A', 'Z').upper() FROM u"   -> "SELECT upper(replace(s, 'A', 'Z')) FROM u",
+    "SELECT s.string_agg(',' ORDER BY id) FROM u" -> "SELECT string_agg(s, ',' ORDER BY id) FROM u",
+    "SELECT s.list(ORDER BY id) FROM u"           -> "SELECT list(s ORDER BY id) FROM u",
+    "SELECT -n.abs() FROM u"                      -> "SELECT -abs(n) FROM u",
+    "SELECT l.list_transform(lambda x: x.upper()) FROM u" ->
+      "SELECT list_transform(l, lambda x: upper(x)) FROM u",
+    "SELECT max(s.upper()) FROM u"     -> "SELECT max(upper(s)) FROM u",
+    "SELECT pg_catalog.upper() FROM u" -> "SELECT upper(pg_catalog) FROM u"
+  )
 
-  it should "leave a function's qualifier and an object name as written" in
+  private val otherReceiverForms = List(
+    "SELECT 'abc'.upper()"                     -> "SELECT upper('abc')",
+    "SELECT (s || 'x').upper() FROM u"         -> "SELECT upper((s || 'x')) FROM u",
+    "SELECT l[1].upper() FROM u"               -> "SELECT upper(l[1]) FROM u",
+    "SELECT [3, 1, 2].list_sort()"             -> "SELECT list_sort([3, 1, 2])",
+    "SELECT {'a': 1}.struct_extract('a')"      -> "SELECT struct_extract({'a': 1}, 'a')",
+    "SELECT j->'a'.upper() FROM u"             -> "SELECT j->upper('a') FROM u",
+    "SELECT upper(s).lower() FROM u"           -> "SELECT lower(upper(s)) FROM u",
+    "SELECT CAST(n AS VARCHAR).upper() FROM u" -> "SELECT upper(CAST(n AS VARCHAR)) FROM u",
+    "SELECT s.upper().lower() FROM u"          -> "SELECT lower(s.upper()) FROM u",
+    "SELECT myschema.f(id).upper() FROM u"     -> "SELECT upper(myschema.f(id)) FROM u"
+  )
+
+  "a method call on no name chain" should "be written as the plain call DuckDB makes of it" in
+    otherReceiverForms.foreach((sql, expected) => withClue(sql)(desugared(sql) shouldBe expected))
+
+  "a method call on a name chain" should
+    "be left as written in a statement, for the rewriter to judge on the bindings in scope" in
+    List(
+      "SELECT s.upper() FROM u",
+      "SELECT u.s.upper() FROM u",
+      "SELECT ssn.max() FILTER (WHERE true) FROM kv",
+      "SELECT myschema.f(id) FROM u",
+      "SELECT lake.main.f(id) FROM u",
+      "SELECT memory.main.upper(id) FROM u",
+      "SELECT myschema.agg(id) FILTER (WHERE true) FROM u"
+    ).foreach(sql => withClue(sql)(desugared(sql) shouldBe sql))
+
+  it should "be written as the plain call in a stored mask or row predicate" in
+    (nameReceiverForms ++ otherReceiverForms.filterNot((sql, _) =>
+      sql.contains("s.upper().lower()") || sql.contains("myschema")
+    ))
+      .foreach { (sql, expected) =>
+        withClue(sql)(MethodCalls.desugarStored(sql) shouldBe MethodCalls.Desugared(expected, None))
+      }
+
+  "a function DuckDB resolves itself" should "be left as written" in
     List(
       "SELECT main.upper(s) FROM u",
       "SELECT system.main.upper(s) FROM u",
-      "SELECT pg_catalog.upper(s) FROM u",
+      "SELECT \"main\".upper(s) FROM u",
+      "SELECT main.max(s) FILTER (WHERE true) FROM u",
       "INSERT INTO s.t (a, b) VALUES (1, 2)",
       "CREATE TABLE s.t (a INTEGER)",
       "CREATE TABLE IF NOT EXISTS s.t (a INTEGER)",
       "SELECT * FROM s.tf(1)",
-      "SELECT * FROM t JOIN s.tf(1) ON true",
-      "CREATE INDEX i ON s.t (c)",
-      "CREATE MACRO s.m(a) AS a",
       "SELECT t.* FROM t",
       "SELECT 'a.b(c)' AS s, \"x.y\"(1) FROM t"
-    ).foreach(sql => withClue(sql)(desugared(sql) shouldBe sql))
+    ).foreach { sql =>
+      withClue(sql) {
+        desugared(sql) shouldBe sql
+        if sql.startsWith("SELECT main") || sql.startsWith("SELECT system") ||
+          sql.startsWith("SELECT \"main\"")
+        then MethodCalls.desugarStored(sql) shouldBe MethodCalls.Desugared(sql, None)
+      }
+    }
 
-  it should "be refused where it cannot be written as a plain call with certainty" in
+  "a method call that cannot be written as a plain call with certainty" should "be refused" in
     List(
-      "SELECT ssn.max() FILTER (WHERE true) FROM kv",
-      "SELECT ssn.max() OVER () FROM kv",
-      "SELECT ssn.mode() WITHIN GROUP (ORDER BY id) FROM kv",
-      "SELECT ssn.count(DISTINCT id) FROM kv",
+      "SELECT (ssn || 'x').max() FILTER (WHERE true) FROM kv",
+      "SELECT ssn.upper().max() OVER () FROM kv",
+      "SELECT upper(ssn).mode() WITHIN GROUP (ORDER BY id) FROM kv",
+      "SELECT upper(ssn).count(DISTINCT id) FROM kv",
       "SELECT DATE '2020-01-02'.year()",
       "SELECT n::VARCHAR.upper() FROM kv",
       "SELECT CASE WHEN true THEN ssn END.upper() FROM kv",
@@ -112,6 +147,63 @@ class MethodCallSpec extends AnyFlatSpec with Matchers:
     ).foreach { sql =>
       withClue(sql)(MethodCalls.desugar(sql).refusal shouldBe defined)
     }
+
+  // ---- qualifier-named receivers (review round 5, R3-C1) ---------------------------------------
+
+  private val qualifierNamed = List(
+    "SELECT pg_catalog.max() FILTER (WHERE true) AS m FROM kv AS pg_catalog",
+    "SELECT information_schema.list() FILTER (WHERE true) AS m FROM kv AS information_schema",
+    "SELECT temp.main.max() FILTER (WHERE true) AS m FROM q AS temp",
+    "SELECT memory.main.max() FILTER (WHERE true) AS m FROM q AS memory",
+    "SELECT lake.main.max() FILTER (WHERE true) AS m FROM q AS lake",
+    "SELECT pg_catalog.max() FILTER (WHERE true) AS m FROM q",
+    "SELECT count(*) FROM kv AS pg_catalog HAVING pg_catalog.max() FILTER (WHERE true) IS NOT NULL",
+    "SELECT pg_catalog.max() OVER () AS m FROM kv AS pg_catalog",
+    "SELECT ssn.mode() WITHIN GROUP (ORDER BY id) AS m FROM kv",
+    "SELECT ssn.max() OVER () AS m FROM kv"
+  )
+
+  "a method aggregate on a receiver named like a qualifier" should "be refused" in {
+    for
+      sql    <- qualifierNamed
+      policy <- List(deny("kv", "ssn"), deny("q", "main"), deny("q", "pg_catalog"))
+      if !(sql.contains("FROM q") ^ policy.tableName == "q")
+      r <- List(rw, strict)
+    do
+      withClue(s"$sql (${policy.columnName})")(refused(rewrite(sql, List(policy), r)) shouldBe true)
+  }
+
+  it should "be refused in a write" in
+    List(
+      "INSERT INTO w SELECT 1, temp.main.list() FILTER (WHERE true) FROM q AS temp" -> deny(
+        "q",
+        "main"
+      ),
+      "INSERT INTO w SELECT 1, pg_catalog.max() FILTER (WHERE true) FROM kv AS pg_catalog" ->
+        deny("kv", "ssn")
+    ).foreach { (sql, p) =>
+      withClue(sql)(
+        guard.check(sql, StatementKind.Dml, eff(List(p)), ctx) shouldBe a[GuardOutcome.Deny]
+      )
+    }
+
+  "a call qualified by a schema nothing in scope is named" should "ship as written (R3-m1)" in {
+    val p = List(mask("kv", "ssn"))
+    List(
+      "SELECT myschema.f(id) AS v FROM kv",
+      "SELECT lake.main.f(id) AS v FROM kv",
+      "SELECT myschema.agg(id) FILTER (WHERE true) AS v FROM kv"
+    ).foreach { sql =>
+      withClue(sql) {
+        ai.starlake.quack.edge.FlightSqlRouter.policyText(sql, Some(eff(p))) shouldBe sql
+        rewrite(sql, p) shouldBe Passthrough
+      }
+    }
+    // Named like a binding in scope, the same FILTER call may be a method aggregate: refused.
+    refused(
+      rewrite("SELECT kv.agg(id) FILTER (WHERE true) AS v FROM kv", List(deny("kv", "ssn")))
+    ) shouldBe true
+  }
 
   // ---- the reviewed statements, in both modes (R2-C1, R2-C2) ---------------------------------
 
@@ -169,7 +261,15 @@ class MethodCallSpec extends AnyFlatSpec with Matchers:
     def parsed(sql: String) = net.sf.jsqlparser.parser.CCJSqlParserUtil.parse(sql)
     ResidualColumns.methodCallLeft(parsed("SELECT ssn.max() FILTER (WHERE true) FROM kv")) shouldBe
       defined
-    ResidualColumns.methodCallLeft(parsed("SELECT ssn.upper() FROM kv")) shouldBe defined
+    // A scalar call in method form is left to the method normalizer, which judges its receiver.
+    ResidualColumns.methodCallLeft(parsed("SELECT ssn.upper() FROM kv")) shouldBe None
+    ResidualColumns.methodCallLeft(
+      parsed("SELECT pg_catalog.max() FILTER (WHERE true) FROM kv AS pg_catalog")
+    ) shouldBe defined
+    ResidualColumns.methodCallLeft(
+      parsed("SELECT main.max(ssn) FILTER (WHERE true) FROM kv")
+    ) shouldBe
+      None
     ResidualColumns.methodCallLeft(parsed("SELECT main.upper(ssn) FROM kv")) shouldBe None
     ResidualColumns.methodCallLeft(parsed("SELECT system.main.upper(ssn) FROM kv")) shouldBe None
   }
@@ -260,16 +360,21 @@ class MethodCallSpec extends AnyFlatSpec with Matchers:
   "the desugared form" should "answer exactly what DuckDB answers for the method form" in
     Using.resource(database(maskedValues = false)) { conn =>
       var compared = 0
-      shapes.foreach { shape =>
+      for
+        shape        <- shapes
+        (mode, pass) <- List(
+          "statement" -> ((t: String) => MethodCalls.desugar(t)),
+          "stored"    -> ((t: String) => MethodCalls.desugarStored(t))
+        )
+      do
         val sql = s"SELECT $shape AS v FROM kv"
-        MethodCalls.desugar(sql) match
+        pass(sql) match
           case MethodCalls.Desugared(text, None) =>
-            withClue(s"$sql\n -> $text")(rowsOf(conn, text) shouldBe rowsOf(conn, sql))
+            withClue(s"$mode: $sql\n -> $text")(rowsOf(conn, text) shouldBe rowsOf(conn, sql))
             compared += 1
-          case MethodCalls.Desugared(_, Some(r)) => fail(s"$sql refused: $r")
-      }
+          case MethodCalls.Desugared(_, Some(r)) => fail(s"$mode: $sql refused: $r")
       info(s"$compared method-call shapes compared on DuckDB")
-      compared should be > 500
+      compared should be > 1000
     }
 
   "a rewritten method call on DuckDB" should "return the masked value" in

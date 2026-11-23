@@ -616,6 +616,8 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
         catch
           case _: net.sf.jsqlparser.JSQLParserException =>
             throw DenyException(s"the mask of column ${ref.getFullyQualifiedName} does not parse")
+          case e: ResidualColumns.StoredExpressionRefused =>
+            throw DenyException(s"the mask of column ${ref.getFullyQualifiedName}: ${e.reason}")
       // A policy derived for a derived table's output keeps its base policy's id and mask.
       val column  = unquoteName(policies.find(_.id == p.id).getOrElse(p).columnName)
       val refusal = DenyException(
@@ -1093,6 +1095,8 @@ private[quack] object ResidualColumns:
       opaque: List[String],
       dateUnits: List[java.util.List[Any]],
       calls: List[AnyRef],
+      analyticMethods: List[(net.sf.jsqlparser.expression.AnalyticExpression, List[Scope])],
+      aliasNames: Set[String],
       maskOnly: List[String]
   )
 
@@ -1247,7 +1251,11 @@ private[quack] object ResidualColumns:
     val opaque    = scala.collection.mutable.ListBuffer.empty[String]
     val dateUnits = scala.collection.mutable.ListBuffer.empty[java.util.List[Any]]
     val callNodes = scala.collection.mutable.ListBuffer.empty[AnyRef]
-    val maskOnly  = scala.collection.mutable.ListBuffer.empty[String]
+    val analytic  =
+      scala.collection.mutable.ListBuffer
+        .empty[(net.sf.jsqlparser.expression.AnalyticExpression, List[Scope])]
+    val aliasSet = scala.collection.mutable.Set.empty[String]
+    val maskOnly = scala.collection.mutable.ListBuffer.empty[String]
     // Whether the node walked sits in an aggregate's arguments of its own select, and the lambda
     // parameters in scope: set around each node's children, restored after.
     var aggregate = false
@@ -1262,6 +1270,13 @@ private[quack] object ResidualColumns:
         MisreadNames.opaqueReading(node).foreach(opaque += _)
         MisreadNames.maskOnlyReading(node).foreach(maskOnly += _)
         if MisreadNames.parsedArguments(node).isDefined then callNodes += node
+        node match
+          case a: net.sf.jsqlparser.expression.AnalyticExpression
+              if Option(a.getName).exists(_.contains('.')) =>
+            analytic += (a -> scopes)
+          case a: net.sf.jsqlparser.expression.Alias =>
+            Option(a.getName).foreach(n => aliasSet += lower(unquote(n)))
+          case _ => ()
         if aggregate then inAggregate.add(node): Unit
         node match
           case c: Column
@@ -1425,6 +1440,8 @@ private[quack] object ResidualColumns:
       opaque.toList,
       dateUnits.toList,
       callNodes.toList,
+      analytic.toList,
+      aliasSet.toSet,
       maskOnly.toList
     )
 
@@ -1457,25 +1474,22 @@ private[quack] object ResidualColumns:
   def droppedArgument(text: String, roots: List[AnyRef]): Option[String] =
     MisreadNames.droppedArgument(text, roots.flatMap(r => scan(r).calls))
 
-  /** Some(refusal) when `root` still holds a call in method form (a function or analytic call whose
-    * dotted name is no function qualifier, [[MethodCalls.isQualifier]]): the method-call pass
-    * writes each one it can as a plain call, so one left here is read by nothing that masks.
+  /** The head of an analytic call's dotted name (`ssn` of `ssn.max`), None for a function qualifier
+    * DuckDB resolves to its own functions ([[MethodCalls.isQualifier]]).
+    */
+  private def methodHead(a: net.sf.jsqlparser.expression.AnalyticExpression): Option[String] =
+    val parts = a.getName.split('.').toList
+    Option.when(!MethodCalls.isQualifier(parts.init))(lower(unquote(parts.head)))
+
+  /** Some(refusal) when `root` holds an aggregate, window or ordered-set call in method form
+    * (`ssn.max() FILTER (..)`, JSqlParser's analytic call with a dotted name and no column node)
+    * whose head is no function qualifier DuckDB resolves ([[MethodCalls.isQualifier]]): with no
+    * scopes at hand (the protected-write guard) any such head may be a column or table binding.
     */
   def methodCallLeft(root: AnyRef): Option[String] =
-    scan(root).calls.iterator
-      .flatMap {
-        case f: net.sf.jsqlparser.expression.Function =>
-          Option(f.getMultipartName).map(_.asScala.toList).filter(_.size > 1).collect {
-            case parts if !MethodCalls.isQualifier(parts.init) => parts.mkString(".")
-          }
-        case a: net.sf.jsqlparser.expression.AnalyticExpression =>
-          Option(a.getName).filter(_.contains('.')).collect {
-            case n if !MethodCalls.isQualifier(n.split('.').toList.init) => n
-          }
-        case _ => None
-      }
-      .nextOption()
-      .map(n => MethodCalls.Refusal(s"$n(..)"))
+    scan(root).analyticMethods.collectFirst {
+      case (a, _) if methodHead(a).isDefined => MethodCalls.Refusal(s"${a.getName}(..)")
+    }
 
   /** The receiver of the method call `f` as a column reference ([[receiverOf]]), placed in an
     * aggregate's arguments when `f` sits in one or names a method that is not a built-in scalar
@@ -1629,7 +1643,9 @@ private[quack] object ResidualColumns:
     val refusals = before.methodCalls.flatMap { (f, scopes) =>
       val parts  = f.getMultipartName.asScala.toList
       val column = receiverIn(before, f)
-      if !coverage.covered(column, scopes) then None
+      // `main.f(..)` / `system.main.f(..)` is DuckDB's own function, never a method.
+      if MethodCalls.isQualifier(parts.init) then None
+      else if !coverage.covered(column, scopes) then None
       else if f.getNamedParameters != null || f.getKeywordArguments != null || f.isDistinct ||
         f.isAllColumns || f.getChainedParameters != null || f.getExtraKeyword != null
       then
@@ -1759,9 +1775,18 @@ private[quack] object ResidualColumns:
           "column policies; name the columns instead"
     }
     // A column reference JSqlParser holds as another node: nothing masks it, whatever it reads.
-    // A call left in method form after the method-call pass is one too.
+    // So is an analytic call in method form whose head may be a binding in scope: a column, a
+    // table or an alias of the statement, or a source whose columns are unknown. A head nothing
+    // binds is a qualifier of a user function, left as written (`myschema.agg(x) FILTER (..)`).
+    def headBindable(head: String, scopes: List[Scope]): Boolean =
+      before.aliasNames.contains(head) ||
+        scopes.flatten.exists(src => src.names.contains(head) || !has(src, head).contains(false))
+    val analyticMethodRefusal = before.analyticMethods.collectFirst {
+      case (a, scopes) if methodHead(a).exists(headBindable(_, scopes)) =>
+        MethodCalls.Refusal(s"${a.getName}(..)")
+    }
     val opaqueRefusal =
-      before.opaque.headOption.map(MisreadNames.refusal).orElse(methodCallLeft(sel))
+      before.opaque.headOption.map(MisreadNames.refusal).orElse(analyticMethodRefusal)
     new Suspects(
       noted,
       before.unknown,
@@ -1822,9 +1847,14 @@ private[quack] object ResidualColumns:
     * [[MisreadNames.quoteWords]] quoted and its date parts made columns ([[bindDateUnits]]).
     */
   def parseStoredExpression(text: String): net.sf.jsqlparser.expression.Expression =
-    val expr = CCJSqlParserUtil.parseExpression(MisreadNames.quoteWords(text))
+    val desugared = MisreadNames.stored(text)
+    desugared.refusal.foreach(reason => throw new StoredExpressionRefused(reason))
+    val expr = CCJSqlParserUtil.parseExpression(desugared.text)
     bindDateUnits(expr): Unit
     expr
+
+  /** A stored expression holding a method call [[MethodCalls.desugarStored]] cannot write. */
+  final class StoredExpressionRefused(val reason: String) extends RuntimeException(reason)
 
   /** Some(deny reason) when a noted reference is still in `sel` after the rewrite, or the statement
     * holds a node the walk cannot follow.

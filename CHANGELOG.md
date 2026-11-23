@@ -115,19 +115,28 @@
   `interval` followed by another word is refused; write `abs(<column>)` or quote the name.
 - **Method-call syntax is read as DuckDB reads it under column policies.** DuckDB reads
   `<expression>.f(args)` as `f(<expression>, args)`, chains included (`user.upper().max()`), and
-  the policy rewriter held such a call as a dotted name with no column in it: a chained method-call
+  the policy rewriter held such a call as a dotted name with no column in it. A chained method-call
   aggregate in a subquery read the enclosing query's column, and `ssn.max() FILTER (WHERE true)`
   read any masked or denied column raw, in the select list, as a `HAVING` test or inside an
-  `INSERT`. For a column policy holder, every method call is now written as the plain call DuckDB
-  makes of it before any policy step reads the statement, so its column's mask or deny applies. A
-  method call that cannot be written so with certainty is refused: one followed by `FILTER`,
-  `OVER` or `WITHIN GROUP`, one with `DISTINCT` or `ALL` in its arguments, one on a typed
-  literal, a cast, a `CASE` or a name of more than two parts. Write those as function calls. A
-  dotted call that is not a function qualified by `main`, `pg_catalog`, `information_schema`,
-  `system.main` or `temp.main` is read as a method call. A statement whose parse keeps fewer
-  arguments of a call than its text gives is refused, judged call by call. The words of the entry
-  above are no longer quoted in `PRIMARY KEY`, `FOREIGN KEY` and `IF [NOT] EXISTS`, nor after
-  `$` or `::`.
+  `INSERT`. With a receiver named `pg_catalog`, `information_schema`, `temp`, `memory` or the
+  catalog's alias, it read a whole row. For a column policy holder, a method call on anything but a
+  name (a call, a subscript, a parenthesized expression, a list, struct or string literal) is now
+  written as the plain call DuckDB makes of it before any policy step reads the statement. A
+  method call on a name is judged against the names in scope: its column's mask or deny applies
+  when the name is a column, and an aggregate, window or ordered-set call in that form is refused
+  whenever its head may be a column, a table or an alias of the statement. Only `main` and
+  `system.main` are taken as qualifiers of DuckDB's own functions. A call qualified by another
+  schema or catalog that nothing in scope is named after (a function of the tenant's own) is left
+  as written. Also refused: a method call followed by `FILTER`, `OVER` or `WITHIN GROUP` on
+  anything but a name, and one with `DISTINCT` or `ALL` in its arguments or on a typed literal, a
+  cast, a `CASE` or a name of more than two parts. Write those as function calls. A statement whose
+  parse keeps fewer arguments of a call than its text gives is refused, call by call. The words of
+  the entry above are no longer quoted in `PRIMARY KEY`, `FOREIGN KEY` and `IF [NOT] EXISTS`, nor
+  after `$` or `::`.
+  - A stored mask or row predicate written in method form (`ssn.left(2) || '***'`,
+    `region.upper() = 'EU'`) is read the same way, when it is created and when it is applied. A
+    method-form mask reading another column is refused at creation. If it was stored before, it is
+    refused when its column is read.
 - **A mask now reads the same column as the reference it replaces.** A mask names its column
   bare, and was spliced as stored, so in a subquery or beside another table holding a column of
   the same name it could read that other column, part of a denied one included, or fail as

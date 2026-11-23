@@ -188,3 +188,47 @@ class MaskBindingSpec extends AnyFlatSpec with Matchers:
           case other          => fail(s"expected Denied, got $other")
       }
     }
+
+  // ---- masks in method form (review round 5, R3-I1) ------------------------------------------
+
+  "a mask in method form" should "read the reference it replaces, in a correlated subquery" in
+    Using.resource(database()) { conn =>
+      val mask = policy("secret", "region", "mask", Some("region.left(1) || '***'"))
+      val sql  = "SELECT (SELECT s.region FROM t o LIMIT 1) AS r FROM secret s"
+      val out  = rewritten(sql, List(mask, denyInner))
+      out shouldBe
+        "SELECT (SELECT left(s.region, 1) || '***' AS region FROM t o LIMIT 1) AS r FROM secret s"
+      rowsOf(conn, out) shouldBe Right(List(List("S***")))
+      val chained = policy("secret", "region", "mask", Some("region.upper().left(1)"))
+      rewritten("SELECT s.region FROM secret s", List(chained)) shouldBe
+        "SELECT left(upper(s.region), 1) AS region FROM secret s"
+    }
+
+  it should "be refused when it reads another column" in
+    List("id.upper()", "concat(region, id.lower())", "region.max() FILTER (WHERE true)").foreach {
+      text =>
+        val mask = policy("secret", "region", "mask", Some(text))
+        withClue(text) {
+          rewrite("SELECT region FROM secret", List(mask)) shouldBe a[Denied]
+        }
+    }
+
+  "a row predicate in method form" should "be read as DuckDB reads it" in {
+    val rls = new ai.starlake.quack.edge.rls.RowPolicyRewriter(enabled = true)
+    val p   = ai.starlake.quack.ondemand.state
+      .RoleRowPolicy("rp-1", "r-1", "*", "main", "secret", "region.upper() = 'SECRET-EU'")
+    val eff = EffectiveSet(user, Nil, Nil, Nil, Nil, Nil, List(p))
+    rls.rewrite(
+      "SELECT id FROM secret",
+      StatementKind.Select,
+      eff,
+      ai.starlake.quack.edge.rls.SchemaContext(Some(Catalog), Some("main"))
+    ) match
+      case ai.starlake.quack.edge.rls.RowPolicyRewriter.Rewritten(out) =>
+        out should include("upper(region) = 'SECRET-EU'")
+        Using.resource(database())(conn => rowsOf(conn, out) shouldBe Right(List(List("1"))))
+      case other => fail(s"expected Rewritten, got $other")
+    ai.starlake.quack.edge.rls.RowPredicateValidator.validate(
+      "region.max() FILTER (WHERE true) = 'x'"
+    ) shouldBe a[ai.starlake.quack.edge.rls.RowPredicateValidator.Invalid]
+  }

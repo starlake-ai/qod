@@ -60,6 +60,13 @@ private[quack] object MisreadNames:
     */
   def normalize(sql: String): String = quoteWords(sql)
 
+  /** A stored mask or row predicate as DuckDB reads it, by the one function both are read with: the
+    * words quoted, then every method call written as the plain call DuckDB makes of it, a
+    * name-chain receiver included ([[MethodCalls.desugarStored]]), with the refusal of one that
+    * cannot be.
+    */
+  def stored(text: String): MethodCalls.Desugared = MethodCalls.desugarStored(quoteWords(text))
+
   /** [[normalize]] for a principal holding column policies: also every method call written as the
     * plain call DuckDB makes of it ([[MethodCalls.desugar]]), with the refusal of one that cannot
     * be. Idempotent like [[normalize]].

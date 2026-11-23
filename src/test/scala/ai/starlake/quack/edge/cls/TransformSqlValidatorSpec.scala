@@ -118,3 +118,15 @@ class TransformSqlValidatorSpec extends AnyFlatSpec with Matchers:
     ).foreach { mask =>
       withClue(mask)(validate(mask, "ssn") shouldBe a[Invalid])
     }
+
+  it should "read a mask in method form as DuckDB does (review round 5, R3-I1)" in {
+    List(
+      "secret.upper()",
+      "concat(ssn, secret.lower())",
+      "secret.max()",
+      "u.secret.upper()",
+      "ssn.max() FILTER (WHERE true)"
+    ).foreach(mask => withClue(mask)(validate(mask, "ssn") shouldBe a[Invalid]))
+    List("ssn.upper()", "ssn.left(2) || '***'", "main.upper(ssn)", "ssn.upper().lower()")
+      .foreach(mask => withClue(mask)(validate(mask, "ssn") shouldBe a[Valid]))
+  }

@@ -395,7 +395,12 @@ class RowPolicyRewriter(enabled: Boolean = true) extends LazyLogging:
 
       val predicate =
         matched.map(p => "(" + substitute(p.predicateSql, values) + ")").mkString(" OR ")
-      val expr: Expression = CCJSqlParserUtil.parseCondExpression(predicate)
+      // Read as DuckDB reads it, by the function stored masks are read with: a method call in it
+      // is the plain call DuckDB makes of it (MisreadNames.stored); one it cannot write so fails
+      // the rewrite closed.
+      val read = ai.starlake.quack.edge.cls.MisreadNames.stored(predicate)
+      read.refusal.foreach(reason => throw new IllegalArgumentException(reason))
+      val expr: Expression = CCJSqlParserUtil.parseCondExpression(read.text)
 
       val inner = new PlainSelect()
       inner.addSelectItem(new AllColumns())

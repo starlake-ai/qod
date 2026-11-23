@@ -2,34 +2,42 @@ package ai.starlake.quack.edge.cls
 
 import ai.starlake.sql.{IdentifierFold, QuotedIdentifier, SqlLexer}
 
-/** DuckDB's method-call syntax read as DuckDB reads it (owner ruling D28, review round 4).
+/** DuckDB's method-call syntax read as DuckDB reads it (owner ruling D28, review rounds 4 and 5).
   *
-  * DuckDB 2.0 reads `<expr>.f(args)` as `f(<expr>, args)` once `<expr>` is not a schema or catalog
-  * qualifier of a function named `f`: a column, a qualified column or struct field (`t.c.f()`), a
-  * call (`x.g().f()`, so chains), a subscript, a parenthesized expression, a list or struct literal
-  * or a string. The method binds tighter than any operator (`-n.abs()` is `-abs(n)`, `j->'a'.f()`
-  * is `j->f('a')`). JSqlParser holds such a call as a function or analytic call with a dotted name
-  * and no column node, so a policy step never saw the column. This pass, on the token stream,
-  * writes each method call as the plain call DuckDB makes of it, so every later step sees plain
-  * functions and columns, and reports a method call it cannot write so with certainty.
+  * DuckDB 2.0 reads `<expr>.f(args)` as `f(<expr>, args)`, binding the method tighter than any
+  * operator (`-n.abs()` is `-abs(n)`, `j->'a'.f()` is `j->f('a')`). When `<expr>` is a name chain
+  * (`x.f(`, `a.b.f(`) it first looks up a function `f` qualified by it, and reads a method call
+  * only when there is none: its built-in functions answer only to `main` and `system.main`, while a
+  * user function or macro answers to its own schema (`myschema.f(`, `lake.main.f(`), and every
+  * other head is a column, a table binding or a struct field (CLI, review round 5). JSqlParser
+  * holds a method call as a function or analytic call with a dotted name and no column node.
+  *
+  * This pass, on the token stream, writes as the plain call DuckDB makes of it every method call
+  * whose receiver is no name chain (a call, so chains, a subscript, a parenthesized expression, a
+  * list or struct literal, a string), so every later step sees plain functions there. A call on a
+  * name chain is left as written in a statement, where the column rewriter judges it on the
+  * bindings in scope (its method normalizer, and the backstop for a call with FILTER, OVER or
+  * WITHIN GROUP after it); in a stored mask or row predicate ([[desugarStored]]), which reads only
+  * its own table, it is written as the plain call too. A method call that cannot be written so with
+  * certainty is reported.
   */
 private[quack] object MethodCalls:
 
   /** The text with every method call desugared, and the refusal of one that could not be. */
   final case class Desugared(text: String, refusal: Option[String])
 
-  /** A function's qualifier, never a method's receiver: `main.f(`, `pg_catalog.f(`,
-    * `information_schema.f(`, `system.main.f(`, `temp.main.f(` (DuckDB looks the function up there
-    * first and finds it).
+  /** The heads DuckDB resolves to its own built-in functions, `main.f(` and `system.main.f(`, so
+    * never a method's receiver, whatever FILTER, OVER or WITHIN GROUP follows (`main.max() FILTER
+    * (..)` is the aggregate `max` with no argument). `pg_catalog`, `information_schema`,
+    * `temp.main`, `memory.main` and the tenant's catalog alias are not among them: before a
+    * built-in function's name DuckDB reads each as a column or a table binding (CLI, review round
+    * 5).
     */
-  private val Schemas  = Set("main", "pg_catalog", "information_schema")
-  private val Catalogs = Set("system", "temp")
-
   def isQualifier(parts: List[String]): Boolean =
     parts.map(p => IdentifierFold.fold(QuotedIdentifier.unquote(p))) match
-      case s :: Nil      => Schemas.contains(s)
-      case c :: s :: Nil => Catalogs.contains(c) && Schemas.contains(s)
-      case _             => false
+      case "main" :: Nil             => true
+      case "system" :: "main" :: Nil => true
+      case _                         => false
 
   /** Words before a `<name>.<name>(` that make it a qualified object name, not an expression: a
     * table, a table function, a view, a macro, a statement target. `on` only before a one-part head
@@ -162,7 +170,16 @@ private[quack] object MethodCalls:
   private val Openers     = Set("(", "[", "{")
   private val Closers     = Set(")", "]", "}")
 
-  def desugar(sql: String): Desugared =
+  /** [[desugar]] of a statement: name-chain receivers left as written (see the object's doc). */
+  def desugar(sql: String): Desugared = run(sql, nameReceivers = false)
+
+  /** [[desugar]] of a stored mask or row predicate: a name-chain receiver that is no
+    * [[isQualifier]] is a column of the expression's own table, so it is written as the plain call
+    * too (`ssn.left(2)` is `left(ssn, 2)`).
+    */
+  def desugarStored(sql: String): Desugared = run(sql, nameReceivers = true)
+
+  private def run(sql: String, nameReceivers: Boolean): Desugared =
     var text    = sql
     var refusal = Option.empty[String]
     var done    = false
@@ -172,7 +189,7 @@ private[quack] object MethodCalls:
       rounds += 1
       if rounds > MaxRewrites then refusal = Some(Refusal("too many method calls"))
       else
-        step(text, from) match
+        step(text, from, nameReceivers) match
           case Step.None               => done = true
           case Step.Refuse(reason)     => refusal = Some(Refusal(reason))
           case Step.Skip(next)         => from = next
@@ -188,7 +205,7 @@ private[quack] object MethodCalls:
     case Skip(nextFrom: Int)
     case Rewrite(text: String)
 
-  private def step(text: String, from: Int): Step =
+  private def step(text: String, from: Int, nameReceivers: Boolean): Step =
     val view                    = SqlLexer.engineView(text)
     val solid                   = SqlLexer.tokens(text).filterNot(_.isTrivia)
     def at(i: Int): String      = view.substring(solid(i).start, solid(i).end)
@@ -217,7 +234,7 @@ private[quack] object MethodCalls:
     dot match
       case scala.None => Step.None
       case Some(k)    =>
-        receiverStart(k, at, word, isName, isWord, matching) match
+        receiverStart(k, at, word, isName, isWord, matching, nameReceivers) match
           case Left(Some(reason)) => Step.Refuse(reason)
           case Left(scala.None)   => Step.Skip(k + 1)
           case Right(r)           =>
@@ -256,11 +273,12 @@ private[quack] object MethodCalls:
       word: Int => String,
       isName: Int => Boolean,
       isWord: Int => Boolean,
-      matching: (Int, Boolean) => Option[Int]
+      matching: (Int, Boolean) => Option[Int],
+      nameReceivers: Boolean
   ): Either[Option[String], Int] =
     // The postfix chain before the dot: subscripts and a call close over their head, which ends at a
     // name chain, a literal or a bracket group.
-    def headOf(end: Int): Either[Option[String], Int] =
+    def headOf(end: Int, inner: Boolean = false): Either[Option[String], Int] =
       val s = at(end)
       if s == ")" || s == "]" || s == "}" then
         matching(end, false) match
@@ -277,7 +295,8 @@ private[quack] object MethodCalls:
             else if s == "]" && before >= 0 &&
               ((isName(before) && !(isWord(before) && Reserved.contains(word(before)))) ||
                 Set(")", "]").contains(at(before)))
-            then headOf(before) // a subscript
+            then
+              headOf(before, inner = true) // a subscript: the name it follows is no receiver alone
             else if s == "]" && isWord(before) && word(before) == "array" then
               Left(Some("on ARRAY[..]"))
             else Right(open)
@@ -286,14 +305,16 @@ private[quack] object MethodCalls:
           Left(Some(s"on ${word(end).toUpperCase}"))
         else
           nameChain(end).flatMap { (start, parts) =>
-            if parts.size > 2 then Left(Some("on a name of more than two parts"))
+            val prev = start - 1
+            if inner then
+              if prev >= 0 && at(prev) == "::" then Left(Some("after a cast")) else Right(start)
+            else if parts.size > 2 then Left(Some("on a name of more than two parts"))
             else if isQualifier(parts) then Left(scala.None)
-            else
-              val prev = start - 1
-              if prev >= 0 && at(prev) == "::" then Left(Some("after a cast"))
-              else if isWord(prev) && ObjectContext.contains(word(prev)) then Left(scala.None)
-              else if isWord(prev) && word(prev) == "on" && parts.size == 1 then Left(scala.None)
-              else Right(start)
+            else if prev >= 0 && at(prev) == "::" then Left(Some("after a cast"))
+            else if !nameReceivers then Left(scala.None)
+            else if isWord(prev) && ObjectContext.contains(word(prev)) then Left(scala.None)
+            else if isWord(prev) && word(prev) == "on" && parts.size == 1 then Left(scala.None)
+            else Right(start)
           }
       else if at(end).startsWith("'") || at(end).toLowerCase.startsWith("e'") then
         if isWord(end - 1) && !Reserved.contains(word(end - 1)) then
