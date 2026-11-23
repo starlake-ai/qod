@@ -1051,10 +1051,10 @@ a result, a binder error or an error that quotes no value (`MaskFormsEvidenceSpe
 column of every type, `VARIANT` holding an object and `BIGNUM` past a DOUBLE included): constants,
 the column, `||` / `concat`, `CAST` / `TRY_CAST` / `::` to `VARCHAR`, `hash`, a subscript or slice
 of any allowed form whose indexes are integer or string constants (bounds and step integer
-constants), `upper`, `lower`, `trim`, `left`, `right`, `substr`, `lpad`, `rpad` and
-`regexp_replace` with constant arguments over any allowed form (the bare column included: owner
-ruling, text or a binder error on every type), `md5`, `sha1`, `sha256`, `ltrim`, `rtrim`,
-`substring` and `length` over text only with constant arguments,
+constants), `upper`, `lower`, `trim`, `ltrim`, `rtrim`, `left`, `right`, `substr`, `substring`,
+`lpad`, `rpad` and `regexp_replace` with constant arguments over any allowed form (the bare column
+included: owner ruling, text or a binder error on every type), `md5`, `sha1`, `sha256` and `length`
+over text only,
 `coalesce` / `CASE WHEN .. IS [NOT] NULL` with string constants beside text forms or one other form,
 `nullif` with a string constant, and DOUBLE arithmetic over `TRY_CAST(.. AS DOUBLE)`, `length` or
 `hash` (`/` by a nonzero constant, `%` by a positive integer, `round`, `floor`, `ceil`, `+ - *`).

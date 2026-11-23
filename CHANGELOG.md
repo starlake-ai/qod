@@ -185,11 +185,11 @@
     `concat`; `CAST(.. AS VARCHAR)`, `TRY_CAST(.. AS VARCHAR)`, `::VARCHAR` (or `TEXT`,
     `STRING`); `hash`; a subscript or a slice (`email[1]`, `email[1:3]`, `tags['k']`, nested) whose
     indexes are integer or string constants and whose bounds and step are integer constants;
-    `upper`, `lower`, `trim`, `left`, `right`, `substr`, `lpad`, `rpad` and `regexp_replace` with
-    constant arguments over any allowed form, the bare column included (DuckDB answers each with
-    text or a binder error over a value of every type); over text only (write `CAST(<column> AS
-    VARCHAR)` first) `md5`, `sha1`, `sha256`, `ltrim`, `rtrim`, `substring` with constant
-    arguments, and `length`; `coalesce` and
+    `upper`, `lower`, `trim`, `ltrim`, `rtrim`, `left`, `right`, `substr`, `substring`, `lpad`,
+    `rpad` and `regexp_replace` with constant arguments over any allowed form, the bare column
+    included (DuckDB answers each with text or a binder error over a value of every type); over
+    text only (write `CAST(<column> AS VARCHAR)` first) `md5`, `sha1`, `sha256` and `length`;
+    `coalesce` and
     `CASE WHEN <x> IS [NOT] NULL THEN .. END` whose values are string constants or NULL beside
     text forms only or one other form; `nullif(<x>, <string constant or NULL>)`; and DOUBLE
     arithmetic: `TRY_CAST(<x> AS DOUBLE)`, `/` by a numeric constant other than 0, `%` by a

@@ -41,8 +41,8 @@ import scala.jdk.CollectionConverters._
   * unmasked value to whoever reads the masked column. The column's type is not known when a mask is
   * written, so a form is judged for every type: a `VARIANT` column, for one, is cast implicitly by
   * every function taking text, a blob or a number, and that cast quotes the value; a `BIGNUM` one
-  * by every function taking a number. The evidence for each form is in the round 1 report of the
-  * mask-names fix.
+  * by every function taking a number. [[MaskFormsEvidenceSpec]] runs one mask of each form
+  * ([[MaskFormCases]]) over a value of every type and checks this.
   *
   * The forms, `<x>` being any allowed form and `<text>` one whose result is text:
   *   - a constant: a plain string literal (no prefix, no dollar quotes), a number, `NULL`, `TRUE`
@@ -53,12 +53,12 @@ import scala.jdk.CollectionConverters._
   *   - a subscript or a slice of `<x>` (`<x>[i]`, `<x>[a:b]`, `<x>[a:b:s]`, nested), each index an
   *     integer or string constant and each slice bound or step an integer constant or left out: an
   *     index that reads the value is cast to the subscript's type, and that cast quotes it;
-  *   - over `<x>`: `upper`, `lower`, `trim` (with a string constant), `left` / `right` (an integer
-  *     constant), `substr` (integer constants), `lpad` / `rpad` (an integer and a string constant),
-  *     `regexp_replace` (string constants): text or a binder error over a value of every type;
-  *   - over `<text>` only: `md5`, `sha1`, `sha256`, `length`, `ltrim`, `rtrim` (with a string
-  *     constant), `substring` (integer constants): over a `VARIANT` or `BIGNUM` value the first
-  *     four cast it to a blob or a bit string and quote it;
+  *   - over `<x>`: `upper`, `lower`, `trim` / `ltrim` / `rtrim` (with a string constant), `left` /
+  *     `right` (an integer constant), `substr` / `substring` (integer constants), `lpad` / `rpad`
+  *     (an integer and a string constant), `regexp_replace` (string constants): text or a binder
+  *     error over a value of every type;
+  *   - over `<text>` only: `md5`, `sha1`, `sha256`, `length`: over a `VARIANT` or `BIGNUM` value
+  *     they cast it to a blob or a bit string and quote it;
   *   - `coalesce(<x>, ...)` and `CASE WHEN <x> IS [NOT] NULL THEN <x> ... [ELSE <x>] END`, whose
   *     values are string constants or NULL beside either text forms only or one other form;
   *     `nullif(<x>, <string constant or NULL>)`;
@@ -118,10 +118,10 @@ private[quack] object MaskForms:
   /** The allowed forms, for a refusal's message. */
   val Allowed: String =
     "string and numeric constants, NULL, the column, || and concat, CAST or TRY_CAST to VARCHAR, " +
-      "hash, a subscript or slice with constant indexes, upper / lower / trim / left / right / " +
-      "substr / lpad / rpad / regexp_replace with constant arguments, md5 / sha1 / sha256 / " +
-      "length / ltrim / rtrim / substring over text (CAST(<column> AS VARCHAR) first) with " +
-      "constant arguments, coalesce, nullif with a text constant, CASE WHEN " +
+      "hash, a subscript or slice with constant indexes, upper / lower / trim / ltrim / rtrim / " +
+      "left / right / substr / substring / lpad / rpad / regexp_replace with constant " +
+      "arguments, md5 / sha1 / sha256 / length over text (CAST(<column> AS VARCHAR) first), " +
+      "coalesce, nullif with a text constant, CASE WHEN " +
       "<x> IS [NOT] NULL THEN ... END, and DOUBLE arithmetic: TRY_CAST(<column> AS DOUBLE), / by " +
       "a nonzero constant, % by a positive integer, round / floor / ceil, + - *"
 
@@ -364,12 +364,7 @@ private[quack] object MaskForms:
       case "upper" | "lower" =>
         if arity(args.size == 1) then valueArg(args.head)
         Text
-      case "ltrim" | "rtrim" =>
-        if arity(args.size == 1 || args.size == 2) then
-          textArg(args.head)
-          args.lift(1).foreach(a => const(stringLiteral(a), "a string constant"))
-        Text
-      case "trim" =>
+      case "trim" | "ltrim" | "rtrim" =>
         if arity(args.size == 1 || args.size == 2) then
           valueArg(args.head)
           args.lift(1).foreach(a => const(stringLiteral(a), "a string constant"))
@@ -379,14 +374,9 @@ private[quack] object MaskForms:
           valueArg(args.head)
           const(integerLiteral(args(1)), "an integer constant")
         Text
-      case "substr" =>
+      case "substr" | "substring" =>
         if arity(args.size == 2 || args.size == 3) then
           valueArg(args.head)
-          args.tail.foreach(a => const(integerLiteral(a), "an integer constant"))
-        Text
-      case "substring" =>
-        if arity(args.size == 2 || args.size == 3) then
-          textArg(args.head)
           args.tail.foreach(a => const(integerLiteral(a), "an integer constant"))
         Text
       case "lpad" | "rpad" =>
