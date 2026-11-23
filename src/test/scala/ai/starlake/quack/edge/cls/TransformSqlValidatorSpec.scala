@@ -10,10 +10,15 @@ class TransformSqlValidatorSpec extends AnyFlatSpec with Matchers:
     validate("'***'", "c_email") shouldBe a[Valid]
   }
 
-  it should "accept a built-in function over the protected column" in {
-    validate("md5(c_email)", "c_email") shouldBe a[Valid]
-    validate("concat('user_', md5(c_email))", "c_email") shouldBe a[Valid]
-    validate("regexp_replace(c_phone, '\\d', 'X')", "c_phone") shouldBe a[Valid]
+  it should "accept a built-in function over the protected column read as text" in {
+    validate("md5(CAST(c_email AS VARCHAR))", "c_email") shouldBe a[Valid]
+    validate("concat('user_', md5(CAST(c_email AS VARCHAR)))", "c_email") shouldBe a[Valid]
+    validate("regexp_replace(CAST(c_phone AS VARCHAR), '\\d', 'X')", "c_phone") shouldBe a[Valid]
+  }
+
+  it should "refuse a text function over the bare column, whose type is not known" in {
+    validate("md5(c_email)", "c_email") shouldBe a[Invalid]
+    validate("regexp_replace(c_phone, '\\d', 'X')", "c_phone") shouldBe a[Invalid]
   }
 
   it should "canonicalise whitespace" in {
@@ -94,16 +99,18 @@ class TransformSqlValidatorSpec extends AnyFlatSpec with Matchers:
       withClue(mask)(validate(mask, "ssn") shouldBe a[Invalid])
     }
 
-  it should "accept a lambda whose parameter shares or does not share the column's name" in {
-    validate("list_filter(l, lambda l: len(l) < 3)", "l") shouldBe a[Valid]
-    validate("list_filter(l, l -> len(l) < 3)", "l") shouldBe a[Valid]
-    validate("list_transform(l, lambda x: concat(x, '*'))", "l") shouldBe a[Valid]
-    validate("list_transform(l, x -> concat(x, '*'))", "l") shouldBe a[Valid]
+  it should "refuse a lambda, which no allowed mask form holds" in {
+    validate("list_filter(l, lambda l: len(l) < 3)", "l") shouldBe a[Invalid]
+    validate("list_filter(l, l -> len(l) < 3)", "l") shouldBe a[Invalid]
+    validate("list_transform(l, lambda x: concat(x, '*'))", "l") shouldBe a[Invalid]
+    validate("list_transform(l, x -> concat(x, '*'))", "l") shouldBe a[Invalid]
   }
 
-  it should "accept a SQL value function and a time keyword naming the column" in {
-    validate("CAST(current_date AS VARCHAR)", "ssn") shouldBe a[Valid]
-    validate("left(current_date, 2) || '***'", "current_date") shouldBe a[Valid]
+  it should "refuse a time keyword, and accept a quoted column of that name" in {
+    validate("CAST(current_date AS VARCHAR)", "ssn") shouldBe a[Invalid]
+    validate("left(current_date, 2) || '***'", "current_date") shouldBe a[Invalid]
+    validate("left(CAST(\"current_date\" AS VARCHAR), 2) || '***'", "current_date") shouldBe
+      a[Valid]
     validate("CASE WHEN \"SSN\" IS NULL THEN '***' END", "ssn") shouldBe a[Valid]
   }
 
@@ -127,6 +134,9 @@ class TransformSqlValidatorSpec extends AnyFlatSpec with Matchers:
       "u.secret.upper()",
       "ssn.max() FILTER (WHERE true)"
     ).foreach(mask => withClue(mask)(validate(mask, "ssn") shouldBe a[Invalid]))
+    // A method call is no allowed form (the call it stands for takes text, and a qualified name
+    // could be a macro): refused, as the plain forms over CAST(ssn AS VARCHAR) are not.
     List("ssn.upper()", "ssn.left(2) || '***'", "main.upper(ssn)", "ssn.upper().lower()")
-      .foreach(mask => withClue(mask)(validate(mask, "ssn") shouldBe a[Valid]))
+      .foreach(mask => withClue(mask)(validate(mask, "ssn") shouldBe a[Invalid]))
+    validate("upper(CAST(ssn AS VARCHAR))", "ssn") shouldBe a[Valid]
   }

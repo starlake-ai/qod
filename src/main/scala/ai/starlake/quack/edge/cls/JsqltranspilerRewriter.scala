@@ -370,7 +370,9 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
       case sol: net.sf.jsqlparser.statement.select.SetOperationList =>
         // UNION / INTERSECT / EXCEPT: recurse into every arm. Each arm has its own FROM clause
         // and its own per-column policy lookup; outer-query origins don't apply, but a set
-        // operation nested in a correlated subquery still sees the enclosing scope.
+        // operation nested in a correlated subquery still sees the enclosing scope. Arms matched BY
+        // NAME are named before any rewrite, changed or not, so they still match (ResultNames).
+        ResultNames.nameByName(sol)
         Option(sol.getSelects).foreach(_.forEach { arm =>
           val (armChanged, _) = applyPolicies(arm, IndexedSeq.empty, policies, outerScope, applied)
           if armChanged then changed.set(true)

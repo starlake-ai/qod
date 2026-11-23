@@ -1022,28 +1022,47 @@ grant, column policy or row policy whose names hold a non-ASCII cased letter
 (`NonAsciiPolicyNameReport`), as such a row matches only an object spelled with exactly those
 letters. The OPA input carries names folded the same way.
 
-**Masks and result names.** DuckDB names an unaliased select item after its expression, so the
-column rewriter (`JsqltranspilerRewriter.applyPolicies`) gives every item it changes that has no
-alias of the caller's one from `ResultNames.aliasFor`, taken before the mask goes in: a bare column
-its column name, anything else the item's JSqlParser text (trimmed, line breaks as spaces) as a
-quoted identifier, never the mask. That covers every select at any depth (CTE bodies, derived
-tables, set-operation arms, scalar subqueries, the prepare probe); a caller's CTE or derived-table
-column list still wins, and an unchanged item keeps DuckDB's naming. The text is the parser's print
-of the statement the policy steps read (method calls desugared, `#n` resolved, misread words and
-time keywords quoted), so it can differ from DuckDB's own name (operators and `CASE` without
-DuckDB's parentheses, the caller's function-name case, `::` kept); the CHANGELOG lists the forms.
-A time-travel placeholder or a same-name table's temporary name printed into such a name is put
-back by `TimeTravelCarrier.restore` and `SameNameTables.restore` (`ResultNames.rewriteAliases`).
-A star over a CTE whose item is an unaliased expression is expanded by the resolver under a name
-of its own (`c.lower`) that DuckDB does not bind, before and after this rule: the statement fails.
-`TransformSqlValidator` refuses a new or updated mask that uses, outside `TRY(...)`, a form DuckDB
-can answer with an error quoting the row's value (`RaisingForms`: a non-text `CAST` / `::`,
-`strptime`, JSON parsing, base64 / hex decoding, `error()`, date and time constructors,
-overflowing arithmetic, `%` / `//` by a non-constant, a regex, date part or time zone read from the
-row, a comparison of possibly-text with a non-text constant), and one JSqlParser reads only in part
-(it stops at `//`: the mask is parsed again inside parentheses). Stored and imported masks are not
-judged; boot prints one stderr `WARN:` line per stored mask a create would refuse
-(`StoredMaskReport`), never its text.
+**Masks, row predicates and result names.** DuckDB names an unaliased select item after its
+expression, so the column rewriter (`JsqltranspilerRewriter.applyPolicies`) gives every item it
+changes that has no alias of the caller's one from `ResultNames.aliasFor`, taken before the mask
+goes in: a bare column its column name, anything else the item's JSqlParser text (trimmed, line
+breaks as spaces) as a quoted identifier, never the mask. The row rewriter, which runs after it on
+its output, does the same for every item its table wraps changed (`ResultNames.before` before the
+walk, `nameChanged` after it), so a subquery over a row-policy table is never named after the
+filtered view's predicate or `__qod_rls_` alias; an item the column rewriter named already has an
+alias and is left as it is, so the passes never stack and the name is the text before either. That
+covers every select at any depth (CTE bodies, derived tables, set-operation arms, scalar subqueries,
+the prepare probe); a caller's CTE or derived-table column list still wins, and an unchanged item
+keeps DuckDB's naming, except in a `UNION [ALL] BY NAME` (`ResultNames.nameByName`), where every
+unaliased item that is not a bare column is named so, so the arms still match. The text is the
+parser's print of the statement the policy steps read (method calls desugared, `#n` resolved,
+misread words and time keywords quoted), so it can differ from DuckDB's own name (operators and
+`CASE` without DuckDB's parentheses, the caller's function-name case, `::` kept); the CHANGELOG
+lists the forms. A time-travel placeholder or a same-name table's temporary name printed into such
+a name is put back by `TimeTravelCarrier.restore` and `SameNameTables.restore`
+(`ResultNames.rewriteAliases`). A star over a CTE whose item is an unaliased expression is expanded
+by the resolver under a name of its own (`c.lower`) that DuckDB does not bind, before and after this
+rule: the statement fails.
+A new or updated mask may use only the forms of `MaskForms` (an allowlist, `TransformSqlValidator`),
+each admitted because DuckDB 2.0.0 answers it, over a value of every type the column may have, with
+a result, a binder error or an error that quotes no value (`MaskFormsEvidenceSpec` runs each over a
+column of every type, `VARIANT` holding an object and `BIGNUM` past a DOUBLE included): constants,
+the column, `||` / `concat`, `CAST` / `TRY_CAST` / `::` to `VARCHAR`, `hash`, the text functions
+(`md5`, `sha1`, `sha256`, `upper`, `lower`, `trim`, `ltrim`, `rtrim`, `left`, `right`, `substr`,
+`substring`, `lpad`, `rpad`, `regexp_replace`, `length`) over text only with constant arguments,
+`coalesce` / `CASE WHEN .. IS [NOT] NULL` with string constants beside text forms or one other form,
+`nullif` with a string constant, and DOUBLE arithmetic over `TRY_CAST(.. AS DOUBLE)`, `length` or
+`hash` (`/` by a nonzero constant, `%` by a positive integer, `round`, `floor`, `ceil`, `+ - *`).
+Function names must be plain (no quotes, no qualifier, nothing but `name(args)`). Anything else is
+refused naming the part (a fixed phrase or the function name), never the mask; the stored text and
+the rewriter's reading of it (`ResidualColumns.parseStoredExpression`) are both checked. A text or
+number function over the bare column is refused: DuckDB casts the column implicitly, and the cast of
+a `VARIANT` or `BIGNUM` value quotes it. A mask and a row predicate are both read whole
+(`WholeExpression`: every token read, no comment, which takes in `//`, and no `#`), and a stored row
+predicate is read whole again at rewrite time or the statement is refused (`Failed`), since one
+stored before could hold a parenthesis that joins the next policy's predicate. Stored and imported
+masks are not judged; boot prints one stderr `WARN:` line per stored mask a create would refuse
+(`StoredMaskReport`), naming the refused parts, never its text.
 
 ### OPA authorization (per tenant)
 

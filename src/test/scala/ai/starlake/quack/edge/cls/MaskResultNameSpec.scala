@@ -10,13 +10,13 @@ import org.scalatest.matchers.should.Matchers
 import java.sql.{Connection, DriverManager}
 import scala.util.{Try, Using}
 
-/** A result column's name never carries a mask. DuckDB names an unaliased
-  * select item after its expression, so an item holding a masked column was named after the mask's
-  * text, salt included. Every item the rewriter changes and the caller left unaliased is now named
-  * after the item as it read before the rewrite, wherever a name can reach the client: an item at
-  * any depth that an outer star shows, a set operation's first arm, a CTE or derived table (whose
-  * column list, when written, still wins), DISTINCT ON, a scalar subquery, the FlightSQL prepare
-  * probe. Each statement is run on an in-process DuckDB to read the names it really answers with.
+/** A result column's name never carries a mask. DuckDB names an unaliased select item after its
+  * expression, so an item holding a masked column was named after the mask's text, salt included.
+  * Every item the rewriter changes and the caller left unaliased is now named after the item as it
+  * read before the rewrite, wherever a name can reach the client: an item at any depth that an
+  * outer star shows, a set operation's first arm, a CTE or derived table (whose column list, when
+  * written, still wins), DISTINCT ON, a scalar subquery, the FlightSQL prepare probe. Each
+  * statement is run on an in-process DuckDB to read the names it really answers with.
   */
 class MaskResultNameSpec extends AnyFlatSpec with Matchers:
   import ColumnPolicyRewriter._
@@ -160,6 +160,25 @@ class MaskResultNameSpec extends AnyFlatSpec with Matchers:
         conn,
         "SELECT * FROM (SELECT lower(email) FROM t EXCEPT SELECT lower(email) FROM u) s"
       ) shouldBe List("lower(email)")
+    }
+
+  it should "keep arms matched BY NAME matching, one changed and one not (review M1)" in
+    Using.resource(database()) { conn =>
+      // A principal holding no mask gets one column here; the changed arm's item must still match
+      // the other arm's by name.
+      val plain = "SELECT email || 'x' FROM t UNION BY NAME SELECT email || 'x' FROM u"
+      namesOf(conn, plain) should have size 1
+      maskedNames(conn, plain) shouldBe List("email || 'x'")
+      maskedNames(
+        conn,
+        "SELECT * FROM (SELECT email || 'x', id FROM t UNION ALL BY NAME SELECT id, email || " +
+          "'x' FROM u) s"
+      ) shouldBe List("email || 'x'", "id")
+      maskedNames(
+        conn,
+        "SELECT lower(email) FROM t UNION BY NAME SELECT lower(email) FROM u"
+      ) shouldBe
+        List("lower(email)")
     }
 
   "a scalar subquery item" should "be named as written" in

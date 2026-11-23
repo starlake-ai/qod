@@ -12,12 +12,21 @@
   applied at all; update or delete each. It checks policies that name their schema and table, a
   wildcard catalog against each of the tenant's DuckLake databases holding the table; a wildcard
   schema or table is not checked.
-- **Check the boot output for column masks that can raise an error.** A new mask may not use a
-  form that can answer with an error quoting the unmasked value (see the last Security entry);
-  one stored before keeps applying as stored. At each boot the manager prints one `WARN:` line on
-  stderr per stored mask that a create would now refuse, naming the tenant, the role, the policy
-  id, the table, the column and the forms found, never the mask; rewrite each with `TRY_CAST`,
-  `try_strptime` or `TRY(...)`.
+- **Check the boot output for column masks outside the allowed forms.** A new mask may use only
+  the forms listed in the last Security entry; one stored before keeps applying as stored. At each
+  boot the manager prints one `WARN:` line on stderr per stored mask that a create would now
+  refuse, naming the tenant, the role, the policy id, the table, the column and the kind of each
+  refused part, never the mask. Rewrite each with the allowed forms: text functions over
+  `CAST(<column> AS VARCHAR)` (`md5(email)` is refused, `md5(CAST(email AS VARCHAR))` is not),
+  numbers over `TRY_CAST(<column> AS DOUBLE)`.
+- **Check stored row predicates and masks that the parser read only in part.** A predicate is
+  stored as written; one that holds DuckDB's `//`, `=>`, `:=`, `#` or another token the parser
+  stopped at is now refused at create and update, and one stored before is refused at rewrite
+  time, denying the statements reading its table, and the boot report of stale row policies lists
+  it as a predicate that cannot be applied, for the policies that report checks; update each. A
+  mask was stored as the part the parser read (a mask using `//` was stored as the part before it,
+  which can be the bare column): check the stored text of each mask, which no check can tell from
+  one written so.
 
 ### Security
 
@@ -135,49 +144,70 @@
     from a manifest (which does not check masks), that reads another column is refused when a
     statement reads its column: that refusal is what guards such a row. Review stored masks before
     upgrading.
-- **A result column's name no longer carries a mask, and a new mask may not raise an error.**
-  Two ways in which a principal holding a column mask could learn more than the masked value:
+- **A result column's name no longer carries a mask or a row predicate, and a mask uses only forms
+  that cannot raise an error quoting a value.** Three ways in which a principal holding a column
+  mask or a row policy could learn more than the policy shows:
   - DuckDB names an unaliased select item after its expression. An item that held a masked column
     inside a call, an operator or any other expression was named after the rewritten expression,
     so the name of the result column spelled out the administrator's mask, constants and salts
     included, on every door (the FlightSQL schema and stream, the native front door, MCP, the REST
-    data edge). Every select item the rewriter changes and the caller gave no alias now gets one:
-    a bare column keeps its own name, as before, and any other item is named after its text as the
-    gateway's parser prints it before the mask goes in, trimmed, a line break read as a space.
-    This holds at any depth a name can reach the client from (a derived table or CTE an outer
-    query reads, a set operation's first arm, a scalar subquery, DISTINCT ON, the FlightSQL prepare
+    data edge). The row policy rewriter replaces each table with a filtered view holding the
+    administrator's predicate, so an item holding a subquery over such a table (a scalar subquery,
+    `EXISTS`, `IN (SELECT ..)`, `ARRAY(SELECT ..)`) was named after the predicate, for a holder of
+    a row policy alone too. Every select item either rewriter changes and the caller gave no alias
+    now gets one: a bare column keeps its own name, as before, and any other item is named after
+    its text as the gateway's parser prints it before either rewrite, trimmed, a line break read
+    as a space, once (an item the column rewriter named keeps that name). This holds at any depth
+    a name can reach the client from (a derived table or CTE an outer query reads, a struct of
+    one, a set operation's first arm, a scalar subquery, DISTINCT ON, the FlightSQL prepare
     probe); a column list the caller writes on a CTE or derived table still wins, and an item the
-    rewriter did not change keeps DuckDB's own name. Clients holding a mask see different names
-    for such items than before, and the name can differ from the one DuckDB gives the same item
-    to a principal holding no mask: a call, a nested call and `CAST(.. AS ..)` read the same
-    (`lower(email)`), while an operator, a comparison or `CASE` reads as written where DuckDB adds
-    parentheses (`email || 'x'` where DuckDB says `(email || 'x')`), a function name keeps the
-    caller's case (`LOWER(email)`, `coalesce(..)` where DuckDB says `lower(email)`,
-    `COALESCE(..)`), `::` stays `::` where DuckDB says `CAST(..)`, a quoted or backtick-quoted
-    column keeps double quotes (`lower("email")`), `LIKE` stays `LIKE` where DuckDB says `~~`, a
-    method call reads as the call DuckDB makes of it (`lower(email)` where DuckDB says
-    `email.lower()`), and the parser's spacing replaces the caller's (`lower( email )` reads
-    `lower(email)`). Give such an item an alias to fix its name.
+    rewriters did not change keeps DuckDB's own name, except in a `UNION [ALL] BY NAME`, where
+    every unaliased item that is not a bare column is named so, so that the arms still match.
+    Clients holding a policy see different names for such items than before, and the name can
+    differ from the one DuckDB gives the same item to a principal holding none: a call, a nested
+    call, a scalar subquery and `CAST(.. AS ..)` read the same (`lower(email)`), while an
+    operator, a comparison or `CASE` reads as written where DuckDB adds parentheses
+    (`email || 'x'` where DuckDB says `(email || 'x')`), a function name keeps the caller's case
+    (`LOWER(email)`, `coalesce(..)` where DuckDB says `lower(email)`, `COALESCE(..)`), `::` stays
+    `::` where DuckDB says `CAST(..)`, a quoted or backtick-quoted column keeps double quotes
+    (`lower("email")`), `LIKE` stays `LIKE` where DuckDB says `~~`, a method call reads as the
+    call DuckDB makes of it (`lower(email)` where DuckDB says `email.lower()`), and the parser's
+    spacing replaces the caller's (`lower( email )` reads `lower(email)`). Give such an item an
+    alias to fix its name. An `ORDER BY` naming such an item's text, or a later item naming it,
+    now binds to the item where it bound to a column of that name.
   - A mask DuckDB cannot evaluate on a row answers with DuckDB's error, and DuckDB's conversion,
-    parsing and overflow errors quote the value they failed on: the unmasked value. Creating or
-    updating a mask is now refused (`400`, naming the forms found) when it uses, outside
-    `TRY(...)`, a form that can raise on a value of the row: `CAST` or `::` to anything but text;
-    `strptime`; the JSON functions that parse their input (`json_extract`, `json_value`, `->`,
-    `->>` and the others but `json_valid`, `json_quote`, `json_object`, `json_array`), `json()`,
-    `from_json`; `from_base64`, `unhex`, `unbin`, `decode`; `error()`; the date and time
-    constructors and epoch and interval conversions (`make_date`, `make_timestamp`,
-    `to_timestamp`, `epoch_ms`, `to_days`, `date_add`, `INTERVAL (<expression>)`, ...); `+`, `-`,
-    `*`, `<<`, `>>` and `abs`, `factorial` (overflow), `%` and `//` by anything but a constant
-    other than 0 and -1; `chr` and `repeat`; a date part, time zone or regular expression read
-    from the row; and a comparison of the column, or of a call that may return text, with a
-    number, a boolean or a date (DuckDB then casts the text and can fail). Use `TRY_CAST` for
-    `CAST` and `::`, `try_strptime` for `strptime`, or wrap the expression in `TRY(...)`, which
-    answers NULL instead of the error. The column's type is not known when a mask is written, so
-    an arithmetic or a comparison that cannot overflow or fail on the actual column is refused too
-    (`round(salary / 1000) * 1000`: use `round(salary, -3)`, or `TRY(...)`). A mask that the
-    parser reads only in part (DuckDB's `//`, which it stopped at, so that the mask stored was the
-    expression before it) is refused too. A mask stored before keeps applying as stored, and an
-    imported one is not checked; the manager reports each that a create would now refuse at boot.
+    parsing and overflow errors quote the value they failed on: the unmasked value. A new or
+    updated mask may now use only the forms DuckDB 2.0.0 answers, over a value of any type the
+    column may have (its type is not known when the mask is written), with no error quoting the
+    value; anything else is refused (`400`, naming each part that is not allowed and listing the
+    allowed forms). The allowed forms: string and numeric constants, `NULL`, the column; `||` and
+    `concat`; `CAST(.. AS VARCHAR)`, `TRY_CAST(.. AS VARCHAR)`, `::VARCHAR` (or `TEXT`,
+    `STRING`); `hash`; over text only (write `CAST(<column> AS VARCHAR)` first), `md5`, `sha1`,
+    `sha256`, `upper`, `lower`, `trim`, `ltrim`, `rtrim`, `left`, `right`, `substr`, `substring`,
+    `lpad`, `rpad`, `regexp_replace` with constant arguments, and `length`; `coalesce` and
+    `CASE WHEN <x> IS [NOT] NULL THEN .. END` whose values are string constants or NULL beside
+    text forms only or one other form; `nullif(<x>, <string constant or NULL>)`; and DOUBLE
+    arithmetic: `TRY_CAST(<x> AS DOUBLE)`, `/` by a numeric constant other than 0, `%` by a
+    positive integer constant, `round` (with an integer constant), `floor`, `ceil`, and `+`, `-`,
+    `*` and a minus sign over those and numeric constants (`round(TRY_CAST(salary AS DOUBLE) /
+    1000) * 1000`). Function names are written plain, never quoted or qualified. Some allowed
+    forms can still fail with an error that holds no value: a regular expression or an argument
+    constant DuckDB refuses, `round` of a number past its type's range ("Overflow in ROUND"), `/`
+    of an interval by a small constant ("Overflow in INTERVAL division"), a string constant
+    `nullif` or `coalesce` cannot cast to the column's type (the error quotes the constant). The
+    forms `TRY(...)`, a comparison, a boolean operator, `AT TIME ZONE`, a cast to any other type
+    and a text or number function over the bare column (which DuckDB casts implicitly, and a cast
+    of a `VARIANT` or `BIGNUM` value quotes it) are refused.
+  - A mask or a row predicate the parser read only in part was stored shorter than written or
+    judged on a part of itself: the parser stops at a token it cannot read (`=>`, `:=`, a word)
+    and reads `//`, DuckDB's integer division, as a comment, so a mask using it was stored as the
+    part before it, which can be the bare column, and a row predicate's checks saw only its first
+    part
+    (and a closing parenthesis in it could join the next policy's predicate, admitting every
+    row). Both are now refused unless the parser reads all of the text, `#` included, and a
+    stored predicate is read whole at rewrite time too or the statement is refused. A mask stored
+    before keeps applying as stored, and an imported one is not checked; the manager reports each
+    that a create would now refuse at boot.
 
 ### Fixed
 

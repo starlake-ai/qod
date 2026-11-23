@@ -2,16 +2,13 @@ package ai.starlake.quack.edge.rls
 
 import java.util.Locale
 import net.sf.jsqlparser.expression.Expression
-import net.sf.jsqlparser.parser.CCJSqlParserUtil
-
-import scala.util.{Failure, Success, Try}
 
 /** Strict-safety validator for free-form row-filter predicates on row policies. Runs once at policy
   * create/update time. Pure (no I/O, no DuckDB connection).
   *
   * A `predicate_sql` value must be ONE boolean DuckDB expression that:
-  *   1. Parses via JSqlParser's `parseCondExpression` once identity-substitution tokens (`${user}`,
-  *      `${tenant}`, `${tenantId}`, `${groups}`, `${roles}`) are neutralised.
+  *   1. Parses whole as one condition ([[WholeExpression]]) once identity-substitution tokens
+  *      (`${user}`, `${tenant}`, `${tenantId}`, `${groups}`, `${roles}`) are neutralised.
   *   2. Contains no subqueries (`SELECT`) or `EXISTS` clauses.
   *   3. Calls no side-effect or escape functions (denylist + `pragma_*` prefix).
   *   4. Is bounded in size (<= 1024 chars).
@@ -84,9 +81,15 @@ object RowPredicateValidator:
     // Read as the rewriter reads it at splice time (MisreadNames.stored).
     val read = ai.starlake.quack.edge.cls.MisreadNames.stored(probe)
     if read.refusal.isDefined then return Invalid(read.refusal.get)
-    val expr: Expression = Try(CCJSqlParserUtil.parseCondExpression(read.text)) match
-      case Success(e)  => e
-      case Failure(ex) => return Invalid(s"predicateSql does not parse: ${ex.getMessage}")
+    // Read whole: JSqlParser's condition entry point answers the condition before a token it
+    // cannot read, and its lexer takes `//` (DuckDB's integer division) for a comment. The text is
+    // stored as written, so a predicate judged on a part of it could filter less than the checks
+    // here saw (a closing parenthesis in it can even join the next policy's predicate at splice
+    // time).
+    val expr: Expression =
+      WholeExpression.parseFor("predicateSql", read.text, cond = true) match
+        case Right(e)     => e
+        case Left(reason) => return Invalid(reason)
 
     // Scan the canonical, literal-stripped form. Lower-cased so keyword/function matching is
     // case-insensitive; literals removed so their contents can never trip a keyword check.
