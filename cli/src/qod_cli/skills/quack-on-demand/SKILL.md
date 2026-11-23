@@ -2257,7 +2257,12 @@ nothing, even of a table they altered on their own branch), and
 table, and a key on one as for a table not in the change set. They see a table's
 row numbers only when their own count of it succeeds, and the count of a user
 holding a column or row policy never does: such a user gets no `rowConflicts` at
-all. An OPA tenant's users see what their QoD grants cover for reading, as with
+all. Row conflicts come from a proposal only: `branch changes` says which in
+`rowConflictsStatus` (`current`, the open proposal's with main and the branch where
+it read them; `stale`, either moved since, so they are left out: propose again;
+`not_computed`, no open proposal), and its insert/delete/update counts are change
+events (`countsAre`), one per snapshot a row changed in, where a proposal's are net.
+An OPA tenant's users see what their QoD grants cover for reading, as with
 their `SHOW TABLES`, since OPA does not narrow those grants: nothing with no such
 grant, and every name on the default built-ins.
 `mergeable` is always the whole branch's, and a refusal's text can still name
