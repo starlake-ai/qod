@@ -1788,10 +1788,10 @@ abstract class AuthzEndToEndCases(
   it should "reach a policy holder through MCP without the excerpt, answer and history alike" in {
     ready()
     feedRange // feed_a, whose email column mona reads masked
-    // MCP's run_sql reaches the node through the manager's native client, which writes DuckDB's
-    // excerpt of the statement it sent (the rewrite, for a policy holder) into the error, and the
-    // router records that error in the statement history. quinn holds no policy, so the excerpt
-    // reaches quinn's answer and row: that shows this path writes one.
+    // MCP's run_sql answers a node error without DuckDB's excerpt of the statement for every
+    // principal today (the excerpt comes from the FlightSQL prepare probe, which the router specs
+    // pin): quinn, who holds no policy, gets none either. The holders' checks guard the answer and
+    // the history row should this path ever start carrying one.
     val cases = List(
       (
         "mona",
@@ -1809,10 +1809,8 @@ abstract class AuthzEndToEndCases(
           case Right(r)  => fail(s"expected a bind error, got $r")
           case Left(err) =>
             err should include(s"nonexist_stfix_mcp_${user.head}")
-            if policyText.isEmpty then err should include("LINE ")
-            else
-              err should not include "LINE "
-              err should not include policyText
+            err should not include "LINE "
+            if policyText.nonEmpty then err should not include policyText
       }
       val marker = s"nonexist_stfix_mcp_${user.head}"
       val errors = inHistory("permanent", marker)
@@ -1822,10 +1820,8 @@ abstract class AuthzEndToEndCases(
         errors should not be empty
         errors.foreach { e =>
           e should include(marker)
-          if policyText.isEmpty then e should include("LINE ")
-          else
-            e should not include "LINE "
-            e should not include policyText
+          e should not include "LINE "
+          if policyText.nonEmpty then e should not include policyText
         }
       }
   }
