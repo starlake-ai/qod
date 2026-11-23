@@ -1346,7 +1346,11 @@ abstract class AuthzEndToEndCases(
         s"INSERT INTO $lake.main.dflt (a) VALUES (2)",
         node = s"function lower is not classified: it resolves to $lake.main.lower"
       )
-    finally admin("lake", s"DROP MACRO $lake.main.lower")
+    finally
+      // DuckLake (DuckDB 2.0.1) refuses to drop a macro a column default calls, by name: the
+      // table goes first.
+      admin("lake", s"DROP TABLE $lake.main.dflt")
+      admin("lake", s"DROP MACRO $lake.main.lower")
     // A read binds a table's generated columns. DuckLake has none (it refuses them, as it does CHECK
     // constraints and triggers), so this one lives in the duckdb-file database.
     admin("files", s"CREATE TABLE $files.main.gen (a INTEGER, g VARCHAR AS (upper(lower('Ab'))))")
