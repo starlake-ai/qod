@@ -1614,6 +1614,14 @@ export interface BranchChangesResponse {
   conflicts: BranchConflictEntry[];
   unsupported: string[];
   mergeable: boolean;
+  /** What the tables' `rowConflicts` are: `current`, computed against main and the branch as they are
+    * now (on a change-set read, the open proposal's; always so on a propose or merge reply); `stale`,
+    * left out because main or the branch moved since the open proposal; `not_computed`, no proposal
+    * is open. An older server omits it: read it as `current`. */
+  rowConflictsStatus?: 'current' | 'stale' | 'not_computed';
+  /** What the tables' `inserted` / `deleted` / `updated` count: `change_events`, one per snapshot a
+    * row changed in. An older server omits it: the meaning is unknown. */
+  countsAre?: 'change_events';
 }
 
 export interface BranchProposeResponse {

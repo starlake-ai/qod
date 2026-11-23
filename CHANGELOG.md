@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Upgrading
+
+- **Check the boot output for row policies that name a column their table no longer has.** From
+  this release such a policy denies every statement reading its table under its role (see the
+  second Security entry), where it used to apply unchecked. At each boot the manager prints one
+  `WARN:` line on stderr per such policy and DuckLake database, naming the tenant, the role, the
+  policy id, the table and the missing columns, and one per policy whose predicate cannot be
+  applied at all; update or delete each. It checks policies that name their schema and table, a
+  wildcard catalog against each of the tenant's DuckLake databases holding the table; a wildcard
+  schema or table is not checked.
+
 ### Security
 
 - **A row policy no longer filters a reference that DuckDB binds to a CTE.** A statement whose
@@ -24,7 +35,13 @@
   renamed after the policy was written) therefore read a column of an item the caller placed
   beside the table, and could admit every row. Two changes close it:
   - Such a policy now fails to apply, and the statement is denied with `row policy failed to
-    apply - contact an administrator`, which names neither the predicate nor the column. The
+    apply (ref <12 hex digits>) - contact an administrator`, which names neither the policy, the
+    predicate nor the column. The manager logs the reference at ERROR with the tenant, pool,
+    user, table, roles, policy ids, cause and missing columns, and the denial's `data-denial`
+    audit event carries the same under `rowPolicyRef`, `rowPolicyTable`, `rowPolicies`,
+    `rowPolicyRoles`, `rowPolicyCause` and `rowPolicyMissingColumns`, so a tenant admin finds
+    the policy a user's reference names. Every other failure to apply a row policy reads the same
+    way. The
     gateway reads the table's columns from the catalog the column policies use. A time-travel
     read `AT (VERSION => n)` is judged on the columns of snapshot `n`, any other clause on the
     current columns. A table whose columns cannot be read is handled as
@@ -125,6 +142,11 @@
   `inserted` / `deleted` / `updated` count one event per snapshot a row changed in (a row set
   back to its fork value still counts), where a proposal's counts are net. The `branch_changes`
   and `diff` tool descriptions say so.
+- **The admin console shows the row-conflict status and what the counts mean** (#298). The
+  change set of a branch now says, under its table, that the row conflicts are out of date (`stale`:
+  propose again) or are computed when the merge is proposed (`not_computed`), where the row
+  conflicts section was simply missing; and the Inserted / Deleted / Updated headers carry a
+  tooltip saying they count change events, not net changes.
 - **The MCP discovery tools answer a plain tenant member** (#297). `list_databases`,
   `list_tables`, `describe_table` and `table_history` read through the catalog handlers' admin
   gate, so every member who was not an admin got `tenant_forbidden: session has no admin grant on

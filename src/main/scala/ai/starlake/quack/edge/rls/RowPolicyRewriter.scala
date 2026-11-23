@@ -84,10 +84,31 @@ object RowPolicyRewriter:
     * a block comment, a bare semicolon) that produced this failure mode. A policy that cannot be
     * applied must deny the statement rather than forward it unfiltered - forwarding would silently
     * disable row-level security for every row the unapplied policy was meant to admit or restrict.
-    * `reason` is a fixed, non-identifying string; it never carries the SQL or the predicate text,
-    * since [[FlightSqlRouter]] surfaces it to the caller.
+    * `reason` is a fixed, non-identifying string; it never carries the SQL or the predicate text.
+    * `detail` says which policy failed and why, for the administrator only: the router logs it and
+    * puts it in the denial's audit event under a reference it gives the caller, and shows the
+    * caller neither (it names the administrator's policy). None when the failure came from outside
+    * one policy's wrap.
     */
-  final case class Failed(reason: String) extends Outcome
+  final case class Failed(reason: String, detail: Option[FailureDetail]) extends Outcome
+
+  /** What an administrator needs to find a policy that failed to apply: the table as the statement
+    * read it (`catalog.schema.table`, the session's parts filled in), the ids of the policies
+    * OR-combined there and the names of their roles, the cause ([[MissingColumnCause]],
+    * [[UnqualifiableCause]] or [[PredicateErrorCause]]) and, for a missing column, the columns the
+    * predicate names that the table lacks (folded). Never the predicate.
+    */
+  final case class FailureDetail(
+      table: String,
+      policyIds: List[String],
+      roles: List[String],
+      cause: String,
+      missingColumns: List[String]
+  )
+
+  val MissingColumnCause  = "missing_column"
+  val UnqualifiableCause  = "unqualifiable_predicate"
+  val PredicateErrorCause = "predicate_error"
 
   private val TokenRegex = "\\$\\{[a-zA-Z]+\\}".r
 
@@ -172,10 +193,18 @@ object RowPolicyRewriter:
   )
 
   /** A predicate reading a column its table does not have: the policy fails to apply (denied). The
-    * message names neither the predicate nor the column.
+    * message names neither the predicate nor the column; `missing` (folded) goes only into the
+    * administrator's [[FailureDetail]].
     */
-  private final class MissingPredicateColumn
+  private final class MissingPredicateColumn(val missing: Set[String])
       extends RuntimeException("row policy predicate names a column its table does not have")
+
+  /** One policy wrap that failed, with what [[FailureDetail]] tells the administrator. */
+  private final class PolicyApplyFailure(val reason: String, val detail: FailureDetail)
+      extends RuntimeException(reason)
+
+  private val MissingColumnReason = "row policy names a column its table does not have"
+  private val FailedReason        = "row policy failed to apply"
 
   private val UnresolvedRefusal =
     "the columns of a row-policy table this statement reads could not be read; retry, or " +
@@ -260,6 +289,33 @@ object RowPolicyRewriter:
           case other    => children(other, lambdas, sub)
     walk(expr, Set.empty, None)
     read.toSet
+
+  /** The columns a stored predicate written against `catalog.schema.table` reads, folded (`rowid`
+    * left out), as [[qualifyPredicate]] reads them at rewrite time, with every `${token}` read as
+    * NULL; Left(cause) when the predicate cannot be applied at all ([[UnqualifiableCause]] or
+    * [[PredicateErrorCause]]), which denies every statement reading the table as well. For the boot
+    * report of stale policies: no statement, principal or catalog read involved.
+    */
+  def predicateColumns(
+      predicateSql: String,
+      catalog: String,
+      schema: String,
+      table: String
+  ): Either[String, Set[String]] =
+    def fold(x: String): String = IdentifierFold.fold(unquote(x))
+    val qualifiers              =
+      List(
+        List(fold(table)),
+        List(fold(schema), fold(table)),
+        List(fold(catalog), fold(schema), fold(table))
+      )
+    try
+      val expr =
+        CCJSqlParserUtil.parseCondExpression("(" + substitute(predicateSql, Map.empty) + ")")
+      Right(qualifyPredicate(expr, qualifiers, freshAlias()) - "rowid")
+    catch
+      case _: UnqualifiablePredicate      => Left(UnqualifiableCause)
+      case scala.util.control.NonFatal(_) => Left(PredicateErrorCause)
 
   /** SQL-escape a scalar value into a quoted literal: `O'Brien` -> `'O''Brien'`. */
   private def lit(v: String): String = "'" + v.replace("'", "''") + "'"
@@ -380,21 +436,9 @@ class RowPolicyRewriter(
             // row policy for the caller. Fail closed instead of Passthrough. Load-bearing for
             // rows stored before RowPredicateValidator rejected splice-unsafe predicates (a
             // trailing `--` comment, etc.) - see Failed's doc comment.
-            case _: MissingPredicateColumn =>
-              logger.warn(
-                "a row policy names a column its table does not have, for tenant={} user={}; " +
-                  "denying",
-                eff.user.tenant.getOrElse("-"),
-                eff.user.username
-              )
-              Failed("row policy names a column its table does not have")
-            case _: Throwable =>
-              logger.warn(
-                "row policy failed to apply at rewrite time for tenant={} user={}; denying",
-                eff.user.tenant.getOrElse("-"),
-                eff.user.username
-              )
-              Failed("row policy failed to apply")
+            // The router logs the detail under the reference it gives the caller.
+            case f: PolicyApplyFailure => Failed(f.reason, Some(f.detail))
+            case _: Throwable          => Failed(FailedReason, None)
         // An executing EXPLAIN classifies as its statement (Select): DuckDB runs it under EXPLAIN
         // ANALYZE, and any plan reports row counts, so one reading a policy table is refused.
         case Some((ex: ExplainStatement, _, _)) =>
@@ -569,25 +613,49 @@ class RowPolicyRewriter(
       unkept.foreach(clause => throw new Refusal(unkeptClauseRefusal(clause)))
       if carried then baseTable.setTimeTravel(t.getTimeTravel): Unit
 
-      val predicate =
-        matched.map(p => "(" + substitute(p.predicateSql, values) + ")").mkString(" OR ")
-      // Read as DuckDB reads it, by the function stored masks are read with: a method call in it
-      // is the plain call DuckDB makes of it (MisreadNames.stored); one it cannot write so fails
-      // the rewrite closed.
-      val stored = ai.starlake.quack.edge.cls.MisreadNames.stored(predicate)
-      stored.refusal.foreach(reason => throw new IllegalArgumentException(reason))
-      val expr: Expression = CCJSqlParserUtil.parseCondExpression(stored.text)
       // One alias per wrap: a statement's own text (a PIVOT pre-statement's included) can only
       // show the aliases of the wraps it holds.
-      val rowAlias = freshAlias()
-      val read     = qualifyPredicate(expr, ownQualifiers(t, ctx), rowAlias)
-      requireColumns(
-        t,
-        read,
-        eff,
-        ctx,
-        if carried then TimeTravelCarrier.clauseOf(t.getTimeTravel, clauses) else None
-      )
+      val rowAlias                                                     = freshAlias()
+      def failure(reason: String, cause: String, missing: Set[String]) =
+        val roleNames = eff.roles.map(r => r.id -> r.name).toMap
+        new PolicyApplyFailure(
+          reason,
+          FailureDetail(
+            table = resolvedName(t, ctx),
+            policyIds = matched.map(_.id).distinct.sorted,
+            roles = matched.map(p => roleNames.getOrElse(p.roleId, p.roleId)).distinct.sorted,
+            cause = cause,
+            missingColumns = missing.toList.sorted
+          )
+        )
+      val expr: Expression =
+        try
+          val predicate =
+            matched.map(p => "(" + substitute(p.predicateSql, values) + ")").mkString(" OR ")
+          // Read as DuckDB reads it, by the function stored masks are read with: a method call in
+          // it is the plain call DuckDB makes of it (MisreadNames.stored); one it cannot write so
+          // fails the policy closed.
+          val stored = ai.starlake.quack.edge.cls.MisreadNames.stored(predicate)
+          stored.refusal.foreach(reason => throw new IllegalArgumentException(reason))
+          val parsed = CCJSqlParserUtil.parseCondExpression(stored.text)
+          val read   = qualifyPredicate(parsed, ownQualifiers(t, ctx), rowAlias)
+          requireColumns(
+            t,
+            read,
+            eff,
+            ctx,
+            if carried then TimeTravelCarrier.clauseOf(t.getTimeTravel, clauses) else None
+          )
+          parsed
+        catch
+          // A shape the rewrite refuses names what to change: not a policy failure.
+          case r: Refusal                => throw r
+          case m: MissingPredicateColumn =>
+            throw failure(MissingColumnReason, MissingColumnCause, m.missing)
+          case _: UnqualifiablePredicate =>
+            throw failure(FailedReason, UnqualifiableCause, Set.empty)
+          case scala.util.control.NonFatal(_) =>
+            throw failure(FailedReason, PredicateErrorCause, Set.empty)
       baseTable.setAlias(new Alias(rowAlias, true))
 
       val inner = new PlainSelect()
@@ -633,8 +701,21 @@ class RowPolicyRewriter(
         atPin.getOrElse(catalog.columnsOf(tenant, ctx.pool, cat, schema, name).unsafeRunSync())
       if listed.isEmpty then
         if unresolvedMode == UnresolvedMode.Deny then throw new Refusal(UnresolvedRefusal)
-      else if !needed.subsetOf(listed.map(IdentifierFold.fold).toSet) then
-        throw new MissingPredicateColumn
+      else
+        val missing = needed -- listed.map(IdentifierFold.fold).toSet
+        if missing.nonEmpty then throw new MissingPredicateColumn(missing)
+
+  /** `t` as the statement reads it, `catalog.schema.table`, the parts it was not written with taken
+    * from the session: what an administrator looks the policy's table up by.
+    */
+  private def resolvedName(t: Table, ctx: SchemaContext): String =
+    val name   = unquote(t.getName)
+    val schema = Option(t.getSchemaName).map(unquote).getOrElse(ctx.defaultSchema.getOrElse(""))
+    val cat    = Option(t.getDatabase)
+      .flatMap(d => Option(d.getDatabaseName))
+      .map(unquote)
+      .getOrElse(ctx.defaultDatabase.getOrElse(""))
+    List(cat, schema, name).filter(_.nonEmpty).mkString(".")
 
   /** The qualifications a column of `t` may carry in a predicate, folded: its name, schema and
     * name, catalog, schema and name, the parts it was not written with taken from the session.

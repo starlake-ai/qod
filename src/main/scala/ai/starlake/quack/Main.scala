@@ -2410,6 +2410,14 @@ object Main extends IOApp with LazyLogging:
         // periodic purge of expired denylist rows.
         IO.delay(store.purgeExpiredRevokedJti(java.time.Instant.now())) *>
         IO.delay(warnOpaTenantsWithoutUrl()) *>
+        // Row policies naming a column their table no longer has deny every statement reading
+        // it: reported per policy, after restore() so catalog names resolve, in the background
+        // (one catalog read per table), never delaying the boot.
+        IO.blocking(
+          ai.starlake.quack.edge.rls.StaleRowPolicyReport
+            .report(store, sup, catalogReaders.get)
+        ).handleError(e => logger.warn(s"stale row policy report: ${e.getClass.getSimpleName}"))
+          .start *>
         // Managed object store reachability probe. Advisory only: an unreachable or
         // mis-credentialed bucket must never stop the manager from booting. It does
         // not gate managed tenant-db creates either - those still succeed at the

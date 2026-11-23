@@ -52,7 +52,7 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
       case Rewritten(s)           => s
       case Passthrough            => s"$sql  [passthrough]"
       case PassthroughParseFailed => s"$sql  [parse-failed]"
-      case Failed(reason)         => s"$sql  [failed: $reason]"
+      case Failed(reason, _)      => s"$sql  [failed: $reason]"
       case Refused(reason)        => s"$sql  [refused: $reason]"
     info(s"original:  $sql")
     info(s"predicate: ${if preds.isEmpty then "(none)" else preds.mkString("  ;  ")}")
@@ -106,8 +106,8 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
     // comments out the wrapper's own closing paren and throws on re-parse.
     val effSet = eff(tenantUser, List(policy("a = 1 --")))
     go("SELECT * FROM customer", effSet) match
-      case Failed(_) => succeed
-      case other     => fail(s"expected Failed, got $other")
+      case Failed(_, _) => succeed
+      case other        => fail(s"expected Failed, got $other")
   }
 
   it should "passthrough when no referenced table matches a policy" in {
