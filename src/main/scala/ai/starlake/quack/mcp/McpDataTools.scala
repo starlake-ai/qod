@@ -30,7 +30,9 @@ import scala.concurrent.duration.{DurationInt, FiniteDuration}
   * enforcement as the REST/FlightSQL surface it mirrors -- `run_sql` through the injected routed
   * executor (classifier, router, the node's decision), the catalog reads through the handlers'
   * `TenantDbGate`/`TenantScopeCheck` with the principal's raw bearer as `apiKey` -- so there is no
-  * second policy layer to keep in sync.
+  * second policy layer to keep in sync. Those gates admit admins only, so a plain member's
+  * discovery reads go through [[McpCatalogReach]] instead: their own tenant, a pool the handshake
+  * admits them to, and only the tables their grants cover for reading.
   *
   * Tool descriptions are agent-facing product copy: they tell the consuming agent how to work
   * (describe before querying, aggregate instead of dumping, how time travel is spelled).
@@ -78,6 +80,9 @@ final class McpDataTools(
   )
 
   // ---------- shared helpers ----------
+
+  /** Admin or plain member: how the catalog reads below reach a database (issue #297). */
+  private val catalogReach = new McpCatalogReach(sup, scopeOf)
 
   private def connectionIdOf(principal: McpPrincipal): String = principal match
     case McpPrincipal.Pat(p) => s"mcp-${p.patId}"
@@ -248,7 +253,9 @@ final class McpDataTools(
     adminOnly = false,
     run = (principal, args) =>
       tenantOf(principal, args) match
-        case Left(err)     => IO.pure(Left(err))
+        case Left(err) => IO.pure(Left(err))
+        case Right(tenant) if !catalogReach.asAdmin(principal.rawToken, tenant) =>
+          IO.blocking(catalogReach.memberDatabases(callerFor(principal), tenant))
         case Right(tenant) =>
           tenantDbs
             .listTenantDbs(tenant, principal.rawToken)(scopeOf)
@@ -286,22 +293,29 @@ final class McpDataTools(
         database <- str(args, "branch") match
           case None    => Right(parent)
           case Some(b) => branchTarget(tenant, parent, b).map(_._1)
-      yield (tenant, database)) match
-        case Left(err)                 => IO.pure(Left(err))
-        case Right((tenant, database)) =>
+      yield (tenant, parent, database)) match
+        case Left(err)                         => IO.pure(Left(err))
+        case Right((tenant, parent, database)) =>
           IO.blocking {
-            val key = principal.rawToken
+            val key      = principal.rawToken
+            val explicit = str(args, "schema")
             for
-              schemas <- bridge(catalog.listSchemas(tenant, database, key)(scopeOf))
-              wanted = str(args, "schema").fold(schemas.map(_.name))(s => List(s))
+              reach   <- catalogReach.reach(key, callerFor(principal), tenant, parent)
+              schemas <- bridge(catalog.listSchemas(tenant, database, key)(reach.scopeOf))
+              wanted = explicit.fold(schemas.map(_.name))(s => List(s))
               listed <- wanted.foldLeft[Either[String, List[Json]]](Right(Nil)) { (acc, s) =>
                 acc.flatMap { done =>
-                  bridge(catalog.listTables(tenant, database, s, key)(scopeOf))
+                  bridge(catalog.listTables(tenant, database, s, key)(reach.scopeOf))
+                    .map(reach.tables)
                     .map(ts =>
-                      done :+ Json.obj(
-                        "name"   -> Json.fromString(s),
-                        "tables" -> ts.asJson
-                      )
+                      // A member sees a schema only through a table in it they may read, unless
+                      // they named it.
+                      if ts.isEmpty && reach.isMember && explicit.isEmpty then done
+                      else
+                        done :+ Json.obj(
+                          "name"   -> Json.fromString(s),
+                          "tables" -> ts.asJson
+                        )
                     )
                 }
               }
@@ -341,29 +355,32 @@ final class McpDataTools(
         t <- str(args, "branch") match
           case None    => Right((parent, poolKeyFor(tenant, parent, None).toOption))
           case Some(b) => branchTarget(tenant, parent, b).map { case (db, key) => (db, Some(key)) }
-      yield (tenant, t._1, t._2, schema, table)) match
-        case Left(err)                                          => IO.pure(Left(err))
-        case Right((tenant, database, poolKey0, schema, table)) =>
+      yield (tenant, parent, t._1, t._2, schema, table)) match
+        case Left(err)                                                  => IO.pure(Left(err))
+        case Right((tenant, parent, database, poolKey0, schema, table)) =>
           str(args, "iceberg") match
             case Some(alias) =>
               describeIcebergTable(principal, tenant, database, alias, schema, table, poolKey0)
             case None =>
               IO.blocking(
-                bridge(
-                  catalog
-                    .getTable(
-                      tenant,
-                      database,
-                      schema,
-                      table,
-                      None,
-                      None,
-                      None,
-                      principal.rawToken
-                    )(
-                      scopeOf
-                    )
-                )
+                catalogReach
+                  .reach(principal.rawToken, callerFor(principal), tenant, parent)
+                  .flatMap { reach =>
+                    if !reach.visible(schema, table) then Left(reach.notFound(schema, table))
+                    else
+                      bridge(
+                        catalog.getTable(
+                          tenant,
+                          database,
+                          schema,
+                          table,
+                          None,
+                          None,
+                          None,
+                          principal.rawToken
+                        )(reach.scopeOf)
+                      ).map(reach.detail)
+                  }
               ).flatMap {
                 case Left(err)     => IO.pure(Left(err))
                 case Right(detail) =>
@@ -489,21 +506,27 @@ final class McpDataTools(
                     .map(res => bridge(res).map(_.asJson))
             case None =>
               IO.blocking(
-                bridge(
-                  history.history(
-                    tenant,
-                    database,
-                    schema,
-                    table,
-                    int(args, "limit"),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    principal.rawToken
-                  )(scopeOf)
-                ).map(_.asJson)
+                catalogReach
+                  .reach(principal.rawToken, callerFor(principal), tenant, database)
+                  .flatMap { reach =>
+                    if !reach.visible(schema, table) then Left(reach.notFound(schema, table))
+                    else
+                      bridge(
+                        history.history(
+                          tenant,
+                          database,
+                          schema,
+                          table,
+                          int(args, "limit"),
+                          None,
+                          None,
+                          None,
+                          None,
+                          None,
+                          principal.rawToken
+                        )(reach.scopeOf)
+                      ).map(_.asJson)
+                  }
               )
   )
 

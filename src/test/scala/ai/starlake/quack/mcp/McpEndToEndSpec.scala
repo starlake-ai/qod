@@ -1,9 +1,29 @@
 // src/test/scala/ai/starlake/quack/mcp/McpEndToEndSpec.scala
 package ai.starlake.quack.mcp
 
+import ai.starlake.quack.ondemand.api.{
+  CatalogColumnEntry,
+  CatalogDataFileEntry,
+  CatalogSchemaEntry,
+  CatalogTableDetailResponse,
+  CatalogTableEntry
+}
 import ai.starlake.quack.ondemand.auth.{PatAuthenticator, TokenRestriction}
+import ai.starlake.quack.ondemand.catalog.{
+  DuckLakeCatalogReader,
+  TableHistoryFilter,
+  TableHistoryPage
+}
 import ai.starlake.quack.ondemand.state.testkit.TestPostgres
-import ai.starlake.quack.ondemand.state.{LiquibaseRunner, PatStore, UserGrant, UserStore}
+import ai.starlake.quack.ondemand.state.{
+  LiquibaseRunner,
+  PatStore,
+  PoolPermission,
+  RbacRole,
+  RolePermission,
+  UserGrant,
+  UserStore
+}
 import ai.starlake.quack.security.{ManagerServerHarness, SecurityFixtures}
 import io.circe.Json
 import io.circe.parser.parse
@@ -67,12 +87,16 @@ class McpEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
     pats.mint(uid, s"mcp-$username", TokenRestriction.Unrestricted, None, 0)._2
 
   private def withHarness(
-      mcpEnabled: Boolean = true
+      mcpEnabled: Boolean = true,
+      prepare: SecurityFixtures.Fixture => Unit = _ => (),
+      catalogReader: Option[(String, String) => DuckLakeCatalogReader] = None
   )(body: ManagerServerHarness.Harness => Unit): Unit =
     TestPostgres.ensureReachable()
     val fix = SecurityFixtures.freshStore()
-    val h   = ManagerServerHarness.boot(
+    prepare(fix)
+    val h = ManagerServerHarness.boot(
       fix.store,
+      catalogReader = catalogReader,
       patStore = Some(pats),
       patUserOf =
         Some((tenant, username) => users.userIdOf(tenant, username).flatMap(users.userById)),
@@ -237,6 +261,139 @@ class McpEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
       // reuses it and fails: 1 call in 5 did, with a body this size.
       val body = rpc("ping") + " " * 65536
       (1 to 20).foreach(_ => postMcp(h, body, Some("qod_pat_unknown")).statusCode() shouldBe 401)
+    }
+
+  // ------------------------------------------------------------------
+  // Discovery tools for a plain member (issue #297): through the real guard and scope resolver
+  // ------------------------------------------------------------------
+
+  /** A catalog of two schemas: `sales.orders` (bob's grant below), `sales.secret`, `hr.salaries`.
+    */
+  private val memberCatalog: (String, String) => DuckLakeCatalogReader = (_, _) =>
+    new DuckLakeCatalogReader(null):
+      private def entry(schema: String, table: String) =
+        CatalogTableEntry(schema, table, 10L, 1, Some(s"s3://lake/$schema/$table/"))
+      private val tables = Map(
+        "sales" -> List(entry("sales", "orders"), entry("sales", "secret")),
+        "hr"    -> List(entry("hr", "salaries"))
+      )
+      override def listSchemas(): List[CatalogSchemaEntry] =
+        tables.toList.sortBy(_._1).map((s, ts) => CatalogSchemaEntry(s, ts.size))
+      override def listTables(schema: String): List[CatalogTableEntry] =
+        tables.getOrElse(schema, Nil)
+      override def getTable(schema: String, table: String, asOf: Option[Long] = None) =
+        tables
+          .getOrElse(schema, Nil)
+          .find(_.name == table)
+          .map(t =>
+            CatalogTableDetailResponse(
+              t,
+              List(CatalogColumnEntry(0, "id", "INTEGER", false, false)),
+              List(CatalogDataFileEntry(s"s3://lake/$schema/$table/f.parquet", 1L, 10L, 1L))
+            )
+          )
+      override def maxSnapshotId(): Option[Long] = Some(3L)
+      override def listTableHistory(
+          schema: String,
+          table: String,
+          filter: TableHistoryFilter,
+          limit: Int,
+          before: Option[Long]
+      ): Option[TableHistoryPage] =
+        getTable(schema, table).map(_ => TableHistoryPage(7L, Nil, hasMore = false))
+
+  /** bob, a plain member, may connect to `sales` and reads `sales.orders` through a role. */
+  private def grantBobOrders(fix: SecurityFixtures.Fixture): Unit =
+    fix.store.insertPoolPermission(
+      PoolPermission(
+        id = "pp-bob-sales",
+        tenantId = SecurityFixtures.TenantId,
+        poolId = Some(SecurityFixtures.PoolId),
+        userId = Some(fix.bobUserId)
+      )
+    )
+    fix.store.upsertRole(RbacRole("r-orders", SecurityFixtures.TenantId, "orders_reader"))
+    fix.store.insertRolePermission(
+      RolePermission("rp-orders", "r-orders", "*", "sales", "orders", "RO")
+    )
+    fix.store.addUserRole(fix.bobUserId, "r-orders")
+
+  /** `tools/call name(args)` as `bearer`: `(isError, text)`. */
+  private def callTool(
+      h: ManagerServerHarness.Harness,
+      bearer: String,
+      name: String,
+      args: (String, Json)*
+  ): (Boolean, String) =
+    val params  = Json.obj("name" -> Json.fromString(name), "arguments" -> Json.obj(args*))
+    val resp    = postMcp(h, rpc("tools/call", params = params), Some(bearer))
+    val result  = parse(resp.body()).toOption.get.hcursor.downField("result")
+    val isError = result.get[Boolean]("isError").toOption
+    withClue(s"$name -> ${resp.body()}")(isError should not be empty)
+    (isError.get, result.downField("content").downN(0).get[String]("text").toOption.getOrElse(""))
+
+  private val acmeMain = "database" -> Json.fromString(SecurityFixtures.TenantDbName)
+
+  private def tableArgs(schema: String, table: String): Seq[(String, Json)] =
+    Seq(acmeMain, "schema" -> Json.fromString(schema), "table" -> Json.fromString(table))
+
+  "mcp discovery tools" should "answer a plain member within their grants" in
+    withHarness(prepare = grantBobOrders, catalogReader = Some(memberCatalog)) { h =>
+      val bob = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.BobUsername)
+
+      val (dbErr, dbs) = callTool(h, bob, "list_databases")
+      withClue(dbs) {
+        dbErr shouldBe false
+        dbs should include(SecurityFixtures.TenantDbName)
+        dbs should include(SecurityFixtures.PoolName)
+      }
+
+      val (tErr, tables) = callTool(h, bob, "list_tables", acmeMain)
+      withClue(tables) {
+        tErr shouldBe false
+        tables should include("orders")
+        tables should not include "secret"
+        tables should not include "salaries"
+        tables should not include "\"hr\""
+        tables should not include "s3://"
+      }
+
+      val (dErr, detail) = callTool(h, bob, "describe_table", tableArgs("sales", "orders")*)
+      withClue(detail) {
+        dErr shouldBe false
+        detail should include("\"id\"")
+        detail should not include "s3://"
+      }
+
+      val (hErr, history) = callTool(h, bob, "table_history", tableArgs("sales", "orders")*)
+      withClue(history)(hErr shouldBe false)
+    }
+
+  it should "answer a table outside the member's grants as one that does not exist" in
+    withHarness(prepare = grantBobOrders, catalogReader = Some(memberCatalog)) { h =>
+      val bob = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.BobUsername)
+      List("describe_table", "table_history").foreach { tool =>
+        val (hiddenErr, hidden)   = callTool(h, bob, tool, tableArgs("sales", "secret")*)
+        val (missingErr, missing) = callTool(h, bob, tool, tableArgs("sales", "nosuch")*)
+        withClue(s"$tool: $hidden / $missing") {
+          hiddenErr shouldBe true
+          missingErr shouldBe true
+          hidden shouldBe missing.replace("nosuch", "secret")
+        }
+      }
+    }
+
+  it should "list nothing to a member who may connect to no pool" in
+    withHarness(catalogReader = Some(memberCatalog)) { h =>
+      val bob            = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.BobUsername)
+      val (dbErr, dbs)   = callTool(h, bob, "list_databases")
+      val (tErr, tables) = callTool(h, bob, "list_tables", acmeMain)
+      withClue(s"$dbs / $tables") {
+        dbErr shouldBe false
+        dbs should not include SecurityFixtures.TenantDbName
+        tErr shouldBe true
+        tables should include("no_pool_access")
+      }
     }
 
   "mcp admin surface" should "drive the full provisioning flow" in withHarness() { h =>
