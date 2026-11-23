@@ -457,6 +457,7 @@ object MetadataFilterRewriter:
     ai.starlake.acl.parser.TableExtractor.DuckDbCatalogFunctions
 
   private val InformationSchema      = "information_schema"
+  private val DefaultSchema          = "main"
   private val DuckLakeMetadataPrefix = "__ducklake_metadata_"
   private val ReadCoveringVerbs      = Set("RO", "RW", "ALL")
   private val SystemRowClauseTab     = "table_schema IN ('information_schema', 'pg_catalog')"
@@ -843,6 +844,12 @@ object MetadataFilterRewriter:
     * DuckLake metadata one included). No system-row clause: the internal views live in the `system`
     * catalog, which no grant clause names. A zero-grant principal gets `FALSE`, i.e. an empty
     * listing rather than a denial, which is what lets a fresh ATTACH complete.
+    *
+    * `duckdb_schemas()` also keeps the session catalog's `main` row, whatever the grants (issue
+    * #299). The quack client builds its attached catalog from this listing and binds
+    * `<alias>.query(...)`, the form a client sends a whole statement in, through that catalog's
+    * `main` schema: without the row every such statement fails to bind. Every DuckDB catalog has a
+    * `main`, so the row tells nothing, and the tables in it stay filtered by the other functions.
     */
   private[meta] def functionPredicateFor(
       fn: String,
@@ -851,7 +858,13 @@ object MetadataFilterRewriter:
   ): String =
     val clauses = fn match
       case "duckdb_schemas" =>
-        catalogClauses(grants, sessionCat, "database_name", "schema_name", None)
+        catalogClauses(grants, sessionCat, "database_name", "schema_name", None) ++
+          Option
+            .when(sessionCat.nonEmpty)(
+              s"lower(database_name) = ${lit(sessionCat.toLowerCase(Locale.ROOT))} AND " +
+                s"schema_name = ${lit(DefaultSchema)}"
+            )
+            .toList
       case "duckdb_views" =>
         catalogClauses(grants, sessionCat, "database_name", "schema_name", Some("view_name"))
       case _ =>
