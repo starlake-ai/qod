@@ -46,6 +46,9 @@ import scala.util.Try
   *     `vault_now`), group `qod_all_pools`;
   *   - dina (acme): role `e2e_drop` (RO lake `drop_free`, `drop_reused` and `rn_final`, tables
   *     dropped by the dropped-table cases), group `qod_all_pools`;
+  *   - quinn (acme): role `e2e_quinn` (RO lake `orders` and `stmt_text_v`, no policy until the
+  *     statement-text case adds one), group `qod_all_pools`; mona's and rhea's roles also hold RO
+  *     on the plain view `stmt_text_v`, which bob creates in the statement-text cases;
   *   - S3 credentials of their own (decision 23): Alice and the admin for `s3://qod-authz-<run>/`
   *     and `s3://warehouse/` on rustfs (when it is up); Alice, Bob and Carol for the [[FakeS3]]
   *     bucket `fake-shared`, which refuses Carol's key; Dave none.
@@ -86,6 +89,7 @@ abstract class AuthzEndToEndCases(
   private val DinaPw    = "dina-e2e-pw-1"
   private val MayaPw    = "maya-e2e-pw-1"
   private val RheaPw    = "rhea-e2e-pw-1"
+  private val QuinnPw   = "quinn-e2e-pw-1"
   private val Passwords = Map(
     "alice" -> AlicePw,
     "bob"   -> BobPw,
@@ -101,7 +105,8 @@ abstract class AuthzEndToEndCases(
     "vera"  -> VeraPw,
     "dina"  -> DinaPw,
     "maya"  -> MayaPw,
-    "rhea"  -> RheaPw
+    "rhea"  -> RheaPw,
+    "quinn" -> QuinnPw
   )
 
   private val Rustfs = "http://localhost:9000"
@@ -134,6 +139,7 @@ abstract class AuthzEndToEndCases(
   private def globexLake: Path = shared.resolve("globex_lake")
 
   private var stack: AuthzStack     = null
+  private var quinnRole: String     = "" // quinn's role, which the statement-text case gives a mask
   private var lake: String          = "" // acme's DuckLake tenant-db, also its catalog alias
   private var files: String         = "" // acme's duckdb-file tenant-db
   private var fed: String           = "" // acme's memory tenant-db with the federated sources
@@ -445,7 +451,15 @@ abstract class AuthzEndToEndCases(
         "predicateSql" -> s("id = 1")
       )
     )
+    // The statement-text cases (owner ruling D30): a plain view bob creates, read by a policy
+    // holder of each kind; quinn holds no policy until one case adds one.
+    grant(lake, "main", "stmt_text_v", "RO", feedMasked)
+    grant(lake, "main", "stmt_text_v", "RO", fedRows)
+    quinnRole = createRole("e2e_quinn")
+    grant(lake, "main", "orders", "RO", quinnRole)
+    grant(lake, "main", "stmt_text_v", "RO", quinnRole)
     List(
+      ("quinn", QuinnPw, "user", "e2e_quinn"),
       ("maya", MayaPw, "user", "e2e_fed_masked"),
       ("rhea", RheaPw, "user", "e2e_fed_rows"),
       ("fran", FranPw, "user", "e2e_feed"),
@@ -1645,6 +1659,234 @@ abstract class AuthzEndToEndCases(
     )
   }
 
+  // ---------- the statement-text functions (owner ruling D30) ----------
+
+  private val TextRefusal =
+    "function current_query is not available to principals with column or row policies"
+
+  /** `sql`, whose own text names `name`, is refused to `user` by the gateway's statement-text
+    * screen before any node, through every door.
+    */
+  private def screened(user: String, pool: String, sql: String, name: String): Unit =
+    doors.foreach { d =>
+      withClue(s"[$d] $user: $sql -> ") {
+        as(d, user, pool, sql) match
+          case Left(err) =>
+            err should include(ai.starlake.quack.edge.policy.StatementTextScreen.denyReason(name))
+          case Right(r) => fail(s"expected a refusal, got rows $r")
+      }
+    }
+
+  "current_query()" should "be refused to a policy holder and allowed to a principal without" in {
+    ready()
+    // mona holds a mask (on feed_a), rhea a row filter (on pgfed.e2e.orders): every policy counts,
+    // whatever table the statement reads. A statement naming the function is refused by the
+    // gateway's screen; the node's rule is pinned on a live node by StatementTextFunctionsNodeSpec.
+    List("mona", "rhea").foreach(u =>
+      screened(u, "lake", "SELECT current_query() AS q", "current_query")
+    )
+    screened("mona", "lake", "SELECT pg_catalog.current_query() AS q", "current_query")
+    screened("mona", "lake", "SELECT 1 AS one, current_query() AS q", "current_query")
+    allowed("bob", "lake", "SELECT current_query() AS q")
+    allowed("bob", "lake", "SELECT count(*) FROM duckdb_prepared_statements()", Some(List("0")))
+    screened(
+      "rhea",
+      "lake",
+      "SELECT count(*) FROM duckdb_prepared_statements()",
+      "duckdb_prepared_statements"
+    )
+    // Booked as a denial.
+    val booked = deniedInHistory("pg_catalog.current_query()")
+    booked.map(_.hcursor.get[String]("username").getOrElse("")) should contain("mona")
+  }
+
+  /** The plain view of the statement-text cases, (re)created by bob, who holds no policy. */
+  private def stmtTextView(): String =
+    val view = s"$lake.main.stmt_text_v"
+    stack.flight(
+      s"CREATE OR REPLACE VIEW $view AS SELECT current_query() AS q",
+      "bob",
+      BobPw,
+      Acme,
+      "lake"
+    ) shouldBe a[Right[?, ?]]
+    view
+
+  it should "be refused by the node through a plain view another user created" in {
+    ready()
+    val view = stmtTextView()
+    doors.foreach { d =>
+      withClue(s"[$d] bob reads the view: ") {
+        as(d, "bob", "lake", s"SELECT q FROM $view") match
+          case Right(List(q)) => q should include("stmt_text_v")
+          case other          => fail(s"expected one row, got $other")
+      }
+    }
+    // mona and rhea hold RO on the view: the grant passes, the function in its body does not.
+    List("mona", "rhea").foreach(u => refused(u, "lake", s"SELECT q FROM $view", TextRefusal))
+    // The node's refusal is booked as a denial, for each of them.
+    def ofText(rows: List[Json]) =
+      rows.filter(_.hcursor.get[String]("error").exists(_.contains(TextRefusal)))
+    def users(rows: List[Json]) = rows.flatMap(_.hcursor.get[String]("username").toOption).toSet
+    val booked = ofText(
+      deniedInHistory("stmt_text_v", rows => Set("mona", "rhea").subsetOf(users(ofText(rows))))
+    )
+    booked.flatMap(_.hcursor.get[String]("username").toOption) should contain allOf ("mona", "rhea")
+  }
+
+  "a node error" should "reach a policy holder without DuckDB's excerpt of the rewritten statement" in {
+    ready()
+    feedRange // feed_a, whose email column mona reads masked
+    // Each statement fails at bind on a column named after the policy table, so DuckDB's excerpt
+    // (60 columns on each side of the error) would quote the rewrite: mona's mask expression,
+    // rhea's row predicate.
+    val cases = List(
+      ("mona", "lake", s"SELECT email FROM $lake.main.feed_a WHERE nonexist_stfix_m = 1", "'***'"),
+      ("rhea", "fed", "SELECT v FROM pgfed.e2e.orders WHERE nonexist_stfix_r = 1", "id = 1"),
+      ("quinn", "lake", s"SELECT * FROM $lake.main.orders WHERE nonexist_stfix_q = 1", "")
+    )
+    for (user, pool, sql, policyText) <- cases; d <- doors do
+      withClue(s"[$d] $user: $sql -> ") {
+        as(d, user, pool, sql) match
+          case Right(r)  => fail(s"expected a bind error, got rows $r")
+          case Left(err) =>
+            err should include("nonexist_stfix_")
+            // The DuckDB client the native door's test drives adds an excerpt of its own
+            // statement (the `quack_query(...)` call it sent); only the node's are in question.
+            // On FlightSQL the manager's native client writes the node's excerpt, of the statement
+            // it sent; the native door answers the node's message, which holds none.
+            val nodeExcerpts = err.linesIterator
+              .filter(_.trim.startsWith("LINE "))
+              .filterNot(l => d == Door.Native && l.contains("quack_query("))
+              .toList
+            withClue(s"$err -> ") {
+              if policyText.isEmpty && d == Door.Flight then
+                // No policy: the excerpt stays, as DuckDB wrote it.
+                nodeExcerpts should not be empty
+              else
+                nodeExcerpts shouldBe empty
+                if policyText.nonEmpty then err should not include policyText
+            }
+      }
+    // The statement history, which each user reads as their own, records the same text. The
+    // FlightSQL bind error is the prepare probe's, which records nothing; the native door's row is
+    // recorded (with no excerpt from the node, policies or not: FlightSqlRouterSpec pins that a
+    // principal without policies keeps one in history).
+    for (user, _, _, policyText) <- cases do
+      val marker = s"nonexist_stfix_${user.head}"
+      val rows   = inHistory("permanent", marker)
+        .filter(_.hcursor.get[String]("username").toOption.contains(user))
+      val errors = rows.map(_.hcursor.get[String]("error").getOrElse(""))
+      withClue(s"$user's history rows: $errors -> ") {
+        errors should not be empty
+        errors.foreach(_ should include(marker))
+        if policyText.nonEmpty then
+          errors.foreach { e =>
+            e should not include "LINE "
+            e should not include policyText
+          }
+      }
+  }
+
+  it should "reach a policy holder through MCP without the excerpt, answer and history alike" in {
+    ready()
+    feedRange // feed_a, whose email column mona reads masked
+    // MCP's run_sql answers a node error without DuckDB's excerpt of the statement for every
+    // principal today (the excerpt comes from the FlightSQL prepare probe, which the router specs
+    // pin): quinn, who holds no policy, gets none either. The holders' checks guard the answer and
+    // the history row should this path ever start carrying one.
+    val cases = List(
+      (
+        "mona",
+        lake,
+        s"SELECT email FROM $lake.main.feed_a WHERE nonexist_stfix_mcp_m = 1",
+        "'***'"
+      ),
+      ("rhea", fed, "SELECT v FROM pgfed.e2e.orders WHERE nonexist_stfix_mcp_r = 1", "id = 1"),
+      ("quinn", lake, s"SELECT * FROM $lake.main.orders WHERE nonexist_stfix_mcp_q = 1", "")
+    )
+    for (user, database, sql, policyText) <- cases do
+      val pat = patOf(user, s"stfix-mcp-$user")
+      withClue(s"[mcp] $user: $sql -> ") {
+        stack.mcp(pat, sql, database) match
+          case Right(r)  => fail(s"expected a bind error, got $r")
+          case Left(err) =>
+            err should include(s"nonexist_stfix_mcp_${user.head}")
+            err should not include "LINE "
+            if policyText.nonEmpty then err should not include policyText
+      }
+      val marker = s"nonexist_stfix_mcp_${user.head}"
+      val errors = inHistory("permanent", marker)
+        .filter(_.hcursor.get[String]("username").toOption.contains(user))
+        .map(_.hcursor.get[String]("error").getOrElse(""))
+      withClue(s"$user's history rows: $errors -> ") {
+        errors should not be empty
+        errors.foreach { e =>
+          e should include(marker)
+          e should not include "LINE "
+          if policyText.nonEmpty then e should not include policyText
+        }
+      }
+  }
+
+  "prepared statements" should "keep working for a principal with column or row policies" in {
+    ready()
+    // A PREPARE / EXECUTE batch: the node admits it (StatementTextFunctionsNodeSpec); the
+    // gateway's protected-write guard, which reads a policy holder's batch before any node, is not
+    // this rule.
+    allowed("bob", "lake", "PREPARE st_p AS SELECT 42; EXECUTE st_p", Some(List("42")))
+    for u <- List("mona", "rhea"); d <- doors do
+      withClue(s"[$d] $u: ") {
+        as(d, u, "lake", "PREPARE st_p AS SELECT 42; EXECUTE st_p") match
+          case Right(rows) => rows shouldBe List("42")
+          case Left(err)   => err should not include "principals with column or row policies"
+      }
+    // FlightSQL prepared statements, the mask and the row filter holding through them.
+    feedRange // feed_a, whose email column mona reads masked
+    val held = stack.heldFlight("mona", MonaPw, Acme, "lake")
+    try
+      held.runPrepared(s"SELECT email FROM $lake.main.feed_a WHERE id = 1") shouldBe
+        Right(List("***"))
+    finally held.close()
+    val rows = stack.heldFlight("rhea", RheaPw, Acme, "fed")
+    try rows.runPrepared("SELECT count(*) FROM pgfed.e2e.orders") shouldBe Right(List("1"))
+    finally rows.close()
+  }
+
+  "a column policy added after a cached allow" should "refuse current_query() on the next statement" in {
+    ready()
+    // Through the view, so that the text names no such function and the node decides.
+    val sql = s"SELECT q FROM ${stmtTextView()}"
+    allowed("quinn", "lake", sql)
+    // The same plan again: the node answers from its verdict cache.
+    val cached = stack.relay.decideCalls
+    allowed("quinn", "lake", sql)
+    withClue("decision calls for a plan the node had cached: ") {
+      stack.relay.decideCalls shouldBe cached
+    }
+    // A mask on a table the statement does not read: the policy version moves, so the node asks
+    // again, and every policy counts.
+    val policy = stack
+      .post(
+        "/api/role/column-policy/create",
+        obj(
+          "roleId"       -> s(quinnRole),
+          "catalogName"  -> s(lake),
+          "schemaName"   -> s("main"),
+          "tableName"    -> s("orders"),
+          "columnName"   -> s("v"),
+          "action"       -> s("mask"),
+          "transformSql" -> s("'***'")
+        )
+      )
+      .hcursor
+      .get[String]("id")
+      .fold(e => throw e, identity)
+    try refused("quinn", "lake", sql, TextRefusal)
+    finally stack.post("/api/role/column-policy/delete", obj("id" -> s(policy)))
+    allowed("quinn", "lake", sql)
+  }
+
   // ---------- policy version, decision outage, session context ----------
 
   "a revoke" should "take effect on the next statement, past the node's cached verdict" in {
@@ -1810,18 +2052,31 @@ abstract class AuthzEndToEndCases(
   /** The `denied` rows of the statement history (`GET /api/history/statements`) whose text holds
     * `fragment`, polled while the journal flushes (every 500 ms).
     */
-  private def deniedInHistory(fragment: String): List[Json] =
+  private def deniedInHistory(
+      fragment: String,
+      until: List[Json] => Boolean = _.nonEmpty
+  ): List[Json] = inHistory("denied", fragment, until)
+
+  /** The statement history rows of `status` whose text holds `fragment`, once `until` holds of
+    * them (some are recorded, by default) or 15 s have passed: history is written after the
+    * answer, so a case expecting several principals' rows waits for all of them.
+    */
+  private def inHistory(
+      status: String,
+      fragment: String,
+      until: List[Json] => Boolean = _.nonEmpty
+  ): List[Json] =
     val q        = java.net.URLEncoder.encode(fragment, java.nio.charset.StandardCharsets.UTF_8)
     val deadline = System.nanoTime() + 15.seconds.toNanos
     def rows(): List[Json] =
       stack
-        .get(s"/api/history/statements?status=denied&q=$q&limit=50")
+        .get(s"/api/history/statements?status=$status&q=$q&limit=50")
         .hcursor
         .downField("statements")
         .as[List[Json]]
         .getOrElse(Nil)
     var found = rows()
-    while found.isEmpty && System.nanoTime() < deadline do
+    while !until(found) && System.nanoTime() < deadline do
       Thread.sleep(250)
       found = rows()
     found

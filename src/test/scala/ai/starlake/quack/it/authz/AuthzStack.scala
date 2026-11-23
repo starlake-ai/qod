@@ -746,6 +746,31 @@ final class HeldFlight(port: Int, user: String, password: String, tenant: String
     catch case e: FlightRuntimeException => Left(e.getMessage)
     finally if session.isEmpty then session = Option(bearer.getCredentialCallOption)
 
+  /** `sql` as a FlightSQL prepared statement on this connection (prepare, then execute the handle):
+    * every row as `a,b` (Right), or the error the client got (Left).
+    */
+  def runPrepared(sql: String): Either[String, List[String]] =
+    try
+      val prepared =
+        try fsql.prepare(sql, session.getOrElse(basic))
+        finally if session.isEmpty then session = Option(bearer.getCredentialCallOption)
+      val opt = session.getOrElse(basic)
+      try
+        val info   = prepared.execute(opt)
+        val stream = fsql.getStream(info.getEndpoints.get(0).getTicket, opt)
+        try
+          val out = ListBuffer.empty[String]
+          while stream.next() do
+            val root = stream.getRoot
+            for i <- 0 until root.getRowCount do
+              out += root.getFieldVectors.asScala
+                .map((v: FieldVector) => String.valueOf(v.getObject(i)))
+                .mkString(",")
+          Right(out.toList)
+        finally stream.close()
+      finally prepared.close(opt)
+    catch case e: FlightRuntimeException => Left(e.getMessage)
+
   def close(): Unit =
     try raw.close()
     finally allocator.close()

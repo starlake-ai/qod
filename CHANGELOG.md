@@ -76,12 +76,35 @@
   `current_role`, `session_user`, `current_schema`, `current_catalog`, `localtime` and
   `localtimestamp` are left as written. A predicate holding a subquery whose columns are not all
   qualified by the subquery's own FROM items or by the table's name fails to apply.
-- **Functions returning the statement's text are refused to principals with column or row
-  policies.** The node runs the statement as the gateway rewrote it, with every row filter and
-  mask in it, so `current_query()` (and `pg_catalog.current_query()`),
-  `duckdb_prepared_statements()` and `pg_catalog.pg_prepared_statements` showed such a principal
-  the administrator's predicates and the filters' aliases. A statement naming one of them is now
-  refused to such a principal, on every statement kind.
+- **Functions that return the statement's text are refused to principals with column or row
+  policies, and error messages answered to them no longer carry DuckDB's excerpt of the rewritten
+  statement.** The gateway applies such a principal's masks and row filters by rewriting the
+  statement, and the node runs the rewrite, so these functions and the excerpt in an error showed
+  the policies' expressions (a mask's salt, a row filter's predicate and its alias). Two changes:
+  - The functions that return the running statement's text, `current_query()`, its
+    `pg_catalog.current_query()` macro, `duckdb_prepared_statements()` and the
+    `pg_catalog.pg_prepared_statements` view, are refused to any principal holding at least one
+    column or row policy, whatever table the policy names, on every statement kind. The gateway
+    refuses a statement whose own text names one of them; the node's decision refuses them wherever
+    the plan reaches them: a direct call, a view or a secure view (one another user created
+    included), a generated column, a default, a CHECK constraint, a `query()` literal, a
+    `SET VARIABLE` value, a `LIMIT` or `OFFSET`. The node's refusal reads `QoD: function <name> is
+    not available to principals with column or row policies` (`view <name>` for the view), is
+    permanent and is booked as a denial. Some arguments DuckDB evaluates while binding, in a view
+    body or other stored SQL, are not covered yet.
+  - Error messages answered to such a principal no longer carry DuckDB's excerpt of the rewritten
+    statement: the excerpt around the error position (the `LINE <n>:` line and the caret line under
+    it) is left out of every node error on FlightSQL, the native Quack front door, MCP `run_sql` and
+    the REST APIs, and out of the statement history and audit, and so are an error's `position`
+    and `location`, offsets into the rewrite, both in a JSON message (`errors_as_json`) and in the
+    extra info the native Quack front door relays, and what a refusal of the rewrite would quote of
+    it. The manager logs such a refusal in full at ERROR, on one line, and the native Quack front
+    door answers a node error it cannot read with a fixed text, the error itself in the manager's
+    log.
+  - Principals without policies keep `current_query()`, `duckdb_prepared_statements()` and the
+    excerpt; superusers keep all four functions and the excerpt. Prepared statements themselves are
+    unaffected: FlightSQL prepared statements keep working for policy holders, masks and row
+    filters applying as before.
 - **Column policies hold for a column named like a SQL keyword.** A mask or deny on a column
   named `current_date`, `current_time`, `current_timestamp`, `current` or `current_timezone` (a
   CSV or Parquet header can create one) did not apply: the policy rewriter read the bare name as
@@ -213,6 +236,46 @@
     manifest import stored that the parser cannot read whole now refuses every read of its column,
     where it applied as the part the parser read. A stored mask that reads whole keeps applying as
     stored, and the manager reports each that a create would now refuse at boot.
+
+- **A row-policy holder's UPDATE, DELETE and MERGE on a table their policy covers are now
+  refused.** Neither policy rewriter reads a write, so such a write reached every row of the
+  table, the rows the policy hides included, and its WHERE or RETURNING read them. For a
+  principal holding a row policy on the table a statement writes, the protected-write guard now
+  refuses UPDATE (with or without WHERE, FROM or RETURNING), DELETE (with or without WHERE, USING
+  or RETURNING), MERGE INTO it, TRUNCATE, an upsert (`ON CONFLICT DO UPDATE`, `INSERT OR
+  REPLACE`) and an INSERT with RETURNING, with `<table> is protected by a row policy, and writes
+  to a row-policy table are refused`. A plain INSERT of new rows (VALUES, or a SELECT over tables
+  with no policy) is allowed as before, including rows the holder's predicate would not show.
+- **A column-policy holder's write to a table their column policy covers can no longer read a
+  masked or denied column of it.** An UPDATE, DELETE, MERGE or INSERT that read such a column of
+  the table it writes, in its WHERE, ON or SET clauses, its RETURNING or its ON CONFLICT clause,
+  read the column's true value. It is now refused with `<table> is protected by a column policy,
+  and a write to it cannot read a masked or denied column`. This covers the column by name,
+  qualified by the table, its schema or its catalog; as the receiver of a method call
+  (`email.upper()`, in any clause, aggregate and window forms included); and through the table's
+  whole row, a star or `COLUMNS(...)`. A write that assigns that column without reading it stays
+  allowed, and so does one that reads only the table's other columns or the columns of other
+  tables.
+- **A policy holder's write that touches a table their row or column policies cover can no longer
+  use a positional reference (`#n`).** DuckDB numbers `#n` differently by clause, and in an
+  upsert over the proposed row first, which is as wide as the INSERT's source, so `#3` could name
+  a protected column. Every `#n` in such a write is refused, wherever it appears, with `<table> is
+  protected by a column/row policy, and a write touching it cannot use a positional reference
+  (#n)`; name the columns instead.
+- **A policy holder can no longer alter, drop or replace a table their own row or column
+  policies cover.** A rename of the table or of a column moved it out from under its policies,
+  `ALTER COLUMN ... TYPE ... USING` copied a protected value into another column, and DROP or
+  `CREATE OR REPLACE` (CTAS included) removed the rows a row policy hides. Every ALTER TABLE
+  form, DROP and `CREATE OR REPLACE` (of a table or a view) of such a table is now refused, with
+  `<table> is protected by a column/row policy, and altering, dropping or replacing it is
+  refused`. `DROP SCHEMA` (with or without CASCADE) of a schema that may hold such a table is
+  refused too, with `schema <schema> holds a table protected by a column/row policy`; a policy
+  whose schema is a wildcard covers every schema. A CREATE that replaces nothing is allowed.
+  COMMENT ON and CREATE INDEX on such a table were already refused to policy holders, as
+  statements the guard cannot analyse. Principals with no policy on the table are unaffected.
+- A write's RETURNING and ON CONFLICT clauses now count as reads for the protected-write guard,
+  so one that reads a protected table is refused like any other read into a write (DuckDB 2.0
+  refuses a subquery there too).
 
 ### Fixed
 

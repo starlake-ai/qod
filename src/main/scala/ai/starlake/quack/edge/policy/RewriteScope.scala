@@ -65,14 +65,28 @@ object RewriteScope:
       case Scope.Reaches(authorized, readers) =>
         scopeOf(rewritten, config, sessionCatalog, clientDataScans, Some(original)) match
           case Scope.Refused(message) =>
-            Some(s"the rewritten statement cannot be authorized ($message)")
+            Some(s"$CannotAuthorize ($message)")
           case Scope.Reaches(needed, neededReaders) =>
             val extra = (needed -- authorized).map(a => s"${a.table.canonical} (${a.verb})") ++
               (neededReaders -- readers)
             Option.when(extra.nonEmpty)(
-              "the rewritten statement reaches what the original did not: " +
-                extra.toList.sorted.mkString(", ")
+              s"$ReachesBeyond: " + extra.toList.sorted.mkString(", ")
             )
+
+  /** The start of [[reachesBeyond]]'s reason when the rewritten statement cannot be read. */
+  val CannotAuthorize: String = "the rewritten statement cannot be authorized"
+
+  /** The start of [[reachesBeyond]]'s reason when the rewritten statement reaches more. */
+  val ReachesBeyond: String = "the rewritten statement reaches what the original did not"
+
+  /** [[reachesBeyond]]'s `reason` without what it quotes of the rewritten statement (a parse
+    * error's excerpt, the tables and file reader calls a policy's expression added), as a principal
+    * with column or row policies is shown it: those parts can hold the policies' text.
+    */
+  def withoutDetail(reason: String): String =
+    if reason.startsWith(CannotAuthorize) then CannotAuthorize
+    else if reason.startsWith(ReachesBeyond) then ReachesBeyond
+    else reason
 
   /** The function name of a table function call as the parser prints it: its last name part,
     * unquoted and lowercased (`main."histogram"('x', b)` is `histogram`).

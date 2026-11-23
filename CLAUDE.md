@@ -267,6 +267,31 @@ tenant's ACL mode through the existing grant matching or OPA (`OpaInput` gains `
 `macros.json` from qod-node, `src/main/resources/authz/function-classes.tsv` and
 `setting-classes.tsv`; an unknown one is refused "function <name> is not classified"); files by
 `LocationChecker`; PAT `branchOnly` and attenuation. There is no switch: enforcement is always on.
+The statement-text functions (owner ruling D30): the decider refuses `current_query()` (the
+`pg_catalog.current_query` macro binds to it), `duckdb_prepared_statements()` (the
+`pg_catalog.pg_prepared_statements` view inlines to it) and both `pg_catalog` names to a principal
+holding any column or row policy, whatever table the policy names, wherever the plan reaches them
+(a direct call, a view or secure view body, a generated column, a default, a CHECK, a `query()`
+literal, a `SET VARIABLE` value, a `LIMIT` / `OFFSET`), before OPA is asked
+(`AuthzDecider.statementTextUnderPolicies`, `StatementTextFunctions`: `function <name> is not
+available to principals with column or row policies`, `view <name>` for the view, permanent), since
+the gateway's rewrites put the policies' expressions in the text they show; the gateway's
+`StatementTextScreen` refuses the same names in the client's own text. Principals without policies
+keep `current_query()` and `duckdb_prepared_statements()` (`pg_catalog.pg_prepared_statements` is
+refused to every non-superuser outside a secure view by the node's name walk); superusers keep all
+four. For the same reason every node error answered to such a principal (neither a superuser nor the
+system principal) loses DuckDB's excerpt of the statement (`LINE <n>:` to the end of the caret line
+under it, `policy.StatementExcerpt`, decided by `withheldFor` on the effective set): the router
+strips it in `readNodeError` (first try and retry; both doors' prepare-time errors, MCP, REST, the
+FlightSQL prepare probe, history and audit read that text), the native front door strips it from an
+ERROR_RESPONSE it relays to a later FETCH or SEND_DATA (`QuackStatement.excerptWithheld`,
+`QuackWire.mapErrorMessage`, which also drops the `position` and `location` entries of its extra
+info, `StatementExcerpt.OffsetKeys`, every other byte kept; an answer it cannot read is replaced by
+`StatementExcerpt.Unreadable` and logged at ERROR), a JSON error (`errors_as_json`) loses its
+`position` and `location` members, and a `RewriteScope` refusal of the rewrite is answered without
+what it quotes of it (`RewriteScope.withoutDetail`; the full reason is logged at ERROR, the default
+level, as one line, control characters shown as `?`). Principals without policies keep the excerpt. A bind-time slot in stored SQL is a residual
+(below).
 `BootPreflight.checkRetiredSettings` (decision 28) judges the removed settings, from the variable or
 else its `quack-flightsql.acl.*` / `quack-flightsql.nodeLockdown` path: `QOD_ACL_ENABLED` and
 `QOD_NODE_LOCKDOWN` set to off (`false`/`no`/`off`) refuse boot, any other value boots with a stderr
@@ -621,7 +646,13 @@ pinned by `AuthzEndToEndCases` "a memory database" and "a database with a custom
 
 **Residuals** (known, not holes to report): foldable constant arguments are evaluated during bind
 before a refusal (no value reaches the client); `pg_sleep` / `sleep_ms` are allowed, in bind-time
-slots too; SQL stored by others (view bodies, defaults) runs its bind-time slots as the reader; an
+slots too; SQL stored by others (view bodies, defaults) runs its bind-time slots as the reader; a
+statement-text function in such a slot of stored SQL (a view body's `unnest(...)`, `range(...)` or
+`json_each(...)` argument) holds no call in the plan, so the decider does not refuse it to a policy
+holder (the gateway's `StatementTextScreen` catches only the client's own text; the signed
+"holds policies" handle flag of the node-side enforcement work will close it); a result column
+DuckDB names after an unaliased expression over a masked column is named after the rewrite, so it
+carries the mask's `transformSql` to the policy holder (a fix of its own is owed); an
 optimizer extension loaded after qod-node is not re-described; statements an extension runs on its own
 untagged connections (DuckLake metadata, Iceberg commits) are admitted as node-internal; under the
 FlightSQL prepare probe a computed location and a SUMMARIZE run twice, and a fresh FlightSQL query

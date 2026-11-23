@@ -473,6 +473,50 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     latest.error shouldBe Some(ai.starlake.quack.edge.admin.AdminSqlParser.RedactedPlaceholder)
     latest.error.foreach(_ should not include "topsecret")
 
+  "a node error's statement excerpt" should "be withheld from a policy holder, kept otherwise" in:
+    // DuckDB quotes the statement the node ran around the error position; for a policy holder that
+    // is the gateway's rewrite, holding the policies' predicates and masks.
+    val excerptErr = () =>
+      QuackResponse.Failed(
+        QuackError.Permanent(
+          "Binder Error: Referenced column \"nonexist\" not found in FROM clause!\n\n" +
+            "LINE 1: ...FROM main.customer AS __qod_rls WHERE c_region = 'X') AS t WHERE " +
+            "nonexist = 1\n" +
+            "                                                                         ^"
+        ),
+        1L
+      )
+    val sql = "SELECT * FROM main.orders WHERE nonexist = 1"
+    def answered(eff: ai.starlake.quack.ondemand.rbac.EffectiveSet, conn: String) =
+      val (router, _, _) = setup(stub = excerptErr)
+      val out            =
+        router.execute(conn, "alice", poolKey, sql, effectiveSet = Some(eff)).unsafeRunSync()
+      val reason = out match
+        case Left(f)  => f.reason
+        case Right(_) => fail("expected the node's error")
+      (reason, router.history.snapshot(1).head.error.getOrElse(""))
+    val holders = List(
+      effWithRowPolicies(List(rowPolicyCustomer)),
+      effWithPolicies(List(maskCustomerEmail))
+    )
+    holders.zipWithIndex.foreach { (eff, i) =>
+      val (reason, recorded) = answered(eff, s"c-excerpt-$i")
+      withClue(reason) {
+        reason should include("Referenced column \"nonexist\" not found")
+        reason should not include "LINE 1:"
+        reason should not include "c_region = 'X'"
+        reason should not include "^"
+      }
+      recorded should include("Referenced column \"nonexist\" not found")
+      recorded should not include "LINE 1:"
+      recorded should not include "c_region"
+    }
+    val plain = ai.starlake.quack.ondemand.rbac.EffectiveSet(tenantUser, Nil, Nil, Nil, Nil)
+    val (plainReason, plainRecorded) = answered(plain, "c-ex-p")
+    plainReason should include("LINE 1:")
+    plainReason should include("c_region = 'X'")
+    plainRecorded should include("LINE 1:")
+
   "FlightSqlRouter.execute" should "route a SELECT to the only DUAL node and return Ok" in:
     val beforeCount =
       mmReg.counter("statements_total", "tenant", "acme", "pool", "sales", "status", "ok").count()
@@ -1564,8 +1608,36 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync()
     out shouldBe a[Left[?, ?]]
     out.left.get shouldBe a[RouterFailure.AccessDenied]
-    out.left.get.reason should include("memory.main.secret")
+    // A policy holder is told the rewrite reached more, not what: the list is read from the
+    // rewritten statement, which holds the policies' expressions.
+    out.left.get.reason should include(ai.starlake.quack.edge.policy.RewriteScope.ReachesBeyond)
+    out.left.get.reason should not include "memory.main.secret"
+    router.history.snapshot(1).head.error.getOrElse("") should not include "memory.main.secret"
     capturedSql() shouldBe ""
+
+  it should "log its refusal for a policy holder as one line, whatever the reason quotes" in:
+    // The reason quotes the parser's message about the rewrite, which can hold the caller's text.
+    val (router, _, _) = setupWithRewriter(
+      qualifyingRewriter("SELECT c_id FROM customer WHERE c_email = 'x\nFORGED: line' AND (((")
+    )
+    val (out, events) =
+      ai.starlake.quack.ondemand.runtime.testkit.LogCapture
+        .logged("ai.starlake.quack.edge.FlightSqlRouter") {
+          router
+            .execute(
+              "cls-log-1",
+              "alice",
+              poolKey,
+              "SELECT c_id FROM customer WHERE c_email = 'x'",
+              Some(effWithPolicies(List(maskCustomerEmailCls)))
+            )
+            .unsafeRunSync()
+        }
+    out.left.get.reason should include(ai.starlake.quack.edge.policy.RewriteScope.CannotAuthorize)
+    val lines = events.map(_.getFormattedMessage).filter(_.startsWith("policy rewrite refused"))
+    lines should have size 1
+    lines.head should include(ai.starlake.quack.edge.policy.RewriteScope.CannotAuthorize)
+    lines.head.exists(_.isControl) shouldBe false
 
   it should "run an ordinary CTE query of a policy holder, the CTE reference left unqualified" in:
     val (router, capturedSql, _) = setupWithRewriter(
@@ -1786,6 +1858,147 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     out shouldBe a[Left[?, ?]]
     out.left.get shouldBe a[RouterFailure.AccessDenied]
     capturedSql() shouldBe ""
+
+  it should "refuse a row-policy holder's UPDATE, DELETE and MERGE on its policy table" in:
+    // Owner ruling D27: neither rewriter reads a write, so these reached every row of customer.
+    List(
+      "UPDATE main.customer SET c_id = 0 WHERE c_region = 'Y'",
+      "UPDATE main.customer SET c_id = 0 RETURNING c_email",
+      "DELETE FROM main.customer WHERE c_region = 'Y'",
+      "MERGE INTO main.customer t USING main.scratch s ON t.c_id = s.id WHEN MATCHED THEN DELETE",
+      "INSERT INTO main.customer VALUES (1, 'e', 'X') ON CONFLICT (c_id) DO UPDATE SET c_id = 2",
+      "TRUNCATE main.customer"
+    ).foreach { sql =>
+      val (router, capturedSql, _) =
+        setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)
+      val out = router
+        .execute("pw-d27", "alice", poolKey, sql, Some(effWithRowPolicies(List(rowPolicyCustomer))))
+        .unsafeRunSync()
+      withClue(sql) {
+        out.left.toOption.get.reason should include(
+          "customer is protected by a row policy, and writes to a row-policy table are refused"
+        )
+        capturedSql() shouldBe ""
+      }
+    }
+
+  it should "still route a row-policy holder's plain INSERT into the policy table" in:
+    val (router, capturedSql, _) =
+      setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)
+    val sql = "INSERT INTO main.customer VALUES (1, 'e', 'X')"
+    router
+      .execute(
+        "pw-d27-ok",
+        "alice",
+        poolKey,
+        sql,
+        Some(effWithRowPolicies(List(rowPolicyCustomer)))
+      )
+      .unsafeRunSync() shouldBe a[Right[?, ?]]
+    capturedSql() should include(sql)
+
+  it should "refuse a column-policy holder's write reading the masked column of its target" in:
+    List(
+      "UPDATE main.customer SET c_id = 0 WHERE c_email = 'x'",
+      "DELETE FROM main.customer WHERE c_email LIKE 'a%'",
+      "UPDATE main.customer SET c_id = 0 RETURNING c_email"
+    ).foreach { sql =>
+      val (router, capturedSql, _) =
+        setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)
+      val out = router
+        .execute("pw-d27-c", "alice", poolKey, sql, Some(effWithPolicies(List(maskCustomerEmail))))
+        .unsafeRunSync()
+      withClue(sql) {
+        out.left.toOption.get.reason should include("cannot read a masked or denied column")
+        capturedSql() shouldBe ""
+      }
+    }
+
+  it should "refuse a column-policy holder's qualified or method-call read of the masked column" in:
+    List(
+      "UPDATE main.customer SET c_id = 0 FROM main.scratch AS main " +
+        "WHERE main.customer.c_email = 'x'",
+      "UPDATE main.customer SET c_id = c_id RETURNING c_email.upper()",
+      "DELETE FROM main.customer WHERE c_email.starts_with('a')"
+    ).foreach { sql =>
+      val (router, capturedSql, _) =
+        setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)
+      val out = router
+        .execute("pw-r2-c", "alice", poolKey, sql, Some(effWithPolicies(List(maskCustomerEmail))))
+        .unsafeRunSync()
+      withClue(sql) {
+        out.left.toOption.get.reason should include("cannot read a masked or denied column")
+        capturedSql() shouldBe ""
+      }
+    }
+
+  it should "refuse every positional reference in a policy holder's write on its policy table" in:
+    for
+      eff <- List(
+        effWithPolicies(List(maskCustomerEmail)),
+        effWithRowPolicies(List(rowPolicyCustomer))
+      )
+      sql <- List(
+        "UPDATE main.customer SET c_id = c_id RETURNING #2",
+        "DELETE FROM main.customer WHERE #1 = 2",
+        "INSERT INTO main.customer SELECT #1, 'e', 'X' FROM main.scratch"
+      )
+    do
+      val (router, capturedSql, _) =
+        setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)
+      val out = router.execute("pw-r3-p", "alice", poolKey, sql, Some(eff)).unsafeRunSync()
+      withClue(sql) {
+        out shouldBe a[Left[?, ?]]
+        capturedSql() shouldBe ""
+      }
+
+  it should "refuse a policy holder's DROP SCHEMA of the schema of its policy table" in:
+    for
+      eff <- List(
+        effWithPolicies(List(maskCustomerEmail)),
+        effWithRowPolicies(List(rowPolicyCustomer))
+      )
+      sql <- List("DROP SCHEMA main CASCADE", "DROP SCHEMA IF EXISTS main CASCADE")
+    do
+      val (router, capturedSql, _) =
+        setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)
+      val out = router.execute("pw-r3-s", "alice", poolKey, sql, Some(eff)).unsafeRunSync()
+      withClue(sql) {
+        out.left.toOption.get.reason should include("schema main holds a table protected")
+        capturedSql() shouldBe ""
+      }
+
+  it should "refuse a policy holder's ALTER, DROP and CREATE OR REPLACE of its table (D29)" in:
+    for
+      eff <- List(
+        effWithPolicies(List(maskCustomerEmail)),
+        effWithRowPolicies(List(rowPolicyCustomer))
+      )
+      sql <- List(
+        "ALTER TABLE main.customer RENAME TO c2",
+        "ALTER TABLE main.customer RENAME COLUMN c_email TO e2",
+        "DROP TABLE main.customer",
+        "CREATE OR REPLACE TABLE main.customer AS SELECT 1 AS c_id"
+      )
+    do
+      val (router, capturedSql, _) =
+        setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)
+      val out = router.execute("pw-d29", "alice", poolKey, sql, Some(eff)).unsafeRunSync()
+      withClue(sql) {
+        out.left.toOption.get.reason should include(
+          "customer is protected by a column/row policy, and altering, dropping or replacing it"
+        )
+        capturedSql() shouldBe ""
+      }
+
+  it should "still route a column-policy holder's write that only assigns the masked column" in:
+    val (router, capturedSql, _) =
+      setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)
+    val sql = "UPDATE main.customer SET c_email = 'x' WHERE c_id = 1"
+    router
+      .execute("pw-d27-c-ok", "alice", poolKey, sql, Some(effWithPolicies(List(maskCustomerEmail))))
+      .unsafeRunSync() shouldBe a[Right[?, ?]]
+    capturedSql() should include(sql)
 
   it should "deny a batch led by a read whose later write reads a protected table (audit F18)" in:
     // The classifier reads the first statement only (Select), the rewriters' parse keeps only

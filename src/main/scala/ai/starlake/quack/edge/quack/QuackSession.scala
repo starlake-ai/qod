@@ -16,14 +16,18 @@ import scala.collection.concurrent.TrieMap
   * result; `drainedAt` is stamped by the terminal FETCH, after which the link stays open for a
   * grace period (the client fetches ahead from several threads and late fetches must still reach
   * the node) until the sweeper, the next statement or the disconnect finishes it. `close` is the
-  * router's close-and-deregister handle.
+  * router's close-and-deregister handle. `excerptWithheld`: the statement runs for a principal with
+  * column or row policies, so an ERROR_RESPONSE the node answers a later FETCH or SEND_DATA with
+  * reaches the client without DuckDB's excerpt of the statement
+  * ([[ai.starlake.quack.edge.policy.StatementExcerpt]]).
   */
 final case class QuackStatement(
     link: QuackNodeLink,
     nodeId: String,
     kind: StatementKind,
     clientQueryId: Long,
-    close: () => Unit
+    close: () => Unit,
+    excerptWithheld: Boolean
 ):
   val finished: AtomicBoolean                     = new AtomicBoolean(false)
   val pendingCommit: AtomicBoolean                = new AtomicBoolean(false)

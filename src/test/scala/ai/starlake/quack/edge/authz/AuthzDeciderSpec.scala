@@ -71,7 +71,10 @@ class AuthzDeciderSpec extends AnyFlatSpec with Matchers:
     "duckdb_tables"   -> FunctionClass.Listing,
     "read_parquet"    -> FunctionClass.File,
     "read_csv"        -> FunctionClass.File,
-    "duckdb_settings" -> FunctionClass.Superuser
+    "duckdb_settings" -> FunctionClass.Superuser,
+    // As function-classes.tsv classes them.
+    "current_query"              -> FunctionClass.Allowed,
+    "duckdb_prepared_statements" -> FunctionClass.Allowed
   )
 
   private val Settings: Map[String, SettingClass] =
@@ -1076,4 +1079,100 @@ class AuthzDeciderSpec extends AnyFlatSpec with Matchers:
     new Fixture(opaTtlSec = 30).decider.lifetimeMs(OpaAlice) shouldBe 30_000L
     new Fixture(opaTtlSec = 0).decider.lifetimeMs(OpaAlice) shouldBe 5_000L
     new Fixture().decider.lifetimeMs(DecidePrincipal(NodePrincipal.System, None)) shouldBe 60_000L
+  }
+
+  // ---- the statement-text functions (owner ruling D30) ----
+
+  // The gateway rewrites a policy holder's statement with the policies' expressions, and these show
+  // the statement text the node runs. Policies on a table no plan here reads: every policy counts.
+  private val TextMask =
+    RoleColumnPolicy("cp-9", "r-1", "*", "*", "customers", "email", "mask", Some("'***'"))
+  private val TextRow = RoleRowPolicy("rp-9", "r-1", "*", "*", "customers", "region = 'X'")
+
+  private def textRefusal(name: String) =
+    val what = if name == "pg_prepared_statements" then "view" else "function"
+    s"$what $name is not available to principals with column or row policies"
+
+  /** Each of the four as qod-node describes it: `current_query()` (the `pg_catalog` macro binds to
+    * the same call), `duckdb_prepared_statements()` (the `pg_catalog.pg_prepared_statements` view
+    * inlines to it), and the `pg_catalog` names themselves should a description ever list them.
+    */
+  private val TextPlans = List(
+    "current_query" -> plan(functions = List(fn("current_query", tpe = "scalar"))),
+    "current_query" -> plan(functions =
+      List(DescribedFunction("system", "pg_catalog", "current_query", "scalar", Nil, None))
+    ),
+    "duckdb_prepared_statements" -> plan(functions = List(fn("duckdb_prepared_statements"))),
+    "pg_prepared_statements"     -> plan(objects =
+      List(obj("pg_prepared_statements", kind = "view", catalog = "system", schema = "pg_catalog"))
+    )
+  )
+
+  "a statement-text function" should "be refused to a column policy holder" in
+    TextPlans.foreach { (name, d) =>
+      withClue(d)(
+        refused(d, textRefusal(name), principal(eff().copy(columnPolicies = List(TextMask))))
+      )
+    }
+
+  it should "be refused to a row policy holder" in
+    TextPlans.foreach { (name, d) =>
+      withClue(d)(refused(d, textRefusal(name), principal(eff().copy(rowPolicies = List(TextRow)))))
+    }
+
+  it should "be allowed to a principal without policies" in
+    TextPlans.foreach((_, d) => allow(d))
+
+  it should "be refused wherever the plan reaches it: through a secure view, beside other calls" in {
+    val p      = principal(eff().copy(columnPolicies = List(TextMask)))
+    val viaSv  = Some("acme_lake.main.v_secure")
+    val secure = plan(
+      objects = List(obj("v_secure", kind = "secure_view")),
+      functions = List(fn("current_query", tpe = "scalar", via = viaSv))
+    )
+    refused(secure, textRefusal("current_query"), p)
+    allow(secure)
+    val mixed = plan(
+      objects = List(obj("orders", columns = List("id"))),
+      functions = List(fn("lower", tpe = "scalar"), fn("current_query", tpe = "scalar"))
+    )
+    refused(mixed, textRefusal("current_query"), p)
+  }
+
+  it should "be refused to a principal whose token narrows its grants, policies kept" in {
+    val p = principal(
+      eff().copy(rowPolicies = List(TextRow)),
+      restriction = Some(TokenRestriction.Unrestricted.copy(verbCeiling = Some("RO")))
+    )
+    refused(TextPlans.head._2, textRefusal("current_query"), p)
+  }
+
+  it should "not match a function of that name outside the system catalog" in {
+    val p = principal(eff().copy(columnPolicies = List(TextMask)))
+    allow(
+      plan(functions =
+        List(DescribedFunction("acme_lake", "main", "current_query", "scalar", Nil, None))
+      ),
+      p
+    )
+  }
+
+  it should "be refused to an OPA tenant's policy holder before OPA is asked" in {
+    val f = new Fixture()
+    val p = principal(
+      OpaAlice.context.get.effective.copy(columnPolicies = List(TextMask)),
+      OpaPool
+    )
+    val d = plan(
+      objects = List(obj("orders", catalog = "opaco_lake")),
+      functions = List(fn("current_query", tpe = "scalar"))
+    )
+    f.decider.decidePlan(p, d) shouldBe Decision.Refuse(textRefusal("current_query"))
+    f.opaBodies shouldBe empty
+    // Without policies the plan goes to OPA, which allows it.
+    f.decider.decidePlan(OpaAlice, d) shouldBe Decision.Allow
+    f.opaBodies should have size 1
+    // A dry run gives the same refusal, OPA unasked.
+    val dry = p.copy(context = p.context.map(_.copy(purpose = DecidePurpose.DryRun)))
+    f.decider.dryRunPlan(dry, d) shouldBe (Decision.Refuse(textRefusal("current_query")), None)
   }

@@ -205,3 +205,13 @@ class RewriteScopeSpec extends AnyFlatSpec with Matchers:
       frontDoor = true
     ) shouldBe a[RewriteScope.Scope.Refused]
   }
+
+  "withoutDetail" should "drop what a refusal quotes of the rewritten statement" in {
+    val reaches = beyond("SELECT a FROM t", "SELECT a FROM t WHERE a IN (SELECT b FROM u)").get
+    reaches should include("lake.tpch1.u")
+    RewriteScope.withoutDetail(reaches) shouldBe RewriteScope.ReachesBeyond
+    val unread = beyond("SELECT a FROM t", "SELECT a FROM t WHERE a = 'SALT' AND (").get
+    unread should startWith(RewriteScope.CannotAuthorize)
+    RewriteScope.withoutDetail(unread) shouldBe RewriteScope.CannotAuthorize
+    RewriteScope.withoutDetail("another reason") shouldBe "another reason"
+  }
