@@ -30,9 +30,9 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
   ): EffectiveSet =
     EffectiveSet(user, roles, groups, Nil, Nil, Nil, rowPolicies)
 
-  private val rw  = new RowPolicyRewriter(enabled = true)
+  private val rw  = RowPolicyRewriterSpec.withNoCatalog(enabled = true)
   private val ctx =
-    SchemaContext(defaultDatabase = Some("acme_tpch"), defaultSchema = Some("tpch1"))
+    SchemaContext(defaultDatabase = Some("acme_tpch"), defaultSchema = Some("tpch1"), pool = None)
 
   /** Run the rewrite and echo, at info level, the original SQL, the policy predicate(s) in scope,
     * and the resulting SQL (or the passthrough outcome). Every test routes through this so the test
@@ -44,9 +44,11 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
       kind: StatementKind = StatementKind.Select,
       rewriter: RowPolicyRewriter = rw
   ): Outcome =
-    val outcome = rewriter.rewrite(sql, kind, effSet, ctx)
-    val preds   = effSet.rowPolicies.map(_.predicateSql)
-    val result  = outcome match
+    val outcome = rewriter.rewrite(sql, kind, effSet, ctx) match
+      case Rewritten(s) => Rewritten(normalizedAlias(s))
+      case other        => other
+    val preds  = effSet.rowPolicies.map(_.predicateSql)
+    val result = outcome match
       case Rewritten(s)           => s
       case Passthrough            => s"$sql  [passthrough]"
       case PassthroughParseFailed => s"$sql  [parse-failed]"
@@ -56,6 +58,10 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
     info(s"predicate: ${if preds.isEmpty then "(none)" else preds.mkString("  ;  ")}")
     info(s"result:    $result")
     outcome
+
+  /** Each fresh row-policy alias (`__qod_rls_` and 32 hex digits) read as `__qod_rls`. */
+  private def normalizedAlias(sql: String): String =
+    sql.replaceAll("__qod_rls_[0-9a-f]{32}", "__qod_rls")
 
   private def rewritten(o: Outcome): String = o match
     case Rewritten(sql) => sql.toLowerCase
@@ -67,7 +73,7 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
     go(
       "SELECT * FROM customer",
       eff(tenantUser, List(policy("c_region = 'eu'"))),
-      rewriter = new RowPolicyRewriter(enabled = false)
+      rewriter = RowPolicyRewriterSpec.withNoCatalog(enabled = false)
     ) shouldBe Passthrough
   }
 
@@ -117,7 +123,7 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
   it should "wrap a matched base table in a filtered subselect" in {
     val sql =
       rewritten(go("SELECT c_id FROM customer", eff(tenantUser, List(policy("c_region = 'eu'")))))
-    sql should include("select * from customer where")
+    sql should include("select * from customer as __qod_rls where")
     sql should include("c_region = 'eu'")
   }
 
@@ -223,7 +229,7 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
         eff(tenantUser, List(policy("tenant_id = ${tenantId}", table = "*")))
       )
     )
-    sql should include("select * from orders where")
+    sql should include("select * from orders as __qod_rls where")
     sql should include("tenant_id = 'acme'")
   }
 
@@ -503,7 +509,8 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
     raw(
       go("SELECT * FROM tpch1.customer AT (VERSION => 7)", eff(tenantUser, List(regionEu)))
     ) shouldBe
-      "SELECT * FROM (SELECT * FROM tpch1.customer AT (VERSION => 7) WHERE (c_region = 'eu')) " +
+      "SELECT * FROM (SELECT * FROM tpch1.customer AS __qod_rls AT (VERSION => 7) WHERE " +
+      "(__qod_rls.c_region = 'eu')) " +
       "AS customer"
   }
 
@@ -511,8 +518,8 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
     raw(
       go("SELECT c.c_id FROM tpch1.customer c AT (VERSION => 7)", eff(tenantUser, List(regionEu)))
     ) shouldBe
-      "SELECT c.c_id FROM (SELECT * FROM tpch1.customer AT (VERSION => 7) WHERE " +
-      "(c_region = 'eu')) c"
+      "SELECT c.c_id FROM (SELECT * FROM tpch1.customer AS __qod_rls AT (VERSION => 7) WHERE " +
+      "(__qod_rls.c_region = 'eu')) c"
   }
 
   it should "keep each table's own clause when several tables carry one" in {
@@ -524,8 +531,12 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
         eff(tenantUser, policies)
       )
     )
-    sql should include("FROM customer AT (VERSION => 7) WHERE (c_region = 'eu')) AS c")
-    sql should include("FROM orders AT (VERSION => 9) WHERE (o_year = 2024)) o")
+    sql should include(
+      s"FROM customer AS __qod_rls AT (VERSION => 7) WHERE (__qod_rls.c_region = 'eu')) AS c"
+    )
+    sql should include(
+      s"FROM orders AS __qod_rls AT (VERSION => 9) WHERE (__qod_rls.o_year = 2024)) o"
+    )
   }
 
   it should "leave the clause after the alias on a table no policy covers" in {
@@ -535,19 +546,21 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
         eff(tenantUser, List(regionEu))
       )
     )
-    sql should include("FROM customer AT (VERSION => 7) WHERE (c_region = 'eu')) c")
+    sql should include(
+      s"FROM customer AS __qod_rls AT (VERSION => 7) WHERE (__qod_rls.c_region = 'eu')) c"
+    )
     sql should include("orders o AT (VERSION => 9)")
   }
 
   it should "keep the caller's spelling of the clause, case and spacing included" in {
     raw(go("SELECT * FROM customer x at(version=>7)", eff(tenantUser, List(regionEu)))) should
-      include("FROM customer at(version=>7) WHERE (c_region = 'eu')) x")
+      include(s"FROM customer AS __qod_rls at(version=>7) WHERE (__qod_rls.c_region = 'eu')) x")
   }
 
   it should "keep an AT (TIMESTAMP => expr) clause the same way" in {
     val clause = "AT (TIMESTAMP => TIMESTAMP '2026-01-01 10:00:00')"
     raw(go(s"SELECT * FROM customer c $clause", eff(tenantUser, List(regionEu)))) should
-      include(s"FROM customer $clause WHERE (c_region = 'eu')) c")
+      include(s"FROM customer AS __qod_rls $clause WHERE (__qod_rls.c_region = 'eu')) c")
   }
 
   it should "keep the clause on a table inside a subquery and a CTE" in {
@@ -558,8 +571,12 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
         eff(tenantUser, List(regionEu))
       )
     )
-    sql should include("FROM customer AT (VERSION => 3) WHERE (c_region = 'eu')) AS customer")
-    sql should include("FROM customer AT (VERSION => 4) WHERE (c_region = 'eu')) z")
+    sql should include(
+      s"FROM customer AS __qod_rls AT (VERSION => 3) WHERE (__qod_rls.c_region = 'eu')) AS customer"
+    )
+    sql should include(
+      s"FROM customer AS __qod_rls AT (VERSION => 4) WHERE (__qod_rls.c_region = 'eu')) z"
+    )
   }
 
   it should "pass through, clause intact in the caller's text, when no policy covers the table" in {
@@ -665,7 +682,9 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
         "SELECT * FROM customer c JOIN orders o AT (TIMESTAMP => '2026-01-01') ON true",
         frOnly
       )
-    ) should (include("FROM (SELECT * FROM customer WHERE (c_nation = 'FR')) c") and
+    ) should (include(
+      s"FROM (SELECT * FROM customer AS __qod_rls WHERE (__qod_rls.c_nation = 'FR')) c"
+    ) and
       include("orders o AT (TIMESTAMP => '2026-01-01')"))
   }
 
@@ -682,7 +701,7 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
       withClue(sql) {
         val out = raw(go(sql, frOnly))
         out should include("TIMESTAMP => '2026-01-01")
-        out should include("WHERE (c_nation = 'FR')")
+        out should include(s"WHERE (__qod_rls.c_nation = 'FR')")
         out should not include "__qod_time_travel_"
       }
     }
@@ -703,23 +722,42 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
 
   "a sample of a filtered subquery" should "be rewritten (the way out for a sample or a pivot)" in {
     go("SELECT * FROM (SELECT * FROM customer) USING SAMPLE 10%", frOnly) shouldBe Rewritten(
-      "SELECT * FROM (SELECT * FROM (SELECT * FROM customer WHERE (c_nation = 'FR')) AS customer) " +
+      "SELECT * FROM (SELECT * FROM (SELECT * FROM customer AS __qod_rls WHERE (__qod_rls.c_nation = 'FR')) " +
+        "AS customer) " +
         "USING SAMPLE 10%"
     )
   }
 
   "a row-policy table read with no clause" should "be wrapped exactly as before" in {
     go("SELECT * FROM customer", frOnly) shouldBe
-      Rewritten("SELECT * FROM (SELECT * FROM customer WHERE (c_nation = 'FR')) AS customer")
+      Rewritten(
+        s"SELECT * FROM (SELECT * FROM customer AS __qod_rls WHERE (__qod_rls.c_nation = 'FR')) AS customer"
+      )
     go("SELECT c.c_id FROM customer c", frOnly) shouldBe
-      Rewritten("SELECT c.c_id FROM (SELECT * FROM customer WHERE (c_nation = 'FR')) c")
+      Rewritten(
+        s"SELECT c.c_id FROM (SELECT * FROM customer AS __qod_rls WHERE (__qod_rls.c_nation = 'FR')) c"
+      )
     go("SELECT * FROM acme_tpch.tpch1.customer AS c", frOnly) shouldBe
       Rewritten(
-        "SELECT * FROM (SELECT * FROM acme_tpch.tpch1.customer WHERE (c_nation = 'FR')) AS c"
+        "SELECT * FROM (SELECT * FROM acme_tpch.tpch1.customer AS __qod_rls WHERE " +
+          "(__qod_rls.c_nation = 'FR')) AS c"
       )
     go("SELECT * FROM \"tpch1\".\"customer\"", frOnly) shouldBe
       Rewritten(
-        "SELECT * FROM (SELECT * FROM \"tpch1\".\"customer\" WHERE (c_nation = 'FR')) " +
+        "SELECT * FROM (SELECT * FROM \"tpch1\".\"customer\" AS __qod_rls WHERE " +
+          "(__qod_rls.c_nation = 'FR')) " +
           "AS \"customer\""
       )
   }
+
+object RowPolicyRewriterSpec:
+
+  /** A rewriter whose catalog lists no table: every table is unresolved, and under `Pass` its
+    * predicate ships qualified, unchecked, as before the column check.
+    */
+  def withNoCatalog(enabled: Boolean = true): RowPolicyRewriter =
+    new RowPolicyRewriter(
+      new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(Map.empty),
+      ai.starlake.quack.edge.cls.UnresolvedMode.Pass,
+      enabled
+    )

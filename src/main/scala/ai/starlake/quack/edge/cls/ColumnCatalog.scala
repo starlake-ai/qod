@@ -36,6 +36,20 @@ trait ColumnCatalog:
   ): IO[Boolean] =
     IO.pure(false)
 
+  /** The column names `tableName` had at DuckLake snapshot `snapshot`, when the catalog can read
+    * them (`DuckLakeCatalogReader.columnsAt`), else None: the caller then judges the current
+    * columns. `Some(Nil)` when the table had no columns there (it did not exist).
+    */
+  def columnsAt(
+      tenant: String,
+      pool: Option[PoolKey],
+      catalog: String,
+      schemaName: String,
+      tableName: String,
+      snapshot: Long
+  ): IO[Option[List[String]]] =
+    IO.pure(None)
+
 object ColumnCatalog:
 
   /** Test-only static catalog. Construct with the (catalog, schema, table) -> column-list map you
@@ -43,7 +57,8 @@ object ColumnCatalog:
     */
   final class MapCatalog(
       rows: Map[(String, String, String), List[String]],
-      stable: Set[(String, String, String)] = Set.empty
+      stable: Set[(String, String, String)] = Set.empty,
+      atSnapshot: Map[(String, String, String, Long), List[String]] = Map.empty
   ) extends ColumnCatalog:
     def columnsOf(
         tenant: String,
@@ -61,3 +76,12 @@ object ColumnCatalog:
         t: String
     ): IO[Boolean] =
       IO.pure(stable.contains((c, s, t)))
+    override def columnsAt(
+        tenant: String,
+        pool: Option[PoolKey],
+        c: String,
+        s: String,
+        t: String,
+        snapshot: Long
+    ): IO[Option[List[String]]] =
+      IO.pure(atSnapshot.get((c, s, t, snapshot)))

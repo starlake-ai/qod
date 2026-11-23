@@ -59,8 +59,10 @@ class RestTimeTravelPolicySpec extends AnyFlatSpec with Matchers:
       val masked = pipeline.run(st(""), effWith(columnPolicies = List(maskEmail)))
       masked.fold(f => fail(f.toString), identity) should include("'***'")
       val filtered = pipeline.run(st(""), effWith(rowPolicies = List(regionX)))
-      filtered.fold(f => fail(f.toString), identity) should include(
-        s"FROM $Ref WHERE (c_region = 'X')"
+      filtered
+        .fold(f => fail(f.toString), identity)
+        .replaceAll("__qod_rls_[0-9a-f]{32}", "__qod_rls") should include(
+        s"FROM $Ref AS __qod_rls WHERE (__qod_rls.c_region = 'X')"
       )
     }
 
@@ -94,8 +96,11 @@ class RestTimeTravelPolicySpec extends AnyFlatSpec with Matchers:
   it should "keep AT (VERSION => n) on the base table inside the row-policy wrapper" in
     statements.foreach { st =>
       pipeline.run(st(WithAt), effWith(rowPolicies = List(regionX))) match
-        case Right(sent) => sent should include(s"FROM $Ref $At WHERE (c_region = 'X')")
-        case Left(f)     => fail(s"expected the row filter applied at the snapshot, got $f")
+        case Right(sent) =>
+          sent.replaceAll("__qod_rls_[0-9a-f]{32}", "__qod_rls") should include(
+            s"FROM $Ref AS __qod_rls $At WHERE (__qod_rls.c_region = 'X')"
+          )
+        case Left(f) => fail(s"expected the row filter applied at the snapshot, got $f")
     }
 
   it should "keep the clause once through both rewriters stacked, the filter on the base table" in
@@ -104,7 +109,9 @@ class RestTimeTravelPolicySpec extends AnyFlatSpec with Matchers:
       pipeline.run(st(WithAt), both) match
         case Right(sent) =>
           sent should include("'***'")
-          sent should include(s"FROM $Ref $At WHERE (c_region = 'X')")
+          sent.replaceAll("__qod_rls_[0-9a-f]{32}", "__qod_rls") should include(
+            s"FROM $Ref AS __qod_rls $At WHERE (__qod_rls.c_region = 'X')"
+          )
           sent.split(java.util.regex.Pattern.quote(At), -1).length - 1 shouldBe 1
         case Left(f) => fail(s"expected both policies applied at the snapshot, got $f")
     }

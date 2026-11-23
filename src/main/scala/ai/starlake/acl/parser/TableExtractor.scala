@@ -275,24 +275,66 @@ object TableExtractor:
     * left-associatively with INTERSECT binding tighter, so the top level is the LAST union or
     * except of the list: the arms after it are the recursive term (an INTERSECT chain included),
     * the arms up to it the anchor. An EXCEPT, BY NAME or INTERSECT-only top level is not recursive
-    * on the 2.0 CLI (the body reads the real table), and neither is a body with a WITH clause of
-    * its own here (walked without the name, so a self reference is gated: fail-closed).
+    * on the 2.0 CLI (the body reads the real table). A body opening with a WITH clause of its own
+    * is None here; [[recursiveBody]] reads that shape too. The column policy backstop uses this
+    * form, where a self reference left out of the term reads as a policy table (over-protecting).
     */
   def recursiveSplit(body: Select): Option[(List[Select], List[Select])] =
     body match
       case ps: ParenthesedSelect if Option(ps.getWithItemsList).forall(_.isEmpty) =>
         Option(ps.getSelect).flatMap(recursiveSplit)
       case sol: SetOperationList if Option(sol.getWithItemsList).forall(_.isEmpty) =>
-        val ops  = Option(sol.getOperations).map(_.asScala.toList).getOrElse(Nil)
-        val arms = Option(sol.getSelects).map(_.asScala.toList).getOrElse(Nil)
-        val top  = ops.lastIndexWhere(!_.isInstanceOf[IntersectOp])
-        Option
-          .when(top >= 0 && arms.size == ops.size + 1)(ops(top))
-          .collect {
-            case u: UnionOp if !u.toString.toUpperCase(Locale.ROOT).contains("BY NAME") =>
-              (arms.take(top + 1), arms.drop(top + 1))
-          }
+        topLevelSplit(sol)
       case _ => None
+
+  /** The anchor and term arms of `sol` when its top level is a UNION or UNION ALL, not BY NAME. */
+  private def topLevelSplit(sol: SetOperationList): Option[(List[Select], List[Select])] =
+    val ops  = Option(sol.getOperations).map(_.asScala.toList).getOrElse(Nil)
+    val arms = Option(sol.getSelects).map(_.asScala.toList).getOrElse(Nil)
+    val top  = ops.lastIndexWhere(!_.isInstanceOf[IntersectOp])
+    Option
+      .when(top >= 0 && arms.size == ops.size + 1)(ops(top))
+      .collect {
+        case u: UnionOp if !u.toString.toUpperCase(Locale.ROOT).contains("BY NAME") =>
+          (arms.take(top + 1), arms.drop(top + 1))
+      }
+
+  /** [[recursiveSplit]] of `body` looking through the WITH clauses it opens with, also inside
+    * parentheses: Some((those clauses, outermost first; anchor arms; recursive-term arms)). DuckDB
+    * 2.0 runs such a body as recursive (checked on the CLI): the clauses' names are visible in the
+    * anchor and the term, their own bodies do not see the recursive CTE's name (they read the
+    * table), and in the term the CTE's name binds to a CTE, the recursive one even when a clause
+    * declares that name too, which the anchor then reads.
+    */
+  def recursiveBody(body: Select): Option[(List[List[WithItem[?]]], List[Select], List[Select])] =
+    def go(
+        s: Select,
+        layers: List[List[WithItem[?]]]
+    ): Option[(List[List[WithItem[?]]], List[Select], List[Select])] =
+      val own   = Option(s.getWithItemsList).map(_.asScala.toList).getOrElse(Nil)
+      val inner = if own.isEmpty then layers else layers :+ own
+      s match
+        case ps: ParenthesedSelect => Option(ps.getSelect).flatMap(go(_, inner))
+        case sol: SetOperationList =>
+          topLevelSplit(sol).map((anchor, term) => (inner, anchor, term))
+        case _ => None
+    go(body, Nil)
+
+  private val IdentifierQuotes: Set[Char] = Set('"', '`', '[', ']')
+
+  /** The identifier DuckDB 2.0 reads from `raw`, a name as JSqlParser keeps it (quotes included),
+    * when the spelling is one read here exactly as DuckDB reads it, else None: an unquoted name
+    * with no quote or bracket character, or a name between double quotes or backticks holding none
+    * (DuckDB reads `"x"` and `` `x` `` as `x`; checked on the 2.0 CLI). JSqlParser's own unquoting
+    * also strips brackets, a quote of the other style and doubled quotes at the edges, so a CTE it
+    * reads as `x` can be another name to DuckDB (`"[x"`, `"x"""`, `` `x]` ``).
+    */
+  private[parser] def exactName(raw: String): Option[String] =
+    Option(raw).filter(_.nonEmpty).flatMap { r =>
+      val quoted = r.length >= 2 && (r.head == '"' || r.head == '`') && r.last == r.head
+      val name   = if quoted then r.substring(1, r.length - 1) else r
+      Option.when(name.nonEmpty && !name.exists(IdentifierQuotes.contains))(name)
+    }
 
   /** `raw` (a single name as JSqlParser printed it) read back exactly as `FROM <raw>` parses it, or
     * None when that is not one bare table. The Table constructor is no substitute: it splits a
@@ -323,10 +365,55 @@ object TableExtractor:
     visitor.process(select)
     visitor.result
 
+  /** [[extract]] plus `cteReferences`: the table references of `select` that bind to a CTE in scope
+    * where they stand, as the very AST nodes (identity, not name), by DuckDB's scoping and fold,
+    * each spelled ([[exactName]]) as DuckDB reads it on both sides. A reference the walk did not
+    * reach, or whose spelling or CTE's spelling is not read exactly, is not in it.
+    * `scopedEverywhere` is false when the walk met a WITH item it could not place in its scope
+    * (walked with no CTE in scope), where a CTE reference may be missing from `cteReferences`.
+    */
+  final case class CteScoping(
+      extraction: TableExtraction,
+      cteReferences: java.util.Set[Table],
+      scopedEverywhere: Boolean,
+      placed: java.util.Set[Table]
+  )
+
+  /** `placed`: by identity, every FROM-slot reference the walk reached, whatever it read it as (a
+    * table, a CTE, a file, a system view); one it never reached is not in it.
+    */
+  def extractWithCteReferences(select: Select): CteScoping =
+    val visitor = new TableExtractorVisitor()
+    visitor.process(select)
+    CteScoping(
+      visitor.result,
+      java.util.Collections.unmodifiableSet(visitor.cteReferences),
+      !visitor.unscopedWithItem,
+      java.util.Collections.unmodifiableSet(visitor.reached)
+    )
+
 private[parser] class TableExtractorVisitor:
   val tables: mutable.ListBuffer[Table]       = mutable.ListBuffer.empty
   val unsupported: mutable.ListBuffer[String] = mutable.ListBuffer.empty
-  private val cteNames: mutable.Set[String]   = mutable.Set.empty
+  private val cteNames: mutable.Set[CteName]  = mutable.Set.empty
+
+  /** Every FROM-slot table the walk reached, by identity. */
+  val reached: java.util.Set[Table] =
+    java.util.Collections.newSetFromMap(new java.util.IdentityHashMap[Table, java.lang.Boolean]())
+
+  /** The recursive CTEs whose recursive term the walk is in: there DuckDB 2.0 binds
+    * `recurring.<name>` (any catalog, any quoting or case of `recurring`) to the CTE, at any depth,
+    * even beside a real table `recurring.<name>` (checked on the CLI, with and without USING KEY).
+    * The anchor, the body's own WITH clauses and everything outside the term read the table.
+    */
+  private val recurringNames: mutable.Set[CteName] = mutable.Set.empty
+
+  /** True once a WITH item was walked with no CTE in scope (the `routeChild` fallback). */
+  var unscopedWithItem: Boolean = false
+
+  /** The FROM-slot tables bound to a CTE in scope, by identity. */
+  val cteReferences: java.util.Set[Table] =
+    java.util.Collections.newSetFromMap(new java.util.IdentityHashMap[Table, java.lang.Boolean]())
 
   // Identity-keyed set of AST nodes already walked, so the explicit arms and the unconditional
   // descendChildren pass cannot re-walk the same subtree: keeps the walk O(n) and cycle-proof even
@@ -354,10 +441,21 @@ private[parser] class TableExtractorVisitor:
       walkCteBodies(items)
       cteNames ++= items.flatMap(cteName)
 
-  private def cteName(wi: net.sf.jsqlparser.statement.select.WithItem[?]): Option[String] =
-    Option(wi.getUnquotedAliasName).map(IdentifierFold.fold)
+  /** A CTE name in scope: `loose`, JSqlParser's unquoted reading folded, decides what is left out
+    * of `tables`; `exact`, DuckDB's reading folded when [[TableExtractor.exactName]] has one,
+    * decides what is a CTE reference.
+    */
+  private final case class CteName(loose: String, exact: Option[String])
 
-  private def setScope(names: Set[String]): Unit =
+  private def cteName(wi: net.sf.jsqlparser.statement.select.WithItem[?]): Option[CteName] =
+    Option(wi.getUnquotedAliasName).map { n =>
+      CteName(
+        IdentifierFold.fold(n),
+        TableExtractor.exactName(wi.getAliasName).map(IdentifierFold.fold)
+      )
+    }
+
+  private def setScope(names: Set[CteName]): Unit =
     cteNames.clear()
     cteNames ++= names
 
@@ -366,7 +464,7 @@ private[parser] class TableExtractorVisitor:
     * i sees the enclosing scopes' CTEs and the ones declared BEFORE it in the clause: never its own
     * name, never a later sibling's, which both bind to the real table (`WITH orders AS (SELECT *
     * FROM orders)` reads the table orders), MATERIALIZED or not. In a WITH RECURSIVE clause the one
-    * exception is the recursive term of a union body (`TableExtractor.recursiveSplit`), where the
+    * exception is the recursive term of a union body (`TableExtractor.recursiveBody`), where the
     * CTE's own name binds to the CTE.
     */
   private def walkCteBodies(items: List[net.sf.jsqlparser.statement.select.WithItem[?]]): Unit =
@@ -386,21 +484,31 @@ private[parser] class TableExtractorVisitor:
     * gate fails closed (a wildcard ALL grant still covers it).
     *
     * `recursiveName` is the CTE's own name when its clause is WITH RECURSIVE: the arms of the
-    * recursive term are walked with it in scope, everything else without it.
+    * recursive term are walked with it in scope, everything else without it. The WITH clauses the
+    * body opens with ([[TableExtractor.recursiveBody]]) have their bodies walked first, without it,
+    * and their names in scope for both the anchor and the term.
     */
   private def visitCteBody(
       wi: net.sf.jsqlparser.statement.select.WithItem[?],
-      recursiveName: Option[String]
+      recursiveName: Option[CteName]
   ): Unit =
     wi.getParenthesedStatement match
       case null      => ()
       case s: Select =>
-        recursiveName.flatMap(n => TableExtractor.recursiveSplit(s).map(n -> _)) match
-          case Some((name, (anchor, term))) =>
-            anchor.foreach(visitSelect)
+        recursiveName.flatMap(n => TableExtractor.recursiveBody(s).map(n -> _)) match
+          case Some((name, (layers, anchor, term))) =>
             val before = cteNames.toSet
+            layers.foreach { items =>
+              walkCteBodies(items)
+              cteNames ++= items.flatMap(cteName)
+            }
+            anchor.foreach(visitSelect)
             cteNames += name
+            val recurringBefore = recurringNames.toSet
+            recurringNames += name
             term.foreach(visitSelect)
+            recurringNames.clear()
+            recurringNames ++= recurringBefore
             setScope(before)
             // What is left (the wrappers, the set operation's own clauses) without the name.
             visitSelect(s)
@@ -542,6 +650,7 @@ private[parser] class TableExtractorVisitor:
   private def matchFromItem(fromItem: FromItem): Unit =
     fromItem match
       case table: Table =>
+        reached.add(table): Unit
         val name = table.getUnquotedName
         if name != null then
           // Skip CTE self-references, but ONLY when the reference is unqualified:
@@ -550,7 +659,26 @@ private[parser] class TableExtractorVisitor:
           // be extracted or the shadowing CTE would launder the access away.
           val isQualified = table.getSchemaName != null ||
             (table.getDatabase != null && table.getDatabase.getDatabaseName != null)
-          val isCteName = !isQualified && cteNames.contains(IdentifierFold.fold(name))
+          val isCteName = !isQualified && cteNames.exists(_.loose == IdentifierFold.fold(name))
+          // A CTE reference only when both spellings read as DuckDB reads them.
+          val isCteReference = isCteName &&
+            TableExtractor
+              .exactName(table.getName)
+              .map(IdentifierFold.fold)
+              .exists(n => cteNames.exists(_.exact.contains(n)))
+          // `recurring.<name>` in the recursive term of <name>: the CTE ([[recurringNames]]). Kept
+          // in `tables` too, so the access checks read it as before, as a table.
+          val isRecurringReference = recurringNames.nonEmpty &&
+            TableExtractor
+              .exactName(table.getSchemaName)
+              .map(IdentifierFold.fold)
+              .contains(
+                "recurring"
+              ) &&
+            TableExtractor
+              .exactName(table.getName)
+              .map(IdentifierFold.fold)
+              .exists(n => recurringNames.exists(_.exact.contains(n)))
           val isFileRef = DuckDBDialectMapper.isFileReference(table)
           // `FROM sqlite_master`, `FROM pg_class`, `FROM duckdb_tables`: DuckDB resolves a bare
           // name to its default view in system.main / system.pg_catalog unless a table shadows
@@ -573,7 +701,11 @@ private[parser] class TableExtractorVisitor:
             unsupported += DuckDBDialectMapper.fileReferenceMarker(table)
           else if isBareCatalogFn then
             unsupported += TableExtractor.bareSystemViewMarker(IdentifierFold.fold(name))
-          else if !isCteName then tables += table
+          else if isCteReference then cteReferences.add(table): Unit
+          else if isCteName then ()
+          else
+            tables += table
+            if isRecurringReference then cteReferences.add(table): Unit
       case ls: LateralSubSelect  => visitParenthesedSelect(ls)
       case ps: ParenthesedSelect => visitParenthesedSelect(ps)
       case tf: TableFunction     =>
@@ -766,6 +898,7 @@ private[parser] class TableExtractorVisitor:
         // A WITH item no scoped walk reached first: which siblings it may see is unknown here, so
         // its body is walked with no CTE in scope (every bare name gated: fail-closed).
         if visited.add(wi) then
+          unscopedWithItem = true
           val before = cteNames.toSet
           setScope(Set.empty)
           visitCteBody(wi, None)
