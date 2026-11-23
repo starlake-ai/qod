@@ -100,17 +100,33 @@
   named its columns bare, and DuckDB binds a name the table does not have to another FROM item
   of the statement. A predicate naming a column the table no longer has (a column dropped or
   renamed after the policy was written) therefore read a column of an item the caller placed
-  beside the table, and could admit every row. The filter now reads its table under an internal
-  alias drawn at random for each statement (`__qod_rls_` and 32 hex digits) and qualifies each
-  column of the predicate with it, so such a predicate is a binder error and the statement fails.
-  The alias is unpredictable because DuckDB also looks an unbound qualified name up as a struct
-  column of the caller's other FROM items, and a caller can bring in a column of any name
-  without writing it (a view, a file's JSON keys, a PIVOT over data values). A column the predicate qualifies by its table's own
-  name keeps working; another qualifier reads as a struct field of the table; lambda parameters
-  and `current_user`, `user`, `current_role`, `session_user`, `current_schema`,
-  `current_catalog`, `localtime` and `localtimestamp` are left as written. A predicate holding a
-  subquery whose columns are not all qualified by the subquery's own FROM items or by the
-  table's name fails to apply (the statement is denied, as for any policy that cannot apply).
+  beside the table, and could admit every row. Two changes close it:
+  - Such a policy now fails to apply, and the statement is denied with `row policy failed to
+    apply - contact an administrator`, which names neither the predicate nor the column. The
+    gateway reads the table's columns from the catalog the column policies use. A time-travel
+    read `AT (VERSION => n)` is judged on the columns of snapshot `n`, any other clause on the
+    current columns. A table whose columns cannot be read is handled as
+    `quack-on-demand.cls.unresolvedTable` (`QOD_CLS_UNRESOLVED_TABLE`) says for column policies:
+    `pass` (the default) applies the predicate unchecked, `deny` refuses the statement.
+  - The filter reads its table under an alias drawn at random for each filtered table
+    (`__qod_rls_` and 32 hex digits), and each column of the predicate is qualified with it, so
+    a column the table lacks is a binder error on the node even where the gateway could not
+    check it. The alias is unpredictable and never shared, because DuckDB also looks an unbound
+    qualified name up as a struct column of the caller's other FROM items, and a caller can bring
+    in a column of any name without writing it (a view, a file's JSON keys, a PIVOT over data
+    values).
+
+  A column the predicate qualifies by its table's own name keeps working; another qualifier reads
+  as a struct field of the table; `rowid`, lambda parameters and `current_user`, `user`,
+  `current_role`, `session_user`, `current_schema`, `current_catalog`, `localtime` and
+  `localtimestamp` are left as written. A predicate holding a subquery whose columns are not all
+  qualified by the subquery's own FROM items or by the table's name fails to apply.
+- **Functions returning the statement's text are refused to principals with column or row
+  policies.** The node runs the statement as the gateway rewrote it, with every row filter and
+  mask in it, so `current_query()` (and `pg_catalog.current_query()`),
+  `duckdb_prepared_statements()` and `pg_catalog.pg_prepared_statements` showed such a principal
+  the administrator's predicates and the filters' aliases. A statement naming one of them is now
+  refused to such a principal, on every statement kind.
 - **Several column policies on one column: a deny wins, a policy naming the table beats a
   wildcard one, and two different masks are refused.** The policy applied used to depend on the
   order of roles and of the tables a statement named, so a weaker policy could apply in place of

@@ -30,9 +30,9 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
   ): EffectiveSet =
     EffectiveSet(user, roles, groups, Nil, Nil, Nil, rowPolicies)
 
-  private val rw  = new RowPolicyRewriter(enabled = true)
+  private val rw  = RowPolicyRewriterSpec.withNoCatalog(enabled = true)
   private val ctx =
-    SchemaContext(defaultDatabase = Some("acme_tpch"), defaultSchema = Some("tpch1"))
+    SchemaContext(defaultDatabase = Some("acme_tpch"), defaultSchema = Some("tpch1"), pool = None)
 
   /** Run the rewrite and echo, at info level, the original SQL, the policy predicate(s) in scope,
     * and the resulting SQL (or the passthrough outcome). Every test routes through this so the test
@@ -73,7 +73,7 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
     go(
       "SELECT * FROM customer",
       eff(tenantUser, List(policy("c_region = 'eu'"))),
-      rewriter = new RowPolicyRewriter(enabled = false)
+      rewriter = RowPolicyRewriterSpec.withNoCatalog(enabled = false)
     ) shouldBe Passthrough
   }
 
@@ -749,3 +749,15 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
           "AS \"customer\""
       )
   }
+
+object RowPolicyRewriterSpec:
+
+  /** A rewriter whose catalog lists no table: every table is unresolved, and under `Pass` its
+    * predicate ships qualified, unchecked, as before the column check.
+    */
+  def withNoCatalog(enabled: Boolean = true): RowPolicyRewriter =
+    new RowPolicyRewriter(
+      new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(Map.empty),
+      ai.starlake.quack.edge.cls.UnresolvedMode.Pass,
+      enabled
+    )

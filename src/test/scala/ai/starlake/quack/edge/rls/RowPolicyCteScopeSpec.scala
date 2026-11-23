@@ -24,8 +24,8 @@ class RowPolicyCteScopeSpec extends AnyFlatSpec with Matchers:
 
   private val user = RbacUser(id = "u-1", tenant = Some("acme"), username = "alice", kind = "user")
   private val ctx  =
-    SchemaContext(defaultDatabase = Some("acme_tpch"), defaultSchema = Some("tpch1"))
-  private val rw = new RowPolicyRewriter(enabled = true)
+    SchemaContext(defaultDatabase = Some("acme_tpch"), defaultSchema = Some("tpch1"), pool = None)
+  private val rw = RowPolicyRewriterSpec.withNoCatalog(enabled = true)
 
   private def policy(table: String, predicate: String, id: String = "rp-1"): RoleRowPolicy =
     RoleRowPolicy(id, "r-1", "*", "tpch1", table, predicate)

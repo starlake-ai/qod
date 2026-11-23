@@ -31,7 +31,13 @@ final class CachedColumnCatalog(
       * every [[historyStable]] check; None (fail closed) when there is none or when not wired.
       */
     latestSnapshot: (String, Option[PoolKey], String) => IO[Option[Long]] = (_, _, _) =>
-      IO.pure(None)
+      IO.pure(None),
+    /** [[ColumnCatalog.columnsAt]]'s answer, DuckLake metadata only, not cached (a snapshot's
+      * columns never change); None when not wired or when the read fails.
+      */
+    snapshotColumns: (String, Option[PoolKey], String, String, String, Long) => IO[
+      Option[List[String]]
+    ] = (_, _, _, _, _, _) => IO.pure(None)
 ) extends ColumnCatalog:
 
   private val cache: Cache[(String, Option[PoolKey], String, String, String), List[String]] =
@@ -91,6 +97,16 @@ final class CachedColumnCatalog(
             IO(unreadable.put((tenant, pool, catalog), java.lang.Boolean.TRUE)).as(false)
         }
     }
+
+  override def columnsAt(
+      tenant: String,
+      pool: Option[PoolKey],
+      catalog: String,
+      schemaName: String,
+      tableName: String,
+      snapshot: Long
+  ): IO[Option[List[String]]] =
+    snapshotColumns(tenant, pool, catalog, schemaName, tableName, snapshot).handleError(_ => None)
 
   def columnsOf(
       tenant: String,

@@ -1,6 +1,7 @@
 package ai.starlake.quack.edge.rls
 
 import ai.starlake.acl.parser.{AstChildren, TableExtractor}
+import ai.starlake.quack.edge.cls.{ColumnCatalog, UnresolvedMode}
 import ai.starlake.quack.edge.policy.TimeTravelCarrier
 import ai.starlake.quack.edge.policy.TimeTravelCarrier.Carry
 import ai.starlake.quack.model.StatementKind
@@ -35,7 +36,9 @@ import scala.util.Try
   */
 final case class SchemaContext(
     defaultDatabase: Option[String],
-    defaultSchema: Option[String]
+    defaultSchema: Option[String],
+    /** The pool the statement runs on: a table only its nodes hold is described there. */
+    pool: Option[ai.starlake.quack.model.PoolKey]
 )
 
 /** Row-level security rewriter. For every base table referenced by a SELECT that carries a matching
@@ -168,6 +171,16 @@ object RowPolicyRewriter:
     "localtimestamp"
   )
 
+  /** A predicate reading a column its table does not have: the policy fails to apply (denied). The
+    * message names neither the predicate nor the column.
+    */
+  private final class MissingPredicateColumn
+      extends RuntimeException("row policy predicate names a column its table does not have")
+
+  private val UnresolvedRefusal =
+    "the columns of a row-policy table this statement reads could not be read; retry, or " +
+      "contact an administrator"
+
   /** A predicate shape the qualification cannot place: the policy fails to apply (denied). */
   private final class UnqualifiablePredicate extends RuntimeException("unqualifiable predicate")
 
@@ -179,13 +192,15 @@ object RowPolicyRewriter:
     * replaced, any other qualifier is a struct field path and is kept under the alias. Lambda
     * parameters are not columns. Inside a subquery a column qualified by one of the subquery's own
     * FROM items keeps its binding; any other there (unqualified included) cannot be placed and
-    * fails the policy.
+    * fails the policy. Returns the table columns the predicate reads, folded (a struct path's
+    * column, not its fields).
     */
   private[rls] def qualifyPredicate(
       expr: Expression,
       qualifiers: List[List[String]],
       alias: String
-  ): Unit =
+  ): Set[String] =
+    val read                           = scala.collection.mutable.Set.empty[String]
     val visited: java.util.Set[AnyRef] =
       java.util.Collections.newSetFromMap(
         new java.util.IdentityHashMap[AnyRef, java.lang.Boolean]()
@@ -215,6 +230,7 @@ object RowPolicyRewriter:
         val own    = (3 to 1 by -1).find(k => q.size >= k && qualifiers.contains(folded.take(k)))
         val rest   = own.map(q.drop).getOrElse(if sub.isDefined then null else q)
         if rest == null || rest.size > 2 then throw new UnqualifiablePredicate
+        read += rest.headOption.map(fold).getOrElse(name)
         c.setTable(new Table((alias :: rest).asJava))
     def route(value: Any, lambdas: Set[String], sub: Option[Set[String]]): Unit =
       value match
@@ -243,6 +259,7 @@ object RowPolicyRewriter:
           case _: Table => () // a subquery's FROM item
           case other    => children(other, lambdas, sub)
     walk(expr, Set.empty, None)
+    read.toSet
 
   /** SQL-escape a scalar value into a quoted literal: `O'Brien` -> `'O''Brien'`. */
   private def lit(v: String): String = "'" + v.replace("'", "''") + "'"
@@ -282,7 +299,11 @@ object RowPolicyRewriter:
         java.util.regex.Matcher.quoteReplacement(values.getOrElse(name, "NULL"))
     )
 
-class RowPolicyRewriter(enabled: Boolean = true) extends LazyLogging:
+class RowPolicyRewriter(
+    catalog: ColumnCatalog,
+    unresolvedMode: UnresolvedMode,
+    enabled: Boolean = true
+) extends LazyLogging:
   import RowPolicyRewriter._
 
   def rewrite(
@@ -329,7 +350,7 @@ class RowPolicyRewriter(enabled: Boolean = true) extends LazyLogging:
               !scoping.cteReferences.contains(t) && matchingPolicies(t, eff, ctx).nonEmpty
             }
             val walker =
-              new DeepWalker(eff, ctx, values, changed, scoping.cteReferences, freshAlias())
+              new DeepWalker(eff, ctx, values, changed, scoping.cteReferences, clauses)
             walker.walk(stmt)
             // Completeness (audit F21): a policy table in a position the walk holds no slot for
             // (a PIVOT / UNPIVOT source) would reach the node unfiltered. Refused, never passed.
@@ -353,6 +374,14 @@ class RowPolicyRewriter(enabled: Boolean = true) extends LazyLogging:
             // row policy for the caller. Fail closed instead of Passthrough. Load-bearing for
             // rows stored before RowPredicateValidator rejected splice-unsafe predicates (a
             // trailing `--` comment, etc.) - see Failed's doc comment.
+            case _: MissingPredicateColumn =>
+              logger.warn(
+                "a row policy names a column its table does not have, for tenant={} user={}; " +
+                  "denying",
+                eff.user.tenant.getOrElse("-"),
+                eff.user.username
+              )
+              Failed("row policy names a column its table does not have")
             case _: Throwable =>
               logger.warn(
                 "row policy failed to apply at rewrite time for tenant={} user={}; denying",
@@ -399,7 +428,7 @@ class RowPolicyRewriter(enabled: Boolean = true) extends LazyLogging:
       values: Map[String, String],
       changed: java.util.concurrent.atomic.AtomicBoolean,
       cteReferences: java.util.Set[Table],
-      alias: String
+      clauses: Vector[String]
   ):
     private val visited: java.util.Set[AnyRef] =
       java.util.Collections.newSetFromMap(
@@ -460,7 +489,7 @@ class RowPolicyRewriter(enabled: Boolean = true) extends LazyLogging:
       item match
         case t: Table if cteReferences.contains(t) => None
         case t: Table                              =>
-          val w = maybeWrap(t, eff, ctx, values, changed, alias)
+          val w = maybeWrap(t, eff, ctx, values, changed, clauses)
           if w eq t then None
           else
             visited.add(w): Unit
@@ -511,7 +540,7 @@ class RowPolicyRewriter(enabled: Boolean = true) extends LazyLogging:
       ctx: SchemaContext,
       values: Map[String, String],
       changed: java.util.concurrent.atomic.AtomicBoolean,
-      rowAlias: String
+      clauses: Vector[String]
   ): net.sf.jsqlparser.statement.select.FromItem =
     val matched = matchingPolicies(t, eff, ctx)
     if matched.isEmpty then t
@@ -537,7 +566,17 @@ class RowPolicyRewriter(enabled: Boolean = true) extends LazyLogging:
       val predicate =
         matched.map(p => "(" + substitute(p.predicateSql, values) + ")").mkString(" OR ")
       val expr: Expression = CCJSqlParserUtil.parseCondExpression(predicate)
-      qualifyPredicate(expr, ownQualifiers(t, ctx), rowAlias)
+      // One alias per wrap: a statement's own text (a PIVOT pre-statement's included) can only
+      // show the aliases of the wraps it holds.
+      val rowAlias = freshAlias()
+      val read     = qualifyPredicate(expr, ownQualifiers(t, ctx), rowAlias)
+      requireColumns(
+        t,
+        read,
+        eff,
+        ctx,
+        if carried then TimeTravelCarrier.clauseOf(t.getTimeTravel, clauses) else None
+      )
       baseTable.setAlias(new Alias(rowAlias, true))
 
       val inner = new PlainSelect()
@@ -552,6 +591,39 @@ class RowPolicyRewriter(enabled: Boolean = true) extends LazyLogging:
       wrapped.setAlias(if alias != null then alias else new Alias(t.getName))
       changed.set(true)
       wrapped
+
+  /** Fails the policy (closed) when the predicate reads a column `t` does not have, judged on the
+    * columns of the snapshot the read pins when the catalog can list them (`AT (VERSION => n)`),
+    * else on its current columns. A table whose columns cannot be read is judged as the column
+    * policy rewriter judges one ([[UnresolvedMode]]): `Pass` ships the predicate as qualified, so a
+    * column it lacks is the node's binder error; `Deny` refuses the statement.
+    */
+  private def requireColumns(
+      t: Table,
+      read: Set[String],
+      eff: EffectiveSet,
+      ctx: SchemaContext,
+      clause: Option[String]
+  ): Unit =
+    import cats.effect.unsafe.implicits.global
+    val needed = read - "rowid"
+    if needed.nonEmpty then
+      val name   = unquote(t.getName)
+      val schema = Option(t.getSchemaName).map(unquote).getOrElse(ctx.defaultSchema.getOrElse(""))
+      val cat    = Option(t.getDatabase)
+        .flatMap(d => Option(d.getDatabaseName))
+        .map(unquote)
+        .getOrElse(ctx.defaultDatabase.getOrElse(""))
+      val tenant = eff.user.tenant.getOrElse("")
+      val atPin  = clause.flatMap(TimeTravelCarrier.pinnedVersion).flatMap { v =>
+        catalog.columnsAt(tenant, ctx.pool, cat, schema, name, v).unsafeRunSync()
+      }
+      val listed =
+        atPin.getOrElse(catalog.columnsOf(tenant, ctx.pool, cat, schema, name).unsafeRunSync())
+      if listed.isEmpty then
+        if unresolvedMode == UnresolvedMode.Deny then throw new Refusal(UnresolvedRefusal)
+      else if !needed.subsetOf(listed.map(IdentifierFold.fold).toSet) then
+        throw new MissingPredicateColumn
 
   /** The qualifications a column of `t` may carry in a predicate, folded: its name, schema and
     * name, catalog, schema and name, the parts it was not written with taken from the session.

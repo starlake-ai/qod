@@ -11,17 +11,18 @@ import scala.collection.mutable.ListBuffer
 import scala.util.{Try, Using}
 
 /** A row predicate reads only its own table (owner ruling D26). The filtered view aliases its base
-  * table with [[RowPolicyRewriter.RowAlias]] and qualifies every column of the predicate with it,
-  * so a column the table no longer has is a binder error, never a column of a FROM item the caller
-  * put beside the table (DuckDB 2.0 binds an unqualified name of a derived table laterally).
+  * table with a fresh alias ([[RowPolicyRewriter.freshAlias]]) and qualifies every column of the
+  * predicate with it, so a column the table no longer has is a binder error, never a column of a
+  * FROM item the caller put beside the table (DuckDB 2.0 binds an unqualified name of a derived
+  * table laterally).
   */
 class RowPredicateQualificationSpec extends AnyFlatSpec with Matchers:
   import RowPolicyRewriter._
 
   private val user = RbacUser(id = "u-1", tenant = Some("acme"), username = "alice", kind = "user")
   private val ctx  =
-    SchemaContext(defaultDatabase = Some("acme_tpch"), defaultSchema = Some("tpch1"))
-  private val rw = new RowPolicyRewriter(enabled = true)
+    SchemaContext(defaultDatabase = Some("acme_tpch"), defaultSchema = Some("tpch1"), pool = None)
+  private val rw = RowPolicyRewriterSpec.withNoCatalog(enabled = true)
 
   /** The alias as the assertions read it: every fresh alias ([[AliasPattern]]) is replaced by it.
     */
@@ -305,3 +306,145 @@ class RowPredicateQualificationSpec extends AnyFlatSpec with Matchers:
               case Left(message) => message should include("Binder Error")
               case Right(rows)   => fail(s"expected a binder error, got $rows")
       }
+
+  // ---------- an alias per wrap (review R4-I1) ----------
+
+  "two wrapped tables of one statement" should "carry different aliases" in {
+    val out     = shippedAsIs(go("SELECT * FROM secret a, secret b", euOnly))
+    val aliases = AliasPattern.findAllIn(out).toList.distinct
+    aliases.size shouldBe 2
+  }
+
+  // ---------- a predicate column must exist ----------
+
+  private val Cat = ("acme_tpch", "tpch1", "secret")
+
+  private def withCatalog(
+      columns: List[String],
+      atSnapshot: Map[Long, List[String]] = Map.empty,
+      mode: ai.starlake.quack.edge.cls.UnresolvedMode =
+        ai.starlake.quack.edge.cls.UnresolvedMode.Pass
+  ): RowPolicyRewriter =
+    val rows = if columns.isEmpty then Map.empty else Map(Cat -> columns)
+    new RowPolicyRewriter(
+      new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(
+        rows,
+        atSnapshot = atSnapshot.map((v, cols) => (Cat._1, Cat._2, Cat._3, v) -> cols)
+      ),
+      mode
+    )
+
+  private def goWith(r: RowPolicyRewriter, sql: String, policies: List[RoleRowPolicy]): Outcome =
+    val outcome =
+      r.rewrite(
+        sql,
+        StatementKind.Select,
+        EffectiveSet(user, Nil, Nil, Nil, Nil, Nil, policies),
+        ctx
+      )
+    info(s"original: $sql")
+    info(s"result:   $outcome")
+    outcome
+
+  "a predicate naming a column its table has" should "be applied" in {
+    val r = withCatalog(List("id", "Region", "info", "tags"))
+    Seq(
+      "region = 'eu'",
+      "\"REGION\" = 'eu'",
+      "secret.region = 'eu'",
+      "info.country = 'fr'",
+      "len(list_filter(tags, lambda x: x = 'eu')) > 0",
+      "rowid >= 0 AND region = 'eu'",
+      "region = current_user"
+    ).foreach { p =>
+      withClue(p)(goWith(r, "SELECT * FROM secret", policy(p)) shouldBe a[Rewritten])
+    }
+  }
+
+  "a predicate naming a column its table does not have" should "fail the policy" in {
+    val r = withCatalog(List("id", "other"))
+    Seq("region = 'eu'", "secret.region = 'eu'", "info.country = 'fr'").foreach { p =>
+      withClue(p) {
+        goWith(r, "SELECT s.id FROM (SELECT 'eu' AS region) v, secret s", policy(p)) match
+          case Failed(reason) =>
+            reason should not include "region"
+            reason should not include p
+          case other => fail(s"expected Failed, got $other")
+      }
+    }
+  }
+
+  "a table whose columns cannot be read" should "be judged as the column policy rewriter does" in {
+    goWith(withCatalog(Nil), "SELECT * FROM secret", euOnly) shouldBe a[Rewritten]
+    goWith(
+      withCatalog(Nil, mode = ai.starlake.quack.edge.cls.UnresolvedMode.Deny),
+      "SELECT * FROM secret",
+      euOnly
+    ) shouldBe a[Refused]
+  }
+
+  "a time-travel read" should "be judged on the columns of the snapshot it pins" in {
+    val r = withCatalog(
+      List("id", "region"),
+      atSnapshot = Map(3L -> List("id"), 4L -> List("id", "region"))
+    )
+    goWith(r, "SELECT * FROM secret AT (VERSION => 3)", euOnly) shouldBe a[Failed]
+    goWith(r, "SELECT * FROM secret AT (VERSION => 4)", euOnly) shouldBe a[Rewritten]
+    // A snapshot the catalog does not list, and a clause naming none by number: current columns.
+    goWith(r, "SELECT * FROM secret AT (VERSION => 9)", euOnly) shouldBe a[Rewritten]
+    goWith(r, "SELECT * FROM secret AT (TIMESTAMP => '2026-01-01')", euOnly) shouldBe a[Rewritten]
+    withCatalog(List("id"), atSnapshot = Map(4L -> List("id", "region")))
+      .rewrite(
+        "SELECT * FROM secret AT (VERSION => 4)",
+        StatementKind.Select,
+        EffectiveSet(user, Nil, Nil, Nil, Nil, Nil, euOnly),
+        ctx
+      ) shouldBe a[Rewritten]
+  }
+
+  // ---------- the R4-I1 statement ----------
+
+  private val pubAndSecret = List(
+    RoleRowPolicy("rp-1", "r-1", "*", "tpch1", "secret", "region = 'eu'"),
+    RoleRowPolicy("rp-2", "r-1", "*", "tpch1", "pub", "region = 'eu'")
+  )
+
+  private val readsTheAlias =
+    "SELECT list(s.id ORDER BY s.id) AS leaked FROM (PIVOT (SELECT regexp_extract(current_query(), " +
+      "'__qod_rls_[0-9a-f]{32}') AS k, {'region': 'eu'} AS v FROM pub LIMIT 1) ON k USING " +
+      "first(v)) p, secret s"
+
+  "a statement reading the alias through current_query()" should "be refused by the guard" in {
+    val clsCtx = ai.starlake.quack.edge.cls.SchemaContext(
+      Some("acme_tpch"),
+      Some("tpch1"),
+      attachedCatalogs = Set.empty
+    )
+    guard.check(
+      readsTheAlias,
+      StatementKind.Select,
+      EffectiveSet(user, Nil, Nil, Nil, Nil, Nil, pubAndSecret),
+      clsCtx
+    ) shouldBe a[ai.starlake.quack.edge.policy.GuardOutcome.Deny]
+  }
+
+  it should "fail the policy whose column is gone, past the guard" in {
+    val r = new RowPolicyRewriter(
+      new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(
+        Map(Cat -> List("id", "name"), ("acme_tpch", "tpch1", "pub") -> List("id", "region"))
+      ),
+      ai.starlake.quack.edge.cls.UnresolvedMode.Pass
+    )
+    goWith(r, readsTheAlias, pubAndSecret) shouldBe a[Failed]
+  }
+
+  it should "fail to bind on DuckDB past the guard and the column check" in
+    Using.resource(database(stale = true)) { conn =>
+      Using.resource(conn.createStatement()) { st =>
+        st.execute("CREATE TABLE pub (id INTEGER, region VARCHAR)")
+        st.execute("INSERT INTO pub VALUES (7, 'eu')")
+      }
+      rowsOf(conn, shippedAsIs(go(readsTheAlias, pubAndSecret))) match
+        case Left(message) => message should include("Binder Error")
+        case Right(rows)   => fail(s"expected a binder error, got $rows")
+    }

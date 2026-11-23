@@ -115,8 +115,8 @@ class DefaultDatabaseResolutionSpec extends AnyFlatSpec with Matchers:
     it should s"make a row policy apply as the node resolves, case $name" in {
       val (router, _)  = routerWith(dd)
       val (db, schema) = router.defaultsOf(probeKey)
-      val ctx          = ai.starlake.quack.edge.rls.SchemaContext(db, schema)
-      val rw           = new ai.starlake.quack.edge.rls.RowPolicyRewriter(enabled = true)
+      val ctx          = ai.starlake.quack.edge.rls.SchemaContext(db, schema, None)
+      val rw           = ai.starlake.quack.edge.rls.RowPolicyRewriterSpec.withNoCatalog(enabled = true)
       for (table, form) <- forms do
         withClue(s"$form name $table: ") {
           val out = rw.rewrite(

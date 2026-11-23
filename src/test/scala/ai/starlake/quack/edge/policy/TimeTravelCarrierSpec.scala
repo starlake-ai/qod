@@ -118,11 +118,11 @@ class TimeTravelCarrierSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync() match
       case ColumnPolicyRewriter.Rewritten(s) => s
       case other                             => fail(s"column rewrite: $other")
-    new RowPolicyRewriter().rewrite(
+    ai.starlake.quack.edge.rls.RowPolicyRewriterSpec.withNoCatalog().rewrite(
       masked,
       StatementKind.Select,
       stackedEff,
-      ai.starlake.quack.edge.rls.SchemaContext(Some("acme_lake"), Some("main"))
+      ai.starlake.quack.edge.rls.SchemaContext(Some("acme_lake"), Some("main"), None)
     ) match
       case RowPolicyRewriter.Rewritten(s) => s
       case other                          => fail(s"row rewrite: $other")

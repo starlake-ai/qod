@@ -1384,7 +1384,7 @@ object Main extends IOApp with LazyLogging:
           .seconds
       )
       val columnPolicyRewriter = EdgeRewriters.columnPolicyRewriter(columnCatalog)
-      val rowPolicyRewriter    = EdgeRewriters.rowPolicyRewriter()
+      val rowPolicyRewriter    = EdgeRewriters.rowPolicyRewriter(columnCatalog)
       val protectedWriteGuard  = EdgeRewriters.protectedWriteGuard(columnCatalog)
 
       // SQL admin dialect (GRANT/REVOKE, ROW/COLUMN POLICY, ALTER GROUP, admin SHOW forms)
