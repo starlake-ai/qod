@@ -100,16 +100,17 @@
   named its columns bare, and DuckDB binds a name the table does not have to another FROM item
   of the statement. A predicate naming a column the table no longer has (a column dropped or
   renamed after the policy was written) therefore read a column of an item the caller placed
-  beside the table, and could admit every row. The filter now reads its table under the internal
-  alias `__qod_rls` and qualifies each column of the predicate with it, so such a predicate is
-  a binder error and the statement fails. A column the predicate qualifies by its table's own
+  beside the table, and could admit every row. The filter now reads its table under an internal
+  alias drawn at random for each statement (`__qod_rls_` and 32 hex digits) and qualifies each
+  column of the predicate with it, so such a predicate is a binder error and the statement fails.
+  The alias is unpredictable because DuckDB also looks an unbound qualified name up as a struct
+  column of the caller's other FROM items, and a caller can bring in a column of any name
+  without writing it (a view, a file's JSON keys, a PIVOT over data values). A column the predicate qualifies by its table's own
   name keeps working; another qualifier reads as a struct field of the table; lambda parameters
   and `current_user`, `user`, `current_role`, `session_user`, `current_schema`,
   `current_catalog`, `localtime` and `localtimestamp` are left as written. A predicate holding a
   subquery whose columns are not all qualified by the subquery's own FROM items or by the
-  table's name fails to apply (the statement is denied, as for any policy that cannot apply). A
-  statement that names `__qod_rls` itself, in any ASCII case, is refused when it reads a
-  row-policy table.
+  table's name fails to apply (the statement is denied, as for any policy that cannot apply).
 - **Several column policies on one column: a deny wins, a policy naming the table beats a
   wildcard one, and two different masks are refused.** The policy applied used to depend on the
   order of roles and of the tables a statement named, so a weaker policy could apply in place of

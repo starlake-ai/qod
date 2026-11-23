@@ -41,10 +41,11 @@ final case class SchemaContext(
 /** Row-level security rewriter. For every base table referenced by a SELECT that carries a matching
   * [[ai.starlake.quack.ondemand.state.RoleRowPolicy RoleRowPolicy]] for the requesting principal,
   * the table is replaced by an inline filtered view
-  * `(SELECT * FROM <table> AS __qod_rls WHERE <predicate>) <alias>`, every column of the predicate
-  * qualified with `__qod_rls` ([[RowPolicyRewriter.qualifyPredicate]]), so the node only ever sees
-  * the rows the predicate admits. Predicates from multiple policies on the same table are combined
-  * with **OR** (permissive union - a row is visible if ANY of the principal's roles allow it).
+  * `(SELECT * FROM <table> AS __qod_rls_<random> WHERE <predicate>) <alias>`, every column of the
+  * predicate qualified with that alias ([[RowPolicyRewriter.qualifyPredicate]]), so the node only
+  * ever sees the rows the predicate admits. Predicates from multiple policies on the same table are
+  * combined with **OR** (permissive union - a row is visible if ANY of the principal's roles allow
+  * it).
   *
   * Wrapping the BASE table (rather than appending a top-level WHERE) keeps the filter correct under
   * joins, set operations, CTEs and subqueries, and - when stacked under the column-level rewriter -
@@ -136,14 +137,21 @@ object RowPolicyRewriter:
     s"a row-policy table is read with $clause, which the row filter cannot keep; " +
       "read the table without it"
 
-  /** The alias the filtered view gives its base table. A statement naming it is refused: inside the
-    * view a column the table lacks is looked up outward, and would bind to an item of the caller's
-    * so named (checked on the DuckDB 2.0 CLI).
-    */
-  val RowAlias = "__qod_rls"
+  /** The prefix of the alias the filtered view gives its base table. */
+  val RowAliasPrefix = "__qod_rls_"
 
-  private val ReservedAliasRefusal =
-    s"the statement names $RowAlias, which the row policy rewrite reserves; rename it"
+  private val aliasRandom = new java.security.SecureRandom()
+
+  /** A fresh alias for the filtered views of one rewrite: [[RowAliasPrefix]] and 128 random bits in
+    * hex. Inside a view a column its table lacks is looked up outward, as an item's name and as a
+    * struct column of an earlier item (checked on the DuckDB 2.0 CLI), and a caller can bring a
+    * column of any name into the statement without spelling it (a view, a file's JSON keys, a PIVOT
+    * over data values). No caller can name one it cannot predict.
+    */
+  private[rls] def freshAlias(): String =
+    val bytes = new Array[Byte](16)
+    aliasRandom.nextBytes(bytes)
+    RowAliasPrefix + bytes.map(b => f"${b & 0xff}%02x").mkString
 
   /** Names JSqlParser reads as a column and DuckDB 2.0 as a function when the table has no column
     * of that name, never as another FROM item's column (checked on the CLI): left as written, so a
@@ -164,15 +172,20 @@ object RowPolicyRewriter:
   private final class UnqualifiablePredicate extends RuntimeException("unqualifiable predicate")
 
   /** Qualify every column reference of `expr`, a row predicate written against `table`, with
-    * [[RowAlias]], so it can only bind to that table: a column the table no longer has is then a
-    * binder error, never a column of another FROM item of the caller's statement (owner ruling
-    * D26). `qualifiers` are the table's own qualifications (name; schema, name; catalog, schema,
-    * name), folded: a column already qualified by one has it replaced, any other qualifier is a
-    * struct field path and is kept under the alias. Lambda parameters are not columns. Inside a
-    * subquery a column qualified by one of the subquery's own FROM items keeps its binding; any
-    * other there (unqualified included) cannot be placed and fails the policy.
+    * `alias`, the view's alias for that table ([[freshAlias]]), so it can only bind to that table:
+    * a column the table no longer has is then a binder error, never a column of another FROM item
+    * of the caller's statement (owner ruling D26). `qualifiers` are the table's own qualifications
+    * (name; schema, name; catalog, schema, name), folded: a column already qualified by one has it
+    * replaced, any other qualifier is a struct field path and is kept under the alias. Lambda
+    * parameters are not columns. Inside a subquery a column qualified by one of the subquery's own
+    * FROM items keeps its binding; any other there (unqualified included) cannot be placed and
+    * fails the policy.
     */
-  private[rls] def qualifyPredicate(expr: Expression, qualifiers: List[List[String]]): Unit =
+  private[rls] def qualifyPredicate(
+      expr: Expression,
+      qualifiers: List[List[String]],
+      alias: String
+  ): Unit =
     val visited: java.util.Set[AnyRef] =
       java.util.Collections.newSetFromMap(
         new java.util.IdentityHashMap[AnyRef, java.lang.Boolean]()
@@ -202,7 +215,7 @@ object RowPolicyRewriter:
         val own    = (3 to 1 by -1).find(k => q.size >= k && qualifiers.contains(folded.take(k)))
         val rest   = own.map(q.drop).getOrElse(if sub.isDefined then null else q)
         if rest == null || rest.size > 2 then throw new UnqualifiablePredicate
-        c.setTable(new Table((RowAlias :: rest).asJava))
+        c.setTable(new Table((alias :: rest).asJava))
     def route(value: Any, lambdas: Set[String], sub: Option[Set[String]]): Unit =
       value match
         case null                         => ()
@@ -315,7 +328,8 @@ class RowPolicyRewriter(enabled: Boolean = true) extends LazyLogging:
             val policyReads = scoping.extraction.tables.filter { t =>
               !scoping.cteReferences.contains(t) && matchingPolicies(t, eff, ctx).nonEmpty
             }
-            val walker = new DeepWalker(eff, ctx, values, changed, scoping.cteReferences)
+            val walker =
+              new DeepWalker(eff, ctx, values, changed, scoping.cteReferences, freshAlias())
             walker.walk(stmt)
             // Completeness (audit F21): a policy table in a position the walk holds no slot for
             // (a PIVOT / UNPIVOT source) would reach the node unfiltered. Refused, never passed.
@@ -323,9 +337,6 @@ class RowPolicyRewriter(enabled: Boolean = true) extends LazyLogging:
               Refused(UnfilteredRefusal)
             else if scopeRefusal(walker.wrappedTables.asScala, scoping, changed.get()).isDefined
             then Refused(UnscopedRefusal)
-            // Case-insensitive on the text, a superset of every spelling DuckDB reads as it.
-            else if changed.get() && sql.toLowerCase(java.util.Locale.ROOT).contains(RowAlias)
-            then Refused(ReservedAliasRefusal)
             // The rewrite is printed from the parser input; when that is not the caller's
             // statement (ParserInput.Rendered.exact) shipping it would run a different one.
             else if !changed.get() then Passthrough
@@ -387,7 +398,8 @@ class RowPolicyRewriter(enabled: Boolean = true) extends LazyLogging:
       ctx: SchemaContext,
       values: Map[String, String],
       changed: java.util.concurrent.atomic.AtomicBoolean,
-      cteReferences: java.util.Set[Table]
+      cteReferences: java.util.Set[Table],
+      alias: String
   ):
     private val visited: java.util.Set[AnyRef] =
       java.util.Collections.newSetFromMap(
@@ -448,7 +460,7 @@ class RowPolicyRewriter(enabled: Boolean = true) extends LazyLogging:
       item match
         case t: Table if cteReferences.contains(t) => None
         case t: Table                              =>
-          val w = maybeWrap(t, eff, ctx, values, changed)
+          val w = maybeWrap(t, eff, ctx, values, changed, alias)
           if w eq t then None
           else
             visited.add(w): Unit
@@ -490,15 +502,16 @@ class RowPolicyRewriter(enabled: Boolean = true) extends LazyLogging:
     eff.rowPolicies.filter(p => policyMatches(p, catalog, schema, name))
 
   /** If `t` matches one or more of the principal's row policies, return a parenthesed
-    * `(SELECT * FROM t AS __qod_rls WHERE <ORed predicate, qualified>)` carrying t's original
-    * alias; else return `t` unchanged.
+    * `(SELECT * FROM t AS <alias> WHERE <ORed predicate, qualified>)` carrying t's original alias;
+    * else return `t` unchanged.
     */
   private def maybeWrap(
       t: Table,
       eff: EffectiveSet,
       ctx: SchemaContext,
       values: Map[String, String],
-      changed: java.util.concurrent.atomic.AtomicBoolean
+      changed: java.util.concurrent.atomic.AtomicBoolean,
+      rowAlias: String
   ): net.sf.jsqlparser.statement.select.FromItem =
     val matched = matchingPolicies(t, eff, ctx)
     if matched.isEmpty then t
@@ -524,8 +537,8 @@ class RowPolicyRewriter(enabled: Boolean = true) extends LazyLogging:
       val predicate =
         matched.map(p => "(" + substitute(p.predicateSql, values) + ")").mkString(" OR ")
       val expr: Expression = CCJSqlParserUtil.parseCondExpression(predicate)
-      qualifyPredicate(expr, ownQualifiers(t, ctx))
-      baseTable.setAlias(new Alias(RowAlias, true))
+      qualifyPredicate(expr, ownQualifiers(t, ctx), rowAlias)
+      baseTable.setAlias(new Alias(rowAlias, true))
 
       val inner = new PlainSelect()
       inner.addSelectItem(new AllColumns())

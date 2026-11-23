@@ -59,7 +59,9 @@ class RestTimeTravelPolicySpec extends AnyFlatSpec with Matchers:
       val masked = pipeline.run(st(""), effWith(columnPolicies = List(maskEmail)))
       masked.fold(f => fail(f.toString), identity) should include("'***'")
       val filtered = pipeline.run(st(""), effWith(rowPolicies = List(regionX)))
-      filtered.fold(f => fail(f.toString), identity) should include(
+      filtered
+        .fold(f => fail(f.toString), identity)
+        .replaceAll("__qod_rls_[0-9a-f]{32}", "__qod_rls") should include(
         s"FROM $Ref AS __qod_rls WHERE (__qod_rls.c_region = 'X')"
       )
     }
@@ -95,7 +97,9 @@ class RestTimeTravelPolicySpec extends AnyFlatSpec with Matchers:
     statements.foreach { st =>
       pipeline.run(st(WithAt), effWith(rowPolicies = List(regionX))) match
         case Right(sent) =>
-          sent should include(s"FROM $Ref AS __qod_rls $At WHERE (__qod_rls.c_region = 'X')")
+          sent.replaceAll("__qod_rls_[0-9a-f]{32}", "__qod_rls") should include(
+            s"FROM $Ref AS __qod_rls $At WHERE (__qod_rls.c_region = 'X')"
+          )
         case Left(f) => fail(s"expected the row filter applied at the snapshot, got $f")
     }
 
@@ -105,7 +109,9 @@ class RestTimeTravelPolicySpec extends AnyFlatSpec with Matchers:
       pipeline.run(st(WithAt), both) match
         case Right(sent) =>
           sent should include("'***'")
-          sent should include(s"FROM $Ref AS __qod_rls $At WHERE (__qod_rls.c_region = 'X')")
+          sent.replaceAll("__qod_rls_[0-9a-f]{32}", "__qod_rls") should include(
+            s"FROM $Ref AS __qod_rls $At WHERE (__qod_rls.c_region = 'X')"
+          )
           sent.split(java.util.regex.Pattern.quote(At), -1).length - 1 shouldBe 1
         case Left(f) => fail(s"expected both policies applied at the snapshot, got $f")
     }

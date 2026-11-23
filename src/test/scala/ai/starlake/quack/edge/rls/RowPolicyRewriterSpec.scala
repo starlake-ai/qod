@@ -44,9 +44,11 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
       kind: StatementKind = StatementKind.Select,
       rewriter: RowPolicyRewriter = rw
   ): Outcome =
-    val outcome = rewriter.rewrite(sql, kind, effSet, ctx)
-    val preds   = effSet.rowPolicies.map(_.predicateSql)
-    val result  = outcome match
+    val outcome = rewriter.rewrite(sql, kind, effSet, ctx) match
+      case Rewritten(s) => Rewritten(normalizedAlias(s))
+      case other        => other
+    val preds  = effSet.rowPolicies.map(_.predicateSql)
+    val result = outcome match
       case Rewritten(s)           => s
       case Passthrough            => s"$sql  [passthrough]"
       case PassthroughParseFailed => s"$sql  [parse-failed]"
@@ -56,6 +58,10 @@ class RowPolicyRewriterSpec extends AnyFlatSpec with Matchers:
     info(s"predicate: ${if preds.isEmpty then "(none)" else preds.mkString("  ;  ")}")
     info(s"result:    $result")
     outcome
+
+  /** Each fresh row-policy alias (`__qod_rls_` and 32 hex digits) read as `__qod_rls`. */
+  private def normalizedAlias(sql: String): String =
+    sql.replaceAll("__qod_rls_[0-9a-f]{32}", "__qod_rls")
 
   private def rewritten(o: Outcome): String = o match
     case Rewritten(sql) => sql.toLowerCase

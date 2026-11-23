@@ -23,8 +23,14 @@ class RowPredicateQualificationSpec extends AnyFlatSpec with Matchers:
     SchemaContext(defaultDatabase = Some("acme_tpch"), defaultSchema = Some("tpch1"))
   private val rw = new RowPolicyRewriter(enabled = true)
 
-  /** [[RowPolicyRewriter.RowAlias]], spelled out so a change of it is a deliberate one. */
+  /** The alias as the assertions read it: every fresh alias ([[AliasPattern]]) is replaced by it.
+    */
   private val Alias = "__qod_rls"
+
+  /** A fresh alias: the prefix and 128 random bits in hex, never pinned by an assertion. */
+  private val AliasPattern = "__qod_rls_[0-9a-f]{32}".r
+
+  private def normalized(sql: String): String = AliasPattern.replaceAllIn(sql, Alias)
 
   private def policy(predicate: String, table: String = "secret"): List[RoleRowPolicy] =
     List(RoleRowPolicy("rp-1", "r-1", "*", "tpch1", table, predicate))
@@ -40,7 +46,13 @@ class RowPredicateQualificationSpec extends AnyFlatSpec with Matchers:
     info(s"result:   $outcome")
     outcome
 
+  /** The shipped text, its fresh alias read as [[Alias]]. */
   private def rewritten(o: Outcome): String = o match
+    case Rewritten(sql) => normalized(sql)
+    case other          => fail(s"expected Rewritten, got $other")
+
+  /** The shipped text as it is, for execution. */
+  private def shippedAsIs(o: Outcome): String = o match
     case Rewritten(sql) => sql
     case other          => fail(s"expected Rewritten, got $other")
 
@@ -128,16 +140,25 @@ class RowPredicateQualificationSpec extends AnyFlatSpec with Matchers:
     )
   }
 
-  "a statement naming the internal alias" should "be refused" in
+  "the alias" should "be fresh for each rewrite and unpredictable" in {
+    val sql   = "SELECT s.id FROM secret s"
+    val first = shippedAsIs(go(sql, euOnly))
+    val again = shippedAsIs(go(sql, euOnly))
+    val a     = AliasPattern.findAllIn(first).toSet
+    val b     = AliasPattern.findAllIn(again).toSet
+    a.size shouldBe 1
+    b.size shouldBe 1
+    a should not equal b
+    first should not include s"$Alias "
+    first should not include s"$Alias."
+  }
+
+  "a statement naming __qod_rls" should "not be refused for it" in
     Seq(
-      s"SELECT * FROM secret, (SELECT 'eu' AS region) $Alias",
-      s"SELECT * FROM secret, (SELECT 'eu' AS region) \"${Alias.toUpperCase}\""
+      s"SELECT s.id, '$Alias' AS note FROM secret s",
+      s"SELECT * FROM secret, (SELECT 'eu' AS region) $Alias"
     ).foreach { q =>
-      withClue(q) {
-        go(q, euOnly) match
-          case Refused(reason) => reason should include(Alias)
-          case other           => fail(s"expected Refused, got $other")
-      }
+      withClue(q)(rewritten(go(q, euOnly)) should include(s"$Alias.region = 'eu'"))
     }
 
   // ---------- executed in DuckDB ----------
@@ -164,6 +185,11 @@ class RowPredicateQualificationSpec extends AnyFlatSpec with Matchers:
       )
     exec("CREATE TABLE allowed (r VARCHAR, k INTEGER)")
     exec("INSERT INTO allowed VALUES ('eu', 1)")
+    // Columns named like the alias's prefix, brought in without the statement spelling them.
+    exec(s"CREATE TABLE mine ($Alias STRUCT(region VARCHAR))")
+    exec("INSERT INTO mine VALUES ({'region': 'eu'})")
+    exec("CREATE TABLE kv (k VARCHAR, v STRUCT(region VARCHAR))")
+    exec(s"INSERT INTO kv VALUES ('$Alias', {'region': 'eu'})")
     conn
 
   private def rowsOf(conn: Connection, sql: String): Either[String, List[List[String]]] =
@@ -220,3 +246,62 @@ class RowPredicateQualificationSpec extends AnyFlatSpec with Matchers:
         }
       }
     }
+
+  // ---------- an outer struct column named like the alias (review R3-I1) ----------
+
+  private val guard = new ai.starlake.quack.edge.policy.ProtectedWriteGuard(
+    new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(Map.empty),
+    clsEnabled = true,
+    rlsEnabled = true
+  )
+
+  /** The guard, then the rewrite, as the router runs them for a row-policy holder: Left(reason)
+    * when either refuses, else the text that would ship.
+    */
+  private def pipeline(sql: String): Either[String, String] =
+    val clsCtx = ai.starlake.quack.edge.cls.SchemaContext(
+      Some("acme_tpch"),
+      Some("tpch1"),
+      attachedCatalogs = Set.empty
+    )
+    val eff = EffectiveSet(user, Nil, Nil, Nil, Nil, Nil, euOnly)
+    guard.check(sql, StatementKind.Select, eff, clsCtx) match
+      case ai.starlake.quack.edge.policy.GuardOutcome.Deny(reason) => Left(reason)
+      case _                                                       =>
+        go(sql, euOnly) match
+          case Rewritten(out) => Right(out)
+          case Passthrough    => Right(sql)
+          case other          => Left(other.toString)
+
+  private val capturing = List(
+    "a table column, lateral comma join"  -> "SELECT s.id FROM mine m, secret s ORDER BY 1",
+    "a table column, correlated subquery" ->
+      "SELECT (SELECT string_agg(s.id::VARCHAR, ',' ORDER BY s.id) FROM secret s) FROM mine m",
+    "a table column, JOIN ON true" -> "SELECT s.id FROM mine m JOIN secret s ON true ORDER BY 1",
+    "a PIVOT, lateral comma join"  ->
+      "SELECT s.id FROM (PIVOT kv ON k USING first(v)) p, secret s ORDER BY 1",
+    "a PIVOT, correlated subquery" ->
+      ("SELECT (SELECT string_agg(s.id::VARCHAR, ',' ORDER BY s.id) FROM secret s) " +
+        "FROM (PIVOT kv ON k USING first(v)) p"),
+    "a PIVOT, JOIN ON true" ->
+      "SELECT s.id FROM (PIVOT kv ON k USING first(v)) p JOIN secret s ON true ORDER BY 1"
+  )
+
+  for (label, sql) <- capturing do
+    s"$label holding a struct column named $Alias" should
+      "return only the rows the predicate admits" in
+      Using.resource(database(stale = false)) { conn =>
+        pipeline(sql) match
+          case Right(out) => rowsOf(conn, out) shouldBe Right(List(List("1")))
+          case Left(why)  => fail(s"refused: $why")
+      }
+
+    it should "be refused or fail to bind when the table no longer has the column" in
+      Using.resource(database(stale = true)) { conn =>
+        pipeline(sql) match
+          case Left(_)    => succeed
+          case Right(out) =>
+            rowsOf(conn, out) match
+              case Left(message) => message should include("Binder Error")
+              case Right(rows)   => fail(s"expected a binder error, got $rows")
+      }
