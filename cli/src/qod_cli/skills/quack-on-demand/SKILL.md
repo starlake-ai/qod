@@ -411,6 +411,12 @@ MCP troubleshooting:
   fresh PAT.
 - **Tool missing from tools/list**: wrong tier - admin tools need an admin-owned PAT.
 - **run_sql denied**: the ACL message names the table and missing verb; fix the grant.
+- **A plain user's discovery tools** (`list_databases`, `list_tables`, `describe_table`,
+  `table_history`) show the databases of their tenant with a pool they may connect to, and
+  only the tables their grants cover for reading (`RO`, `RW` or `ALL`, as `SHOW TABLES`
+  lists them); any other table answers `not_found`. `no_pool_access`: no pool of that
+  database admits them. A row count of `-1` is withheld: the user holds a row policy, so
+  count with `run_sql`. `list_snapshots` needs an admin.
 - **"pool is resuming"**: the suspended pool is waking; retry in a few seconds.
 - Row caps: `run_sql` is truncated server-side at `QOD_MCP_MAX_ROWS` (default 500).
 
