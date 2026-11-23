@@ -382,10 +382,14 @@ class McpEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
         numbersOf(detail, "rowCount") shouldBe List(10L)
         numbersOf(history, "rowsAdded") shouldBe List(10L)
         numbersOf(history, "rowsRemoved") shouldBe List(2L)
+        numbersOf(tables, "dataFileCount") shouldBe List(1L)
+        numbersOf(detail, "dataFileCount") shouldBe List(1L)
+        numbersOf(history, "filesAdded") shouldBe List(1L)
+        numbersOf(history, "filesRemoved") shouldBe List(0L)
       }
     }
 
-  it should "withhold every row count from a member holding a row policy" in
+  it should "withhold every row and file count from a member holding a row policy" in
     withHarness(prepare = grantBobOrdersFiltered, catalogReader = Some(memberCatalog)) { h =>
       // The catalog's counts are the table's, not the rows the policy lets bob read: shown, they
       // would tell him how many rows it hides.
@@ -400,6 +404,11 @@ class McpEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
         numbersOf(detail, "rowCount") shouldBe List(-1L)
         numbersOf(history, "rowsAdded") shouldBe List(-1L)
         numbersOf(history, "rowsRemoved") shouldBe List(-1L)
+        // File counts grow with the table too, so they go with the row counts.
+        numbersOf(tables, "dataFileCount") shouldBe List(-1L)
+        numbersOf(detail, "dataFileCount") shouldBe List(-1L)
+        numbersOf(history, "filesAdded") shouldBe List(-1L)
+        numbersOf(history, "filesRemoved") shouldBe List(-1L)
       }
     }
 
