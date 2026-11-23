@@ -1,13 +1,16 @@
 // src/test/scala/ai/starlake/quack/mcp/McpEndToEndSpec.scala
 package ai.starlake.quack.mcp
 
+import ai.starlake.quack.model.{SnapshotTag, TenantDb, TenantDbKind}
 import ai.starlake.quack.ondemand.api.{
   CatalogColumnEntry,
   CatalogDataFileEntry,
   CatalogHistoryCommit,
   CatalogSchemaEntry,
+  CatalogSnapshotEntry,
   CatalogTableDetailResponse,
-  CatalogTableEntry
+  CatalogTableEntry,
+  CatalogTableRef
 }
 import ai.starlake.quack.ondemand.auth.{PatAuthenticator, TokenRestriction}
 import ai.starlake.quack.ondemand.catalog.{
@@ -37,6 +40,7 @@ import org.scalatest.matchers.should.Matchers
 import java.net.URI
 import java.net.http.{HttpRequest, HttpResponse}
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.atomic.AtomicInteger
 import scala.util.Try
 
 /** Full-wire MCP contract: real HTTP against the harness-booted manager with a Postgres PAT store,
@@ -270,10 +274,49 @@ class McpEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
   // Discovery tools for a plain member (issue #297): through the real guard and scope resolver
   // ------------------------------------------------------------------
 
+  private def snapshotEntry(id: Long, changes: String, tables: (String, String)*) =
+    CatalogSnapshotEntry(
+      snapshotId = id,
+      committedAt = "2026-11-23T00:00:00Z",
+      schemaVersion = 1L,
+      changes = changes,
+      rowsAdded = id * 10L + 5L,
+      filesAdded = 2,
+      filesRemoved = 1,
+      affectedTables = tables.toList.map(CatalogTableRef(_, _)),
+      author = Some("tenant:acme/user:carol"),
+      commitMessage = Some(s"commit $id")
+    )
+
+  /** The catalog's snapshots, newest first. 3: `sales.orders` and `sales.secret` together, 2:
+    * `sales.secret` alone, 1: `sales.orders` alone, 0: a table the catalog no longer resolves.
+    */
+  private val catalogSnapshots = List(
+    snapshotEntry(
+      3L,
+      "inserted_into_table:1,inserted_into_table:2",
+      "sales" -> "orders",
+      "sales" -> "secret"
+    ),
+    snapshotEntry(2L, "inserted_into_table:2", "sales" -> "secret"),
+    snapshotEntry(1L, "inserted_into_table:1", "sales" -> "orders"),
+    snapshotEntry(0L, "inserted_into_table:9")
+  )
+
+  /** The `limit` the last `listSnapshots` read was given (the window the tool asked for). */
+  private val lastSnapshotWindow = new AtomicInteger(-1)
+
   /** A catalog of two schemas: `sales.orders` (bob's grant below), `sales.secret`, `hr.salaries`.
     */
   private val memberCatalog: (String, String) => DuckLakeCatalogReader = (_, _) =>
     new DuckLakeCatalogReader(null):
+      override def listSnapshots(
+          limit: Int,
+          before: Option[Long],
+          table: Option[(String, String)]
+      ): List[CatalogSnapshotEntry] =
+        lastSnapshotWindow.set(limit)
+        catalogSnapshots.take(limit)
       private def entry(schema: String, table: String) =
         CatalogTableEntry(schema, table, 10L, 1, Some(s"s3://lake/$schema/$table/"))
       private val tables = Map(
@@ -468,6 +511,267 @@ class McpEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
         dbs should not include SecurityFixtures.TenantDbName
         tErr shouldBe true
         tables should include("no_pool_access")
+      }
+    }
+
+  // ------------------------------------------------------------------
+  // list_snapshots for a plain member (the follow-up #297 left after #302)
+  // ------------------------------------------------------------------
+
+  /** Snapshot tags are served for a DuckLake tenant-db only; the fixture's is in-memory. Tags sit
+    * on snapshot 1 (orders), 2 (secret alone) and 0 (no resolved table).
+    */
+  private def duckLakeWithTags(fix: SecurityFixtures.Fixture): Unit =
+    fix.store.upsertTenantDb(
+      TenantDb(
+        id = SecurityFixtures.TenantDbId,
+        tenantId = SecurityFixtures.TenantId,
+        name = SecurityFixtures.TenantDbName,
+        kind = TenantDbKind.DuckLake,
+        metastore = Map.empty,
+        dataPath = ""
+      )
+    )
+    List("visible-tag" -> 1L, "hidden-tag" -> 2L, "unresolved-tag" -> 0L).foreach {
+      (name, snapshotId) =>
+        fix.store.createSnapshotTag(
+          SnapshotTag(
+            id = s"tag-$name",
+            tenant = SecurityFixtures.TenantId,
+            tenantDb = SecurityFixtures.TenantDbName,
+            name = name,
+            snapshotId = snapshotId
+          )
+        )
+    }
+
+  private def snapshotsForBob(fix: SecurityFixtures.Fixture): Unit =
+    duckLakeWithTags(fix)
+    grantBobOrders(fix)
+
+  private def snapshotsForFilteredBob(fix: SecurityFixtures.Fixture): Unit =
+    duckLakeWithTags(fix)
+    grantBobOrdersFiltered(fix)
+
+  /** A `list_snapshots` reply's snapshots by id, and its tag names. */
+  private def parsedSnapshots(text: String): (Map[Long, Json], List[String]) =
+    val json  = parse(text).toOption.getOrElse(fail(s"not JSON: $text"))
+    val snaps = json.hcursor.downField("snapshots").as[List[Json]].toOption.get
+    val tags  = json.hcursor.downField("tags").as[List[Json]].toOption.get
+    (
+      snaps.map(s => s.hcursor.get[Long]("snapshotId").toOption.get -> s).toMap,
+      tags.flatMap(_.hcursor.get[String]("name").toOption)
+    )
+
+  private def countsOf(snapshot: Json): List[Long] =
+    List("rowsAdded", "filesAdded", "filesRemoved").map(f =>
+      snapshot.hcursor.get[Long](f).toOption.getOrElse(fail(s"no $f in $snapshot"))
+    )
+
+  private def tablesOf(snapshot: Json): List[(String, String)] =
+    snapshot.hcursor
+      .downField("affectedTables")
+      .as[List[Json]]
+      .toOption
+      .get
+      .map(t =>
+        t.hcursor.get[String]("schema").toOption.get -> t.hcursor.get[String]("name").toOption.get
+      )
+
+  private def stringOf(snapshot: Json, field: String): Option[String] =
+    snapshot.hcursor.get[String](field).toOption
+
+  /** Every field of `snapshot` as the catalog stored it. */
+  private def shouldBeAsStored(snapshot: Json, stored: CatalogSnapshotEntry): Unit =
+    snapshot.hcursor.get[Long]("snapshotId").toOption shouldBe Some(stored.snapshotId)
+    stringOf(snapshot, "committedAt") shouldBe Some(stored.committedAt)
+    snapshot.hcursor.get[Long]("schemaVersion").toOption shouldBe Some(stored.schemaVersion)
+    stringOf(snapshot, "changes") shouldBe Some(stored.changes)
+    countsOf(snapshot) shouldBe
+      List(stored.rowsAdded, stored.filesAdded.toLong, stored.filesRemoved.toLong)
+    tablesOf(snapshot) shouldBe stored.affectedTables.map(t => t.schema -> t.name)
+    stringOf(snapshot, "author") shouldBe stored.author
+    stringOf(snapshot, "commitMessage") shouldBe stored.commitMessage
+
+  private def stored(id: Long): CatalogSnapshotEntry =
+    catalogSnapshots.find(_.snapshotId == id).get
+
+  private val withheldCounts = List(-1L, -1L, -1L)
+
+  "list_snapshots" should "answer a plain member instead of tenant_forbidden" in
+    withHarness(prepare = snapshotsForBob, catalogReader = Some(memberCatalog)) { h =>
+      val bob         = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.BobUsername)
+      val (err, text) = callTool(h, bob, "list_snapshots", acmeMain)
+      withClue(text) {
+        err shouldBe false
+        text should not include "tenant_forbidden"
+        parsedSnapshots(text)._1.keySet should contain(1L)
+      }
+    }
+
+  it should "leave out a snapshot that touched only tables the member cannot read" in
+    withHarness(prepare = snapshotsForBob, catalogReader = Some(memberCatalog)) { h =>
+      val bob       = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.BobUsername)
+      val (_, text) = callTool(h, bob, "list_snapshots", acmeMain)
+      withClue(text) {
+        val ids = parsedSnapshots(text)._1.keySet
+        ids should contain allOf (1L, 3L)
+        ids should not contain 2L
+      }
+    }
+
+  it should "leave out from a member a snapshot with no resolved table, and show it to an admin" in
+    withHarness(prepare = snapshotsForBob, catalogReader = Some(memberCatalog)) { h =>
+      val bob             = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.BobUsername)
+      val alice           = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.AliceUsername)
+      val (_, memberText) = callTool(h, bob, "list_snapshots", acmeMain)
+      val (_, adminText)  = callTool(h, alice, "list_snapshots", acmeMain)
+      withClue(s"$memberText / $adminText") {
+        parsedSnapshots(memberText)._1.keySet shouldBe Set(1L, 3L)
+        parsedSnapshots(memberText)._2 should not contain "unresolved-tag"
+        val (adminSnaps, adminTags) = parsedSnapshots(adminText)
+        adminSnaps.keySet should contain(0L)
+        shouldBeAsStored(adminSnaps(0L), stored(0L))
+        adminTags should contain("unresolved-tag")
+      }
+    }
+
+  it should "name only the visible tables of a mixed snapshot and withhold what it cannot split" in
+    withHarness(prepare = snapshotsForBob, catalogReader = Some(memberCatalog)) { h =>
+      val bob        = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.BobUsername)
+      val (_, text)  = callTool(h, bob, "list_snapshots", acmeMain)
+      val (snaps, _) = parsedSnapshots(text)
+      withClue(text) {
+        val mixed = snaps(3L)
+        tablesOf(mixed) shouldBe List("sales" -> "orders")
+        stringOf(mixed, "changes") shouldBe Some("")
+        countsOf(mixed) shouldBe withheldCounts
+        text should not include "secret"
+      }
+    }
+
+  it should "keep the counts of a snapshot of visible tables only, without its raw change text" in
+    withHarness(prepare = snapshotsForBob, catalogReader = Some(memberCatalog)) { h =>
+      val bob       = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.BobUsername)
+      val (_, text) = callTool(h, bob, "list_snapshots", acmeMain)
+      withClue(text) {
+        val plain = parsedSnapshots(text)._1(1L)
+        countsOf(plain) shouldBe List(15L, 2L, 1L)
+        stringOf(plain, "changes") shouldBe Some("")
+        tablesOf(plain) shouldBe List("sales" -> "orders")
+      }
+    }
+
+  it should "show a member each kept snapshot's author and commit message" in
+    withHarness(prepare = snapshotsForBob, catalogReader = Some(memberCatalog)) { h =>
+      val bob        = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.BobUsername)
+      val (_, text)  = callTool(h, bob, "list_snapshots", acmeMain)
+      val (snaps, _) = parsedSnapshots(text)
+      withClue(text) {
+        snaps.keySet should not be empty
+        snaps.foreach { (id, s) =>
+          stringOf(s, "author") shouldBe stored(id).author
+          stringOf(s, "commitMessage") shouldBe stored(id).commitMessage
+        }
+      }
+    }
+
+  it should "withhold every count from a member holding a row policy" in
+    withHarness(prepare = snapshotsForFilteredBob, catalogReader = Some(memberCatalog)) { h =>
+      val bob         = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.BobUsername)
+      val (err, text) = callTool(h, bob, "list_snapshots", acmeMain)
+      val (snaps, _)  = parsedSnapshots(text)
+      withClue(text) {
+        err shouldBe false
+        snaps.keySet shouldBe Set(1L, 3L)
+        snaps.values.foreach(s => countsOf(s) shouldBe withheldCounts)
+      }
+    }
+
+  it should "keep only the tags of a snapshot the member sees" in
+    withHarness(prepare = snapshotsForBob, catalogReader = Some(memberCatalog)) { h =>
+      val bob       = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.BobUsername)
+      val (_, text) = callTool(h, bob, "list_snapshots", acmeMain)
+      withClue(text) {
+        parsedSnapshots(text)._2 shouldBe List("visible-tag")
+        text should not include "hidden-tag"
+      }
+    }
+
+  it should "apply limit to the snapshots a member keeps" in
+    withHarness(prepare = snapshotsForBob, catalogReader = Some(memberCatalog)) { h =>
+      val bob = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.BobUsername)
+      // The two newest are 3 and 2: limit 2 on the raw list would leave only 3.
+      val (_, two) = callTool(h, bob, "list_snapshots", acmeMain, "limit" -> Json.fromInt(2))
+      val (_, one) = callTool(h, bob, "list_snapshots", acmeMain, "limit" -> Json.fromInt(1))
+      withClue(s"$two / $one") {
+        parsedSnapshots(two)._1.keySet shouldBe Set(1L, 3L)
+        parsedSnapshots(one)._1.keySet shouldBe Set(3L)
+      }
+    }
+
+  it should "read a member's snapshots from a window of limit * 50, newest first" in
+    withHarness(prepare = snapshotsForBob, catalogReader = Some(memberCatalog)) { h =>
+      val bob = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.BobUsername)
+      lastSnapshotWindow.set(-1)
+      val (err, text) = callTool(h, bob, "list_snapshots", acmeMain, "limit" -> Json.fromInt(2))
+      withClue(text) {
+        err shouldBe false
+        lastSnapshotWindow.get shouldBe 100
+      }
+    }
+
+  it should "answer a database the member cannot reach exactly as the #302 tools do" in {
+    val bobOf = () => mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.BobUsername)
+    def sameAsListTables(h: ManagerServerHarness.Harness, database: String): Unit =
+      val bob    = bobOf()
+      val db     = "database" -> Json.fromString(database)
+      val answer = callTool(h, bob, "list_snapshots", db)
+      val oracle = callTool(h, bob, "list_tables", db)
+      withClue(s"$database: list_snapshots $answer / list_tables $oracle") {
+        oracle._1 shouldBe true
+        answer shouldBe oracle
+      }
+    // A pool bob may not connect to.
+    withHarness(prepare = duckLakeWithTags, catalogReader = Some(memberCatalog)) { h =>
+      sameAsListTables(h, SecurityFixtures.TenantDbName)
+    }
+    // Another tenant's database, and one that does not exist.
+    withHarness(prepare = snapshotsForBob, catalogReader = Some(memberCatalog)) { h =>
+      sameAsListTables(h, SecurityFixtures.GlobexTenantDbName)
+      sameAsListTables(h, "acme_nosuch")
+    }
+  }
+
+  it should "offer a member the tool, and say they may get fewer than limit" in
+    withHarness(prepare = snapshotsForBob, catalogReader = Some(memberCatalog)) { h =>
+      val bob         = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.BobUsername)
+      val body        = postMcp(h, rpc("tools/list"), Some(bob)).body()
+      val description = parse(body).toOption
+        .flatMap(_.hcursor.downField("result").downField("tools").as[List[Json]].toOption)
+        .getOrElse(Nil)
+        .find(_.hcursor.get[String]("name").toOption.contains("list_snapshots"))
+        .flatMap(_.hcursor.get[String]("description").toOption)
+      withClue(body) {
+        description should not be empty
+        description.get should include("fewer than")
+        description.get should include("limit")
+      }
+    }
+
+  it should "leave an admin's reply unchanged" in
+    withHarness(prepare = snapshotsForBob, catalogReader = Some(memberCatalog)) { h =>
+      val alice         = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.AliceUsername)
+      val (err, text)   = callTool(h, alice, "list_snapshots", acmeMain)
+      val (snaps, tags) = parsedSnapshots(text)
+      val (_, two)      = callTool(h, alice, "list_snapshots", acmeMain, "limit" -> Json.fromInt(2))
+      withClue(s"$text / $two") {
+        err shouldBe false
+        snaps.keySet shouldBe catalogSnapshots.map(_.snapshotId).toSet
+        catalogSnapshots.foreach(s => shouldBeAsStored(snaps(s.snapshotId), s))
+        tags.toSet shouldBe Set("visible-tag", "hidden-tag", "unresolved-tag")
+        // An admin's limit still applies to the catalog's newest snapshots.
+        parsedSnapshots(two)._1.keySet shouldBe Set(3L, 2L)
       }
     }
 

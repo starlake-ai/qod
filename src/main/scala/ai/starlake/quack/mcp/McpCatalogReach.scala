@@ -5,8 +5,10 @@ import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.api.{
   BranchHandlers,
   CatalogHistoryResponse,
+  CatalogSnapshotEntry,
   CatalogTableDetailResponse,
   CatalogTableEntry,
+  CatalogTagEntry,
   ExecCaller,
   TenantDbGate
 }
@@ -160,6 +162,35 @@ object McpCatalogReach:
             )
           )
         )
+
+    /** A member's snapshots: those that touched a table they can see, naming only those tables and
+      * no raw change text (it lists the whole database's activity). The counts are the whole
+      * snapshot's, so they are withheld when it also touched a table the member cannot see, and for
+      * a member who does not count rows.
+      */
+    def snapshots(ss: List[CatalogSnapshotEntry]): List[CatalogSnapshotEntry] =
+      if !isMember then ss
+      else
+        ss.flatMap { s =>
+          val seen = s.affectedTables.filter(t => visible(t.schema, t.name))
+          if seen.isEmpty then None
+          else
+            val whole = countsRows && seen.size == s.affectedTables.size
+            val named = s.copy(changes = "", affectedTables = seen)
+            Some(
+              if whole then named
+              else
+                named.copy(
+                  rowsAdded = Withheld,
+                  filesAdded = WithheldFiles,
+                  filesRemoved = WithheldFiles
+                )
+            )
+        }
+
+    /** The tags a member sees: those on a snapshot they were shown. */
+    def tags(ts: List[CatalogTagEntry], keptSnapshots: Set[Long]): List[CatalogTagEntry] =
+      if !isMember then ts else ts.filter(t => keptSnapshots.contains(t.snapshotId))
 
     /** The handlers' own answer for a table that does not exist, so a hidden one reads the same. */
     def notFound(schema: String, table: String): String =

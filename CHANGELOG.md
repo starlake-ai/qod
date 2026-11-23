@@ -330,8 +330,16 @@
   exist, and storage paths (`folder`, data files) are left out of a member's replies. A member
   holding any row policy gets `-1` for every row and file count (`rowCount` and `dataFileCount`,
   and a commit's `rowsAdded`, `rowsRemoved`, `filesAdded` and `filesRemoved`): the catalog counts
-  the whole table, so the numbers would tell how many rows the policy hides. Admins get what they got. `list_snapshots` and the `iceberg` arguments still need
-  an admin.
+  the whole table, so the numbers would tell how many rows the policy hides. Admins get what they got. The `iceberg` arguments still need an admin.
+- **`list_snapshots` answers a plain tenant member** (the follow-up #297 left). It read with the
+  admin gate, so a member got `tenant_forbidden` there too. A member now reaches the database as
+  the four tools above do, and gets only the snapshots that touched a table their grants cover
+  for reading, each naming only those tables, with `changes` empty (the raw text lists the whole
+  database's activity). `rowsAdded`, `filesAdded` and `filesRemoved` are `-1` when the snapshot
+  also touched a table they cannot read, and on every snapshot for a member holding a row policy.
+  Tags are kept only on a snapshot they see. `limit` applies after that filtering, over the newest
+  1000 snapshots at most, so a member may get fewer than `limit`. Author and commit message are
+  shown as `table_history` shows them. Admins get what they got.
 - **The Quack door serves clients that send each statement as `<alias>.query('<sql>')`** (#299),
   such as Columnar's `quack` ADBC driver: they signed in, then every statement failed with
   `Catalog Error: Table Function with name query does not exist!`. The DuckDB client binds that
