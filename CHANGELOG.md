@@ -20,14 +20,6 @@
   `length` over `CAST(<column> AS VARCHAR)` (`md5(email)` is refused, `md5(CAST(email AS
   VARCHAR))` is not), numbers over `TRY_CAST(<column> AS DOUBLE)`, subscripts with constant
   indexes only.
-- **Check the boot output for row predicates that can raise an error quoting a value.** A new row
-  predicate may not use a cast other than `TRY_CAST` or one to `VARCHAR`, `strptime`, JSON
-  extraction, base64, hex or binary decoding, a date, time or interval constructor, arithmetic over
-  a column, `error()`, or a date part, time zone or pattern read from the row (the last Security
-  entry lists them); one stored before keeps applying. At each boot the manager prints one `WARN:`
-  line on stderr per such stored predicate, naming the tenant, the role, the policy id, the table
-  and the kind of each refused part, never the predicate. Rewrite each with `TRY_CAST`,
-  `try_strptime` or a comparison with a constant of the column's own type.
 - **Check stored row predicates and masks that the parser read only in part.** A predicate is
   stored as written; one that holds DuckDB's `//`, `=>`, `:=`, `#` or another token the parser
   stopped at is now refused at create and update, and one stored before is refused at rewrite
@@ -153,9 +145,9 @@
     from a manifest (which does not check masks), that reads another column is refused when a
     statement reads its column: that refusal is what guards such a row. Review stored masks before
     upgrading.
-- **A result column's name no longer carries a mask or a row predicate, and masks and row
-  predicates use only forms that cannot raise an error quoting a value.** Four ways in which a
-  principal holding a column mask or a row policy could learn more than the policy shows:
+- **A result column's name no longer carries a mask or a row predicate, and a mask uses only forms
+  that cannot raise an error quoting a value.** Three ways in which a principal holding a column
+  mask or a row policy could learn more than the policy shows:
   - DuckDB names an unaliased select item after its expression. An item that held a masked column
     inside a call, an operator or any other expression was named after the rewritten expression,
     so the name of the result column spelled out the administrator's mask, constants and salts
@@ -221,24 +213,6 @@
     manifest import stored that the parser cannot read whole now refuses every read of its column,
     where it applied as the part the parser read. A stored mask that reads whole keeps applying as
     stored, and the manager reports each that a create would now refuse at boot.
-  - A row predicate DuckDB cannot evaluate on a row answers with DuckDB's error too, and DuckDB
-    evaluates it on every row it reads, those the policy hides included, so the error could quote a
-    value of a hidden row. A new or updated row predicate may no longer use a form DuckDB 2.0.0 can
-    answer with such an error when it reads a column: a cast other than `TRY_CAST` or one to
-    `VARCHAR` (`CAST` and `::`), `strptime`, JSON extraction (`json()`, `from_json`, every
-    `json_*` function but the builders and `json_valid`, `->` and `->>`, `JSON_VALUE` and its
-    kin), base64, hex and binary decoding (`from_base64`, `unhex`, `from_hex`, `unbin`,
-    `from_binary`), date, time and interval constructors (`make_date`, `make_time`,
-    `make_timestamp`, `make_timestamptz`, the `to_days` family, `INTERVAL (<expression>)`),
-    arithmetic (`+`, `-`, `*`, `<<`, `>>`, `add`, `subtract`, `multiply`, `divide`, `mod`, `abs`,
-    `%` and `//` by anything but a positive integer constant), `chr`, `repeat`, `error()`, and a
-    date part, time zone or regular expression read from the row (`date_part`, `date_trunc`,
-    `date_diff`, `timezone`, the `regexp_*` patterns, `~`, `SIMILAR TO`); `TRY(...)` exempts
-    nothing. The refusal (`400`) names each part and points to `TRY_CAST`, `try_strptime` and a
-    comparison with a constant of the column's own type. Comparisons, `IN` lists, the identity
-    tokens and every other function stay allowed, so a text column compared with a constant of
-    another type (`code = 42`) can still raise an error quoting the value: compare it with a
-    string constant.
 
 ### Fixed
 

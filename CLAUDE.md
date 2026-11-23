@@ -650,7 +650,9 @@ it from a slow replica); an OPA tenant's OPA failing or timing out on a large or
 statement makes (`OpaAuthorizer.UnavailableMessage`); more tenant statements per second than
 `QOD_AUTHZ_HANDLE_CONTEXTS_MAX / 360`, which evicts handle contexts so refusals read `authorization
 context expired; retry` (`cache_evictions_total{cache="qod_minted_handles"}` shows it); and an
-unexpected exception in the decider, which `DecideRoute` answers 503.
+unexpected exception in the decider, which `DecideRoute` answers 503. A row predicate runs on every
+row DuckDB reads, those it hides included, so one that raises (a cast, a conversion) can answer with
+an error quoting the value of a row it hides; to be addressed with the node-side row-policy work.
 
 Which binary: `QodNodeBinary` (`ondemand/runtime/`) resolves it once at boot for every manager that
 starts nodes on its host (runtime local, or fleet with `QOD_FLEET_EPHEMERAL=local`) and refuses to
@@ -1070,19 +1072,6 @@ hold a parenthesis that joins the next policy's predicate; a mask `Denied`, sinc
 stored unchecked and would apply as the part the parser read, the bare column included). Stored
 masks that read whole are not judged; boot prints one stderr `WARN:` line per stored mask a create
 would refuse (`StoredMaskReport`), naming the refused parts, never its text.
-A new or updated row predicate may not use a form DuckDB can answer with an error quoting a value
-of the row when it reads a column (`PredicateForms`, in `RowPredicateValidator`): DuckDB evaluates
-the predicate on every row it reads, hidden ones included. Refused: `CAST` / `::` to anything but
-`VARCHAR`, `strptime`, JSON extraction (`json_*` but the builders and `json_valid`, `->`, `->>`,
-`JSON_VALUE`), base64 / hex / binary decoding, date, time and interval constructors (`to_days`
-family, `INTERVAL (<expr>)`), arithmetic (`+ - * << >>`, `add` .. `mod`, `abs`, `%` / `//` by
-anything but a positive integer constant), `chr`, `repeat`, `error()`, and a date part, time zone or
-regular expression read from the row; `TRY(...)` exempts nothing. It stays a predicate language
-(owner ruling): comparisons, `IN` lists, the identity tokens and every other function stay, so a
-text column compared with a constant of another type (`code = 42`) can still quote the value, an
-accepted residual. Stored predicates keep applying; boot prints one stderr `WARN:` line per stored
-predicate a create would refuse for this (`StoredPredicateReport`), naming the parts, never the
-text. `RaisingPredicateSpec` holds the DuckDB evidence for each refused form.
 
 ### OPA authorization (per tenant)
 
