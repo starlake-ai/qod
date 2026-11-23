@@ -62,6 +62,11 @@
   `inserted` / `deleted` / `updated` count one event per snapshot a row changed in (a row set
   back to its fork value still counts), where a proposal's counts are net. The `branch_changes`
   and `diff` tool descriptions say so.
+- **The admin console shows the row-conflict status and what the counts mean** (#298). The
+  change set of a branch now says, under its table, that the row conflicts are out of date (`stale`:
+  propose again) or are computed when the merge is proposed (`not_computed`), where the row
+  conflicts section was simply missing; and the Inserted / Deleted / Updated headers carry a
+  tooltip saying they count change events, not net changes.
 - **The MCP discovery tools answer a plain tenant member** (#297). `list_databases`,
   `list_tables`, `describe_table` and `table_history` read through the catalog handlers' admin
   gate, so every member who was not an admin got `tenant_forbidden: session has no admin grant on
