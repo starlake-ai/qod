@@ -105,6 +105,7 @@ final class AuthzDecider(
         _ <- all(d.objects)(alwaysOnObject)
         _ <- all(d.objects)(historyUnderPolicies(ctx, _))
         _ <- all(d.functions)(alwaysOnFunction)
+        _ <- statementTextUnderPolicies(ctx, d)
         _ <- all(d.settings)(alwaysOnSetting)
         _ <- all(d.control)(alwaysOnControl)
         _ <- viaBoundaries(d)
@@ -228,6 +229,31 @@ final class AuthzDecider(
             "available to principals with column or row policies"
         )
       case None => Pass
+
+  /** The functions that show the statement text the node runs (owner ruling D30): the gateway
+    * rewrites a policy holder's statement with the policies' mask expressions and row predicates,
+    * so for such a principal they would show those. Refused to a principal holding any column or
+    * row policy, whatever table the policies name and wherever the plan reaches the function (a
+    * view's or a secure view's body, a macro, a generated column, a default, a CHECK, a `query()`
+    * literal). `pg_catalog.pg_prepared_statements` is a view the binder inlines as a call of
+    * `duckdb_prepared_statements()`; its name is matched too should a description ever list it. A
+    * call DuckDB evaluates while binding (a table function's argument, an EXECUTE parameter) is not
+    * in the plan, so no description lists it.
+    */
+  private def statementTextUnderPolicies(ctx: DecideContext, d: Description): Step =
+    val eff = ctx.effective
+    if eff.columnPolicies.isEmpty && eff.rowPolicies.isEmpty then Pass
+    else
+      val named =
+        d.functions.filter(f => showsStatementText(f.catalog, f.name)).map(_.name) ++
+          d.objects.filter(o => showsStatementText(o.catalog, o.name)).map(_.name)
+      named.headOption match
+        case Some(name) =>
+          refuse(
+            s"function ${IdentifierFold.fold(name)} is not available to principals with column " +
+              "or row policies"
+          )
+        case None => Pass
 
   private def alwaysOnFunction(f: DescribedFunction): Step =
     if !FunctionTypes.contains(f.tpe) then
@@ -544,6 +570,17 @@ object AuthzDecider:
   private val DuckLakeMetadataPrefix      = "__ducklake_metadata_"
   private val BuiltinCatalog              = "system"
   private val BuiltinSchema               = "main"
+
+  /** The functions and the view that show the statement text the node runs (owner ruling D30), all
+    * DuckDB's own: in the system catalog, or with no catalog as a description lists a call bound
+    * without one.
+    */
+  val StatementTextFunctions: Set[String] =
+    Set("current_query", "duckdb_prepared_statements", "pg_prepared_statements")
+
+  private def showsStatementText(catalog: String, name: String): Boolean =
+    (catalog.isEmpty || IdentifierFold.same(catalog, BuiltinCatalog)) &&
+      StatementTextFunctions.contains(IdentifierFold.fold(name))
 
   /** The catalog a pool's node attaches its database as, from the pool's kind and effective
     * metastore (as the spawn scripts and the router read them): DuckDB's built-in `memory` for kind

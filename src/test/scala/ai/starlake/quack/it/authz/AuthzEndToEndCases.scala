@@ -46,6 +46,9 @@ import scala.util.Try
   *     `vault_now`), group `qod_all_pools`;
   *   - dina (acme): role `e2e_drop` (RO lake `drop_free`, `drop_reused` and `rn_final`, tables
   *     dropped by the dropped-table cases), group `qod_all_pools`;
+  *   - quinn (acme): role `e2e_quinn` (RO lake `orders`, no policy until the statement-text case
+  *     adds one), group `qod_all_pools`; mona's and rhea's roles also hold RO on the plain view
+  *     `stmt_text_v`, which bob creates in the statement-text cases;
   *   - S3 credentials of their own (decision 23): Alice and the admin for `s3://qod-authz-<run>/`
   *     and `s3://warehouse/` on rustfs (when it is up); Alice, Bob and Carol for the [[FakeS3]]
   *     bucket `fake-shared`, which refuses Carol's key; Dave none.
@@ -86,6 +89,7 @@ abstract class AuthzEndToEndCases(
   private val DinaPw    = "dina-e2e-pw-1"
   private val MayaPw    = "maya-e2e-pw-1"
   private val RheaPw    = "rhea-e2e-pw-1"
+  private val QuinnPw   = "quinn-e2e-pw-1"
   private val Passwords = Map(
     "alice" -> AlicePw,
     "bob"   -> BobPw,
@@ -101,7 +105,8 @@ abstract class AuthzEndToEndCases(
     "vera"  -> VeraPw,
     "dina"  -> DinaPw,
     "maya"  -> MayaPw,
-    "rhea"  -> RheaPw
+    "rhea"  -> RheaPw,
+    "quinn" -> QuinnPw
   )
 
   private val Rustfs = "http://localhost:9000"
@@ -134,6 +139,7 @@ abstract class AuthzEndToEndCases(
   private def globexLake: Path = shared.resolve("globex_lake")
 
   private var stack: AuthzStack     = null
+  private var quinnRole: String     = "" // quinn's role, which the statement-text case gives a mask
   private var lake: String          = "" // acme's DuckLake tenant-db, also its catalog alias
   private var files: String         = "" // acme's duckdb-file tenant-db
   private var fed: String           = "" // acme's memory tenant-db with the federated sources
@@ -445,7 +451,14 @@ abstract class AuthzEndToEndCases(
         "predicateSql" -> s("id = 1")
       )
     )
+    // The statement-text cases (owner ruling D30): a plain view bob creates, read by a policy
+    // holder of each kind; quinn holds no policy until one case adds one.
+    grant(lake, "main", "stmt_text_v", "RO", feedMasked)
+    grant(lake, "main", "stmt_text_v", "RO", fedRows)
+    quinnRole = createRole("e2e_quinn")
+    grant(lake, "main", "orders", "RO", quinnRole)
     List(
+      ("quinn", QuinnPw, "user", "e2e_quinn"),
       ("maya", MayaPw, "user", "e2e_fed_masked"),
       ("rhea", RheaPw, "user", "e2e_fed_rows"),
       ("fran", FranPw, "user", "e2e_feed"),
@@ -1643,6 +1656,112 @@ abstract class AuthzEndToEndCases(
       s"SELECT id FROM read_parquet('$path')",
       node = "no S3 credential of yours covers it"
     )
+  }
+
+  // ---------- the statement-text functions (owner ruling D30) ----------
+
+  private val TextRefusal =
+    "function current_query is not available to principals with column or row policies"
+
+  "current_query()" should "be refused to a policy holder and allowed to a principal without" in {
+    ready()
+    // mona holds a mask (on feed_a), rhea a row filter (on pgfed.e2e.orders): every policy counts,
+    // whatever table the statement reads.
+    List("mona", "rhea").foreach(u =>
+      refused(u, "lake", "SELECT current_query() AS q", TextRefusal)
+    )
+    refused("mona", "lake", "SELECT pg_catalog.current_query() AS q", TextRefusal)
+    refused("mona", "lake", "SELECT 1 AS one, current_query() AS q", TextRefusal)
+    allowed("bob", "lake", "SELECT current_query() AS q")
+    allowed("bob", "lake", "SELECT count(*) FROM duckdb_prepared_statements()", Some(List("0")))
+    refused(
+      "rhea",
+      "lake",
+      "SELECT count(*) FROM duckdb_prepared_statements()",
+      "function duckdb_prepared_statements is not available to principals with column or row " +
+        "policies"
+    )
+    // Booked as a denial, like every other node refusal.
+    val booked = deniedInHistory("pg_catalog.current_query()")
+    booked.map(_.hcursor.get[String]("username").getOrElse("")) should contain("mona")
+  }
+
+  it should "be refused through a plain view another user created" in {
+    ready()
+    val view = s"$lake.main.stmt_text_v"
+    stack.flight(
+      s"CREATE OR REPLACE VIEW $view AS SELECT current_query() AS q",
+      "bob",
+      BobPw,
+      Acme,
+      "lake"
+    ) shouldBe a[Right[?, ?]]
+    doors.foreach { d =>
+      withClue(s"[$d] bob reads the view: ") {
+        as(d, "bob", "lake", s"SELECT q FROM $view") match
+          case Right(List(q)) => q should include("stmt_text_v")
+          case other          => fail(s"expected one row, got $other")
+      }
+    }
+    // mona and rhea hold RO on the view: the grant passes, the function in its body does not.
+    List("mona", "rhea").foreach(u => refused(u, "lake", s"SELECT q FROM $view", TextRefusal))
+  }
+
+  "prepared statements" should "keep working for a principal with column or row policies" in {
+    ready()
+    // A PREPARE / EXECUTE batch: the node admits it (StatementTextFunctionsNodeSpec); the
+    // gateway's protected-write guard, which reads a policy holder's batch before any node, is not
+    // this rule.
+    allowed("bob", "lake", "PREPARE st_p AS SELECT 42; EXECUTE st_p", Some(List("42")))
+    for u <- List("mona", "rhea"); d <- doors do
+      withClue(s"[$d] $u: ") {
+        as(d, u, "lake", "PREPARE st_p AS SELECT 42; EXECUTE st_p") match
+          case Right(rows) => rows shouldBe List("42")
+          case Left(err)   => err should not include "principals with column or row policies"
+      }
+    // FlightSQL prepared statements, the mask and the row filter holding through them.
+    feedRange // feed_a, whose email column mona reads masked
+    val held = stack.heldFlight("mona", MonaPw, Acme, "lake")
+    try
+      held.runPrepared(s"SELECT email FROM $lake.main.feed_a WHERE id = 1") shouldBe
+        Right(List("***"))
+    finally held.close()
+    val rows = stack.heldFlight("rhea", RheaPw, Acme, "fed")
+    try rows.runPrepared("SELECT count(*) FROM pgfed.e2e.orders") shouldBe Right(List("1"))
+    finally rows.close()
+  }
+
+  "a column policy added after a cached allow" should "refuse current_query() on the next statement" in {
+    ready()
+    val sql = "SELECT current_query() AS q"
+    allowed("quinn", "lake", sql)
+    // The same plan again: the node answers from its verdict cache.
+    val cached = stack.relay.decideCalls
+    allowed("quinn", "lake", sql)
+    withClue("decision calls for a plan the node had cached: ") {
+      stack.relay.decideCalls shouldBe cached
+    }
+    // A mask on a table the statement does not read: the policy version moves, so the node asks
+    // again, and every policy counts.
+    val policy = stack
+      .post(
+        "/api/role/column-policy/create",
+        obj(
+          "roleId"       -> s(quinnRole),
+          "catalogName"  -> s(lake),
+          "schemaName"   -> s("main"),
+          "tableName"    -> s("orders"),
+          "columnName"   -> s("v"),
+          "action"       -> s("mask"),
+          "transformSql" -> s("'***'")
+        )
+      )
+      .hcursor
+      .get[String]("id")
+      .fold(e => throw e, identity)
+    try refused("quinn", "lake", sql, TextRefusal)
+    finally stack.post("/api/role/column-policy/delete", obj("id" -> s(policy)))
+    allowed("quinn", "lake", sql)
   }
 
   // ---------- policy version, decision outage, session context ----------

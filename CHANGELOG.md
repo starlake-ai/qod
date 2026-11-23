@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Security
+
+- **The functions that show the running statement's text are refused to principals holding column
+  or row policies.** The gateway applies such a principal's masks and row filters by rewriting the
+  statement, so `current_query()`, its `pg_catalog.current_query()` macro,
+  `duckdb_prepared_statements()` and the `pg_catalog.pg_prepared_statements` view would show the
+  policies' expressions (a mask's salt, a row filter's predicate). The node's decision now refuses
+  them to any principal holding at least one column or row policy, whatever table the policy
+  names, whether the statement calls them directly or reaches them through a view, a secure view,
+  a macro or a stored expression (a generated column, a default, a CHECK constraint): `QoD:
+  function <name> is not available to principals with column or row policies`, a permanent
+  refusal booked as a denial. Principals without policies and superusers keep them. Prepared
+  statements themselves are unaffected.
+
 ## 0.14.2
 
 ### Upgrading
