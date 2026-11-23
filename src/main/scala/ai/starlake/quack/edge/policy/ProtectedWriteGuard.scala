@@ -278,33 +278,43 @@ final class ProtectedWriteGuard(
               .map(_.columnName)
             val rowHit = reads.exists(t => covers(rowKeys, t))
             val colHit = reads.exists(t => covers(colKeys, t))
-            // `#n` numbers the target's columns: those of the one column-policy target, read
-            // only when a positional reference needs them (none known reads as a refusal).
-            def targetColumns(): List[String] =
-              colTarget match
-                case List(t) =>
-                  catalog
-                    .columnsOf(
-                      eff.user.tenant.getOrElse(""),
-                      ctx.pool,
-                      t.database,
-                      t.schema,
-                      t.table
-                    )
-                    .unsafeRunSync()
-                case _ => Nil
-            (ddlTarget, rowTarget) match
-              case (Some(t), _) => GuardOutcome.Deny(ddlDeny(t.table))
-              case (_, Some(t)) => GuardOutcome.Deny(rowWriteDeny(t.table))
-              case _            =>
+            // Review round 3: a write touching a policy table takes no `#n`, whose numbering
+            // depends on the clause and on the INSERT's shape (an upsert numbers the proposed
+            // row, as wide as its source, before the stored one).
+            val positionalTarget =
+              if ast.isInstanceOf[Select] || !DirectWrites.hasPositional(ast) then None
+              else
+                (writes ++ reads.toList.sortBy(names) ++
+                  e.accesses.filter(_.verb == Verb.Ddl).map(_.table).toList.sortBy(names))
+                  .find(t => covers(rowKeys, t) || covers(colKeys, t))
+            (DirectWrites.droppedSchema(ast, ctx.defaultDatabase), ddlTarget, rowTarget) match
+              case (Some((cat, sch)), _, _) if schemaCovered(cat, sch, rowKeys ++ colKeys) =>
+                GuardOutcome.Deny(schemaDeny(sch))
+              case (_, Some(t), _) => GuardOutcome.Deny(ddlDeny(t.table))
+              case (_, _, Some(t)) => GuardOutcome.Deny(rowWriteDeny(t.table))
+              case _               =>
                 if rowHit then GuardOutcome.Deny(deny(firstCovered(reads, rowKeys)))
+                else if positionalTarget.isDefined then
+                  GuardOutcome.Deny(positionalDeny(positionalTarget.get.table))
                 else if colTarget.nonEmpty &&
-                  DirectWrites.readsProtectedColumn(ast, protectedColumns, () => targetColumns())
+                  DirectWrites.readsProtectedColumn(ast, protectedColumns)
                 then GuardOutcome.Deny(colWriteDeny(colTarget.head.table))
                 else if colHit then preciseCls(ast, eff, ctx, firstCovered(reads, colKeys), deny)
                 else extractedRest(e, clientDataScans)
       case _: StatementResult.ParseError  => GuardOutcome.Deny(IncompleteDeny)
       case _: StatementResult.ControlFlow => GuardOutcome.Allow
+
+  /** Whether a policy key may cover a table of schema `sch` in catalog `cat` (None: any catalog).
+    */
+  private def schemaCovered(
+      cat: Option[String],
+      sch: String,
+      keys: List[(String, String, String)]
+  ): Boolean =
+    keys.exists { (c, s, _) =>
+      (s == "*" || ai.starlake.sql.IdentifierFold.same(s, sch)) &&
+      cat.forall(k => c == "*" || ai.starlake.sql.IdentifierFold.same(c, k))
+    }
 
   /** The tables a write's RETURNING and ON CONFLICT clauses read, qualified like the extraction's,
     * which does not walk them; None when that read is incomplete.
@@ -410,6 +420,14 @@ final class ProtectedWriteGuard(
     s"access denied: $table is protected by a column policy, and a write to it cannot read a " +
       "masked or denied column of it (by name, by position, through its whole row, a star or " +
       "COLUMNS(...)) in any clause: WHERE, ON, SET values, RETURNING or ON CONFLICT"
+
+  private def positionalDeny(table: String): String =
+    s"access denied: $table is protected by a column/row policy, and a write touching it " +
+      "cannot use a positional reference (#n); name the columns instead"
+
+  private def schemaDeny(schema: String): String =
+    s"access denied: schema $schema holds a table protected by a column/row policy, and " +
+      "dropping it is refused"
 
   private def ddlDeny(table: String): String =
     s"access denied: $table is protected by a column/row policy, and altering, dropping or " +

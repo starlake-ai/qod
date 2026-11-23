@@ -18,19 +18,28 @@
   the table it writes, in its WHERE, ON or SET clauses, its RETURNING or its ON CONFLICT clause,
   read the column's true value. It is now refused with `<table> is protected by a column policy,
   and a write to it cannot read a masked or denied column`. This covers the column by name,
-  qualified by the table, its schema or its catalog; by its position (`#n`); and through the
-  table's whole row, a star or `COLUMNS(...)`. A write that assigns that column without reading
-  it stays allowed, and so does one that reads only the table's other columns or the columns of
-  other tables.
+  qualified by the table, its schema or its catalog; as the receiver of a method call
+  (`email.upper()`, in any clause, aggregate and window forms included); and through the table's
+  whole row, a star or `COLUMNS(...)`. A write that assigns that column without reading it stays
+  allowed, and so does one that reads only the table's other columns or the columns of other
+  tables.
+- **A policy holder's write that touches a table their row or column policies cover can no longer
+  use a positional reference (`#n`).** DuckDB numbers `#n` differently by clause, and in an
+  upsert over the proposed row first, which is as wide as the INSERT's source, so `#3` could name
+  a protected column. Every `#n` in such a write is refused, wherever it appears, with `<table> is
+  protected by a column/row policy, and a write touching it cannot use a positional reference
+  (#n)`; name the columns instead.
 - **A policy holder can no longer alter, drop or replace a table their own row or column
   policies cover.** A rename of the table or of a column moved it out from under its policies,
   `ALTER COLUMN ... TYPE ... USING` copied a protected value into another column, and DROP or
   `CREATE OR REPLACE` (CTAS included) removed the rows a row policy hides. Every ALTER TABLE
   form, DROP and `CREATE OR REPLACE` (of a table or a view) of such a table is now refused, with
   `<table> is protected by a column/row policy, and altering, dropping or replacing it is
-  refused`. A CREATE that replaces nothing is allowed. COMMENT ON and CREATE INDEX on such a
-  table were already refused to policy holders, as statements the guard cannot analyse.
-  Principals with no policy on the table are unaffected.
+  refused`. `DROP SCHEMA` (with or without CASCADE) of a schema that may hold such a table is
+  refused too, with `schema <schema> holds a table protected by a column/row policy`; a policy
+  whose schema is a wildcard covers every schema. A CREATE that replaces nothing is allowed.
+  COMMENT ON and CREATE INDEX on such a table were already refused to policy holders, as
+  statements the guard cannot analyse. Principals with no policy on the table are unaffected.
 - A write's RETURNING and ON CONFLICT clauses now count as reads for the protected-write guard,
   so one that reads a protected table is refused like any other read into a write (DuckDB 2.0
   refuses a subquery there too).

@@ -1842,12 +1842,12 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       }
     }
 
-  it should "refuse a column-policy holder's positional or qualified read of the masked column" in:
+  it should "refuse a column-policy holder's qualified or method-call read of the masked column" in:
     List(
-      "UPDATE main.customer SET c_id = c_id RETURNING #2",
-      "DELETE FROM main.customer WHERE #2 LIKE 'a%'",
       "UPDATE main.customer SET c_id = 0 FROM main.scratch AS main " +
-        "WHERE main.customer.c_email = 'x'"
+        "WHERE main.customer.c_email = 'x'",
+      "UPDATE main.customer SET c_id = c_id RETURNING c_email.upper()",
+      "DELETE FROM main.customer WHERE c_email.starts_with('a')"
     ).foreach { sql =>
       val (router, capturedSql, _) =
         setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)
@@ -1859,6 +1859,42 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         capturedSql() shouldBe ""
       }
     }
+
+  it should "refuse every positional reference in a policy holder's write on its policy table" in:
+    for
+      eff <- List(
+        effWithPolicies(List(maskCustomerEmail)),
+        effWithRowPolicies(List(rowPolicyCustomer))
+      )
+      sql <- List(
+        "UPDATE main.customer SET c_id = c_id RETURNING #2",
+        "DELETE FROM main.customer WHERE #1 = 2",
+        "INSERT INTO main.customer SELECT #1, 'e', 'X' FROM main.scratch"
+      )
+    do
+      val (router, capturedSql, _) =
+        setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)
+      val out = router.execute("pw-r3-p", "alice", poolKey, sql, Some(eff)).unsafeRunSync()
+      withClue(sql) {
+        out shouldBe a[Left[?, ?]]
+        capturedSql() shouldBe ""
+      }
+
+  it should "refuse a policy holder's DROP SCHEMA of the schema of its policy table" in:
+    for
+      eff <- List(
+        effWithPolicies(List(maskCustomerEmail)),
+        effWithRowPolicies(List(rowPolicyCustomer))
+      )
+      sql <- List("DROP SCHEMA main CASCADE", "DROP SCHEMA IF EXISTS main CASCADE")
+    do
+      val (router, capturedSql, _) =
+        setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)
+      val out = router.execute("pw-r3-s", "alice", poolKey, sql, Some(eff)).unsafeRunSync()
+      withClue(sql) {
+        out.left.toOption.get.reason should include("schema main holds a table protected")
+        capturedSql() shouldBe ""
+      }
 
   it should "refuse a policy holder's ALTER, DROP and CREATE OR REPLACE of its table (D29)" in:
     for

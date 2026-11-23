@@ -45,7 +45,10 @@ class ProtectedWriteGuardDirectWriteSpec extends AnyFlatSpec with Matchers:
   private val RowWrite   = "writes to a row-policy table are refused"
   private val ColWrite   = "cannot read a masked or denied column"
   private val ReadInto   = "cannot be read into a write statement"
-  private val DdlRefusal =
+  private val Positional =
+    "cannot use a positional reference (#n); name the columns instead"
+  private val SchemaRefusal = "holds a table protected by a column/row policy"
+  private val DdlRefusal    =
     "is protected by a column/row policy, and altering, dropping or replacing it is refused"
 
   // ---- forms ----
@@ -115,6 +118,8 @@ class ProtectedWriteGuardDirectWriteSpec extends AnyFlatSpec with Matchers:
     Refused("INSERT OR REPLACE INTO secret VALUES (2, 'alice', 0, 0, 'z')", RowWrite, leaks = true),
     Refused("INSERT INTO secret VALUES (3, 'alice', 30, 31, 'c@x') RETURNING *", RowWrite, false),
     Refused("TRUNCATE secret", RowWrite, leaks = true),
+    // A plain INSERT stays allowed, but not with a positional reference (round 3).
+    Refused("INSERT INTO secret SELECT #1 + 10, 'alice', 0, 0, 'q' FROM other", Positional, false),
     // Reading the row-policy table as a source stays refused with its own reason.
     Refused(
       "MERGE INTO other t USING secret s ON t.id = s.id WHEN MATCHED THEN UPDATE SET v = s.a",
@@ -220,54 +225,119 @@ class ProtectedWriteGuardDirectWriteSpec extends AnyFlatSpec with Matchers:
       ReadInto,
       leaks = false
     )
-  ) ++ positionalRefused ++ qualifiedRefused
+  ) ++ positionalRefused ++ qualifiedRefused ++ methodRefused ++ positionalNowRefused
+
+  /** Review round 3, R2-C1: DuckDB reads `email.upper()` as `upper(email)`, a method call whose
+    * receiver JSqlParser keeps in the function's name, not as a column.
+    */
+  private def methodRefused = List(
+    Refused("UPDATE secret SET a = a RETURNING email.upper()", ColWrite, leaks = true),
+    Refused("UPDATE secret AS s SET a = a RETURNING s.email.upper()", ColWrite, leaks = true),
+    Refused("UPDATE secret SET a = a WHERE email.starts_with('bob') RETURNING id", ColWrite, true),
+    Refused("UPDATE secret SET owner = email.lower() WHERE id = 2", ColWrite, leaks = true),
+    Refused("DELETE FROM secret WHERE email.contains('bob')", ColWrite, leaks = true),
+    Refused(
+      "MERGE INTO secret t USING other o ON t.id = o.id " +
+        "WHEN MATCHED AND t.email.contains('bob') THEN DELETE",
+      ColWrite,
+      leaks = true
+    ),
+    Refused("UPDATE secret SET a = a RETURNING email.lower().upper()", ColWrite, leaks = true),
+    Refused(
+      "INSERT INTO secret VALUES (2, 'bob', 0, 0, 'z') ON CONFLICT (id) " +
+        "DO UPDATE SET a = secret.email.length()",
+      ColWrite,
+      leaks = true
+    ),
+    Refused(
+      "INSERT INTO secret VALUES (2, 'bob', 0, 0, 'z') ON CONFLICT (id) " +
+        "DO UPDATE SET a = 1 WHERE secret.email.starts_with('bob')",
+      ColWrite,
+      leaks = true
+    ),
+    Refused(
+      "UPDATE secret SET a = a WHERE EXISTS (SELECT 1 WHERE email.contains('bob')) RETURNING id",
+      ColWrite,
+      leaks = true
+    ),
+    // DuckDB refuses these as written; the guard refuses them first.
+    Refused("UPDATE secret SET a = a RETURNING main.secret.email.upper()", ColWrite, false),
+    Refused(
+      "UPDATE secret SET a = a WHERE id = 2 RETURNING email.count() OVER ()",
+      ColWrite,
+      false
+    ),
+    Refused(
+      "UPDATE secret SET a = (SELECT email.count() FILTER (WHERE id > 0)) WHERE id = 2",
+      ColWrite,
+      leaks = false
+    ),
+    Refused(
+      "UPDATE secret SET owner = (SELECT email.string_agg(',') WITHIN GROUP (ORDER BY id)) " +
+        "WHERE id = 2",
+      ColWrite,
+      leaks = false
+    )
+  )
+
+  /** Review round 3, R2-C2: a policy holder's write that touches a policy table takes no `#n` at
+    * all, the forms round 2 resolved to an unprotected column included.
+    */
+  private def positionalNowRefused = List(
+    Refused("UPDATE secret SET a = #3 WHERE id = 1", Positional, leaks = false),
+    Refused("UPDATE secret SET a = 0 WHERE id = 2 RETURNING #1", Positional, leaks = false),
+    Refused("DELETE FROM secret WHERE #1 = 2", Positional, leaks = false),
+    Refused("UPDATE secret SET a = 0 WHERE id IN (SELECT #1 FROM other)", Positional, false),
+    Refused("INSERT INTO secret SELECT #1 + 10, 'x', 0, 0, 'q' FROM other", Positional, false),
+    Refused("INSERT INTO other SELECT #1 + 10, 0, 'k', 'e' FROM secret", Positional, false)
+  )
 
   /** Review round 2, C1: DuckDB numbers `#n` over the target's columns (and, outside RETURNING,
     * over the target and the write's sources together), so `#5` here is `email`.
     */
   private def positionalRefused = List(
-    Refused("UPDATE secret SET a = a RETURNING #5", ColWrite, leaks = true),
-    Refused("UPDATE secret SET a = a WHERE #5 = 'bob@x' RETURNING id", ColWrite, leaks = true),
-    Refused("UPDATE secret SET owner = #5", ColWrite, leaks = true),
-    Refused("DELETE FROM secret WHERE #5 LIKE 'bob%'", ColWrite, leaks = true),
+    Refused("UPDATE secret SET a = a RETURNING #5", Positional, leaks = true),
+    Refused("UPDATE secret SET a = a WHERE #5 = 'bob@x' RETURNING id", Positional, leaks = true),
+    Refused("UPDATE secret SET owner = #5", Positional, leaks = true),
+    Refused("DELETE FROM secret WHERE #5 LIKE 'bob%'", Positional, leaks = true),
     Refused(
       "INSERT INTO secret VALUES (2, 'bob', 0, 0, 'z') ON CONFLICT (id) DO UPDATE SET a = 1 " +
         "RETURNING #5",
-      ColWrite,
+      Positional,
       leaks = true
     ),
     Refused(
       "MERGE INTO secret t USING other o ON t.id = o.id WHEN MATCHED THEN UPDATE SET a = 2 " +
         "RETURNING #5",
-      ColWrite,
+      Positional,
       leaks = true
     ),
     Refused(
       "UPDATE secret SET a = a FROM other o WHERE o.id = secret.id AND #5 = 'bob@x' " +
         "RETURNING secret.id",
-      ColWrite,
+      Positional,
       leaks = true
     ),
     Refused(
       "DELETE FROM secret USING other o WHERE o.id = secret.id AND #5 LIKE 'b%'",
-      ColWrite,
+      Positional,
       leaks = true
     ),
     Refused(
       "MERGE INTO secret t USING other o ON t.id = o.id AND #9 = 'bob@x' " +
         "WHEN MATCHED THEN UPDATE SET a = 3",
-      ColWrite,
+      Positional,
       leaks = true
     ),
     // `#5` there is the proposed row's value; refused all the same, as it names the column.
     Refused(
       "INSERT INTO secret VALUES (2, 'bob', 0, 0, 'z') ON CONFLICT (id) DO UPDATE SET a = length(#5)",
-      ColWrite,
+      Positional,
       leaks = false
     ),
     Refused(
       "UPDATE secret SET a = 0 WHERE EXISTS (SELECT 1 WHERE #5 = 'bob@x')",
-      ColWrite,
+      Positional,
       leaks = false
     )
   )
@@ -339,11 +409,12 @@ class ProtectedWriteGuardDirectWriteSpec extends AnyFlatSpec with Matchers:
       "WHERE s.id = secret.id",
     "DELETE FROM secret USING (SELECT id, email FROM other) o WHERE o.id = secret.id " +
       "AND o.email = 'y@o'",
-    // A positional reference that names an unprotected column, or a column of another table.
-    "UPDATE secret SET a = #3 WHERE id = 1",
-    "UPDATE secret SET a = 0 WHERE id = 2 RETURNING #1",
-    "DELETE FROM secret WHERE #1 = 2",
-    "UPDATE secret SET a = 0 WHERE id IN (SELECT #1 FROM other)",
+    // A function qualified by `main` or `system.main`, or a method call on an unprotected column
+    // or on another table's column.
+    "UPDATE secret SET owner = main.upper(owner) WHERE id = 1",
+    "UPDATE secret SET owner = system.main.upper(owner) WHERE id = 1",
+    "UPDATE secret SET owner = owner.upper() WHERE id = 1",
+    "UPDATE secret SET a = o.v FROM other o WHERE o.k.starts_with('a') AND o.id = secret.id",
     // Qualified names that cannot be the protected column.
     "UPDATE secret SET a = 0 WHERE main.secret.id = 2",
     "UPDATE secret SET a = o.v FROM other AS o WHERE o.email = 'y@o' AND o.id = secret.id"
@@ -620,6 +691,80 @@ class ProtectedWriteGuardDirectWriteSpec extends AnyFlatSpec with Matchers:
       withClue(sql)(guarded(sql, e) shouldBe GuardOutcome.Allow)
     (ddlRefused.map(_.sql) ++ ddlUnanalysed).foreach { sql =>
       withClue(sql)(guarded(sql, effWith()) shouldBe GuardOutcome.Allow)
+    }
+  }
+
+  "a positional reference in an upsert" should "be refused, as DuckDB numbers it over the proposed row first" in {
+    // A mask on `owner`, not the table's last column: `excluded` holds only `id` here, so `#3`
+    // is the stored row's `owner` (round 2 resolved it to `a`).
+    val ownerEff = effWith(columnPolicies =
+      List(RoleColumnPolicy("co", "r", "*", "main", "secret", "owner", "mask", Some("'***'")))
+    )
+    val oracle =
+      "INSERT INTO secret BY NAME SELECT 2 AS id ON CONFLICT (id) DO UPDATE SET a = 95 " +
+        "WHERE #3 = 'bob' RETURNING a"
+    val copy =
+      "INSERT INTO secret BY NAME SELECT 2 AS id ON CONFLICT (id) DO UPDATE SET b = length(#3)"
+    List(oracle, copy).foreach { sql =>
+      withClue(sql) {
+        guarded(sql, ownerEff) match
+          case GuardOutcome.Deny(reason) => reason should include(Positional)
+          case other                     => fail(s"expected a refusal, got $other")
+        piped(sql, ownerEff) shouldBe a[Left[?, ?]]
+      }
+    }
+    // DuckDB: the WHERE matches bob's hidden `owner`, which a masked copy would not.
+    val real = withDuckDb("memory") { conn =>
+      seed(conn, maskedEmail = false, rowFiltered = false)
+      query(conn, oracle)
+    }
+    val masked = withDuckDb("memory") { conn =>
+      seed(conn, maskedEmail = false, rowFiltered = false)
+      exec(conn, "UPDATE main.secret SET owner = '***'")
+      query(conn, oracle)
+    }
+    real shouldBe List(List("95"))
+    masked shouldBe Nil
+  }
+
+  "DROP SCHEMA" should "be refused when the schema may hold a table the principal's policies cover" in {
+    val inS2 = List(
+      effWith(rowPolicies = List(RoleRowPolicy("rp2", "r", "*", "s2", "t", "x = 1"))),
+      effWith(columnPolicies =
+        List(RoleColumnPolicy("cp2", "r", "*", "s2", "t", "x", "mask", Some("0")))
+      ),
+      effWith(rowPolicies = List(RoleRowPolicy("rp3", "r", "*", "*", "t", "x = 1")))
+    )
+    for
+      e   <- inS2
+      sql <- List(
+        "DROP SCHEMA s2 CASCADE",
+        "DROP SCHEMA IF EXISTS s2 CASCADE",
+        "DROP SCHEMA memory.s2 CASCADE",
+        "DROP SCHEMA \"S2\" CASCADE",
+        "DROP SCHEMA s2"
+      )
+    do
+      withClue(sql) {
+        guarded(sql, e) match
+          case GuardOutcome.Deny(reason) => reason should include(SchemaRefusal)
+          case other                     => fail(s"expected a refusal, got $other")
+        piped(sql, e) match
+          case Left(RouterFailure.AccessDenied(reason)) =>
+            reason.toLowerCase should include("schema s2")
+          case other => fail(s"expected a refusal, got $other")
+      }
+    guarded("DROP SCHEMA main CASCADE", rowEff) shouldBe a[GuardOutcome.Deny]
+    guarded("DROP SCHEMA s3 CASCADE", inS2.head) shouldBe GuardOutcome.Allow
+    guarded("DROP SCHEMA s2 CASCADE", effWith()) shouldBe GuardOutcome.Allow
+    // DuckDB: CASCADE drops the schema's tables, hidden rows and all.
+    withDuckDb("memory") { conn =>
+      exec(conn, "CREATE SCHEMA s2")
+      exec(conn, "CREATE TABLE s2.t (x INTEGER)")
+      exec(conn, "INSERT INTO s2.t VALUES (1), (2)")
+      exec(conn, "DROP SCHEMA s2 CASCADE")
+      query(conn, "SELECT count(*) FROM duckdb_tables() WHERE schema_name = 's2'") shouldBe
+        List(List("0"))
     }
   }
 
