@@ -398,7 +398,9 @@ final class BranchHandlers(
                   cs,
                   Some(m),
                   a.actor,
-                  t => a.superuser || t.counted
+                  t => a.superuser || t.counted,
+                  // A proposal's reply carries the numbers it just computed.
+                  BranchChangesResponse.RowConflictsCurrent
                 )
               )
             })
@@ -423,7 +425,15 @@ final class BranchHandlers(
           BranchMergeResponse(
             entry(b),
             BranchHandlers.mergeEntry(m, a.superuser, a.actor),
-            BranchHandlers.changesResponse(b, cs, Some(m), a.actor, _ => a.superuser)
+            BranchHandlers.changesResponse(
+              b,
+              cs,
+              Some(m),
+              a.actor,
+              _ => a.superuser,
+              // A merge's reply carries the numbers its own run computed.
+              BranchChangesResponse.RowConflictsCurrent
+            )
           )
         })
     }
@@ -564,7 +574,7 @@ object BranchHandlers:
       proposal: Option[BranchMerge],
       actor: BranchActor,
       mayCount: TableChange => Boolean,
-      rowConflictsStatus: String = BranchChangesResponse.RowConflictsCurrent
+      rowConflictsStatus: String
   ): BranchChangesResponse =
     val rows =
       proposal.toList.flatMap(m => RowCounts.listFromJson(m.rowConflictsJson).getOrElse(Nil))

@@ -292,13 +292,27 @@ class BranchHandlersSpec extends AnyFlatSpec with Matchers:
       .flatMap(_.hcursor.get[String]("table").toOption)
 
   "a change set" should "show an admin every table, and a non-admin only those they see, counting the rest" in {
-    val asAdmin = BranchHandlers.changesResponse(aBranch, aChangeSet, None, Admin, _ => true)
+    val asAdmin = BranchHandlers.changesResponse(
+      aBranch,
+      aChangeSet,
+      None,
+      Admin,
+      _ => true,
+      BranchChangesResponse.RowConflictsNotComputed
+    )
     asAdmin.tables.map(_.table) shouldBe List("seen", "hidden", "gone")
     asAdmin.conflicts.map(_.table) shouldBe List("seen", "gone")
     asAdmin.unsupported shouldBe aChangeSet.unsupported
     asAdmin.otherTables shouldBe 0
 
-    val asPlain = BranchHandlers.changesResponse(aBranch, aChangeSet, None, Plain, _ => true)
+    val asPlain = BranchHandlers.changesResponse(
+      aBranch,
+      aChangeSet,
+      None,
+      Plain,
+      _ => true,
+      BranchChangesResponse.RowConflictsNotComputed
+    )
     asPlain.tables.map(_.table) shouldBe List("seen")
     asPlain.conflicts.map(_.table) shouldBe List("seen")
     // A raw verb can name a view or a macro.
@@ -312,7 +326,14 @@ class BranchHandlersSpec extends AnyFlatSpec with Matchers:
 
   "a table's row numbers" should "show a viewer who may count it, whoever they are" in {
     def numbers(actor: BranchActor) = BranchHandlers
-      .changesResponse(aBranch, aChangeSet, Some(aProposal), actor, _ => true)
+      .changesResponse(
+        aBranch,
+        aChangeSet,
+        Some(aProposal),
+        actor,
+        _ => true,
+        BranchChangesResponse.RowConflictsCurrent
+      )
       .tables
       .find(_.table == "seen")
       .flatMap(_.rowConflicts)
@@ -325,7 +346,14 @@ class BranchHandlersSpec extends AnyFlatSpec with Matchers:
     // `hasConflicts` alone is an equality oracle for a non-admin under a mask or a row policy: a key
     // on the masked column, or an UPDATE of a cell main also changed, compared as the system.
     def row(actor: BranchActor) = BranchHandlers
-      .changesResponse(aBranch, aChangeSet, Some(aProposal), actor, _ => false)
+      .changesResponse(
+        aBranch,
+        aChangeSet,
+        Some(aProposal),
+        actor,
+        _ => false,
+        BranchChangesResponse.RowConflictsCurrent
+      )
       .tables
       .find(_.table == "seen")
       .get
