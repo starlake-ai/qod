@@ -5,7 +5,6 @@ import ai.starlake.quack.edge.rls.SqlCommentScan
 import net.sf.jsqlparser.expression.Expression
 import net.sf.jsqlparser.expression.{Function => SqlFunction}
 import net.sf.jsqlparser.parser.CCJSqlParserUtil
-import net.sf.jsqlparser.schema.Column
 import net.sf.jsqlparser.statement.select.Select
 
 import scala.jdk.CollectionConverters._
@@ -16,8 +15,10 @@ import scala.util.{Failure, Success, Try}
   *
   * A `transform_sql` value must be ONE scalar DuckDB expression that:
   *   1. Parses via JSqlParser's `parseExpression` entry point.
-  *   2. References only the protected column (every Column node has name == protectedColumn,
-  *      case-insensitive).
+  *   2. References only the protected column, read as the rewriter reads it when it splices the
+  *      mask ([[ResidualColumns.references]]: every column node outside a lambda's parameters,
+  *      every time keyword but a SQL value function's call, no column reference held as another
+  *      node), names compared as DuckDB folds them.
   *   3. Contains no subqueries (parenthesed SELECTs).
   *   4. Calls no side-effect or escape functions (denylist + `pragma_*` prefix).
   *   5. Is bounded in size (<= 1024 chars in canonical form).
@@ -49,6 +50,8 @@ object TransformSqlValidator:
     "pg_read_binary_file"
   )
 
+  private def unquote(s: String): String = ai.starlake.sql.QuotedIdentifier.unquote(s)
+
   def validate(transformSql: String, protectedColumn: String): Result =
     val trimmed = Option(transformSql).map(_.trim).getOrElse("")
     if trimmed.isEmpty then return Invalid("transformSql is empty")
@@ -70,11 +73,33 @@ object TransformSqlValidator:
       case Failure(ex) => return Invalid(s"transformSql does not parse: ${ex.getMessage}")
 
     val violations = scala.collection.mutable.ListBuffer.empty[String]
+    // Every column reference of the expression, as the rewriter reads it when it splices the mask:
+    // one walk for both, so a mask valid here is one the rewriter applies (a lambda's parameter is
+    // no column; a time keyword or a node JSqlParser makes of a column reference is read as DuckDB
+    // reads it).
+    val stored = Try(ResidualColumns.parseStoredExpression(trimmed)) match
+      case Success(e)                                          => e
+      case Failure(e: ResidualColumns.StoredExpressionRefused) => return Invalid(e.reason)
+      case Failure(ex) => return Invalid(s"transformSql does not parse: ${ex.getMessage}")
+    val references                  = ResidualColumns.references(stored)
+    def protectedName(name: String) =
+      ai.starlake.sql.IdentifierFold.same(unquote(name), unquote(protectedColumn))
+    def otherColumn(name: String) =
+      s"transformSql references column '$name' but the policy is on '$protectedColumn'"
+    references.columns.foreach { col =>
+      if !protectedName(col.getColumnName) then violations += otherColumn(col.getColumnName)
+    }
+    references.timeKeys.foreach { tk =>
+      SqlValueNames.reading(tk) match
+        case SqlValueNames.Reading.Reference(name) =>
+          if !protectedName(name) && SqlValueNames.functionCall(name).isEmpty then
+            violations += otherColumn(name)
+        case SqlValueNames.Reading.Aliased(name, _) => violations += otherColumn(name)
+        case SqlValueNames.Reading.Call             => ()
+    }
+    references.opaque.foreach(reason => violations += s"transformSql holds $reason")
+    references.unknown.foreach(cls => violations += s"transformSql holds a $cls node")
     walk(expr) {
-      case col: Column =>
-        if !ai.starlake.sql.IdentifierFold.same(col.getColumnName, protectedColumn) then
-          violations +=
-            s"transformSql references column '${col.getColumnName}' but the policy is on '$protectedColumn'"
       case _: Select =>
         // Select is the common supertype of PlainSelect, ParenthesedSelect, SetOperationList, etc.
         // Any SELECT inside an expression is a subquery - reject it.

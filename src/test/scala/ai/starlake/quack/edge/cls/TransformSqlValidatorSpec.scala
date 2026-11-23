@@ -77,3 +77,56 @@ class TransformSqlValidatorSpec extends AnyFlatSpec with Matchers:
   it should "accept a semicolon that appears inside a string literal" in {
     validate("concat('a;b', c_email)", "c_email") shouldBe a[Valid]
   }
+
+  // ---- the column check reads a mask as the rewriter splices it (review round 2, m1) ---------
+
+  it should "reject another column in every position the rewriter reads" in
+    List(
+      "CASE WHEN ssn IN (id) THEN '***' ELSE ssn END",
+      "CASE WHEN id IS NULL THEN '***' ELSE ssn END",
+      "CASE WHEN id BETWEEN 1 AND 2 THEN '***' END",
+      "CASE WHEN NOT id THEN '***' END",
+      "[id][1]",
+      "@id",
+      "CAST(current AS VARCHAR)",
+      "@ssn"
+    ).foreach { mask =>
+      withClue(mask)(validate(mask, "ssn") shouldBe a[Invalid])
+    }
+
+  it should "accept a lambda whose parameter shares or does not share the column's name" in {
+    validate("list_filter(l, lambda l: len(l) < 3)", "l") shouldBe a[Valid]
+    validate("list_filter(l, l -> len(l) < 3)", "l") shouldBe a[Valid]
+    validate("list_transform(l, lambda x: concat(x, '*'))", "l") shouldBe a[Valid]
+    validate("list_transform(l, x -> concat(x, '*'))", "l") shouldBe a[Valid]
+  }
+
+  it should "accept a SQL value function and a time keyword naming the column" in {
+    validate("CAST(current_date AS VARCHAR)", "ssn") shouldBe a[Valid]
+    validate("left(current_date, 2) || '***'", "current_date") shouldBe a[Valid]
+    validate("CASE WHEN \"SSN\" IS NULL THEN '***' END", "ssn") shouldBe a[Valid]
+  }
+
+  it should "reject a star, a COLUMNS(..) expression or a parameter (review round 3, m-r1)" in
+    List(
+      "concat(ssn, COLUMNS('id'))",
+      "COLUMNS('ss.*')",
+      "to_json(*)",
+      "struct_pack(*)",
+      "concat(ssn, $1)",
+      "concat(ssn, ?)"
+    ).foreach { mask =>
+      withClue(mask)(validate(mask, "ssn") shouldBe a[Invalid])
+    }
+
+  it should "read a mask in method form as DuckDB does (review round 5, R3-I1)" in {
+    List(
+      "secret.upper()",
+      "concat(ssn, secret.lower())",
+      "secret.max()",
+      "u.secret.upper()",
+      "ssn.max() FILTER (WHERE true)"
+    ).foreach(mask => withClue(mask)(validate(mask, "ssn") shouldBe a[Invalid]))
+    List("ssn.upper()", "ssn.left(2) || '***'", "main.upper(ssn)", "ssn.upper().lower()")
+      .foreach(mask => withClue(mask)(validate(mask, "ssn") shouldBe a[Valid]))
+  }

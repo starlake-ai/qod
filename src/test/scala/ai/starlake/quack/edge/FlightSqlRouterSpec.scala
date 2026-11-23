@@ -2086,10 +2086,42 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync()
     out shouldBe a[Left[?, ?]]
     out.left.get shouldBe a[RouterFailure.AccessDenied]
-    out.left.get.asInstanceOf[RouterFailure.AccessDenied].reason should include(
-      "row policy failed to apply"
-    )
+    val reason = out.left.get.asInstanceOf[RouterFailure.AccessDenied].reason
+    // The caller gets a reference to quote, never the policy, its role or its predicate.
+    reason should fullyMatch regex
+      "row policy failed to apply \\(ref [0-9a-f]{12}\\) - contact an administrator"
+    reason should not include "rp-bad"
+    reason should not include "a = 1"
+    router.history.snapshot(1).head.error shouldBe Some(reason)
     nodeCalled shouldBe false
+
+  it should "give the administrator the policy, role, table and columns under the caller's reference" in:
+    val d = ai.starlake.quack.edge.rls.RowPolicyRewriter.FailureDetail(
+      table = "acme_tpch.tpch1.customer",
+      policyIds = List("rp-1", "rp-2"),
+      roles = List("eu_readers"),
+      cause = ai.starlake.quack.edge.rls.RowPolicyRewriter.MissingColumnCause,
+      missingColumns = List("region")
+    )
+    val audit = FlightSqlRouter.rowPolicyFailureAudit("0123456789ab", "why", Some(d))
+    audit shouldBe Map(
+      "rowPolicyRef"            -> "0123456789ab",
+      "rowPolicyFailure"        -> "why",
+      "rowPolicyTable"          -> "acme_tpch.tpch1.customer",
+      "rowPolicies"             -> "rp-1,rp-2",
+      "rowPolicyRoles"          -> "eu_readers",
+      "rowPolicyCause"          -> "missing_column",
+      "rowPolicyMissingColumns" -> "region"
+    )
+    audit.keySet.intersect(FlightSqlRouter.ReservedAuditKeys) shouldBe empty
+    val line =
+      FlightSqlRouter.rowPolicyFailureLogLine("0123456789ab", poolKey, "alice", "why", Some(d))
+    line should include("(ref 0123456789ab)")
+    line should include("table=acme_tpch.tpch1.customer roles=eu_readers policies=rp-1,rp-2")
+    line should include("missingColumns=region")
+    // A failure outside one policy's wrap still carries the reference.
+    FlightSqlRouter.rowPolicyFailureAudit("0123456789ab", "why", None) shouldBe
+      Map("rowPolicyRef" -> "0123456789ab", "rowPolicyFailure" -> "why")
 
   // ---- ActiveStatementRegistry integration tests ----
 

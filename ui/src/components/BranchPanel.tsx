@@ -1,8 +1,8 @@
 import { CSSProperties, FormEvent, Fragment, useEffect, useState } from 'react';
 import { api } from '../api/client';
 import {
-  actionErrorText, alreadyMergedNote, branchCount, branchMergeCell, conflictPolicyText, diffChangeType,
-  noOpenProposal, proposalErrorNote, rowConflictsHint, rowConflictsText,
+  actionErrorText, alreadyMergedNote, branchCount, branchMergeCell, conflictPolicyText, countsTitle, diffChangeType,
+  noOpenProposal, proposalErrorNote, rowConflictsHint, rowConflictsNote, rowConflictsText,
 } from '../api/branchCounts';
 import { parseBranchKeys } from '../api/branchKeys';
 import { BranchNamePattern } from '../api/branchName';
@@ -230,6 +230,8 @@ function BranchDetail({ tenant, tenantDb, branch, refresh, onDiff }: {
     ? rowConflictsHint(changes.tables, detail.merges.find(m => m.status === 'proposed')?.onConflict)
     : null;
 
+  const conflictsNote = changes ? rowConflictsNote(changes.rowConflictsStatus, changes.tables) : null;
+
   return (
     <div style={{ padding: '0.5rem 0 0.75rem 1.5rem' }}>
       {error && <div className="login-err">Error: {error}</div>}
@@ -257,9 +259,9 @@ function BranchDetail({ tenant, tenantDb, branch, refresh, onDiff }: {
                   <tr>
                     <th align="left">Table</th>
                     <th align="left">Kind</th>
-                    <th align="right">Inserted</th>
-                    <th align="right">Deleted</th>
-                    <th align="right">Updated</th>
+                    <th align="right" title={countsTitle(changes.countsAre)}>Inserted</th>
+                    <th align="right" title={countsTitle(changes.countsAre)}>Deleted</th>
+                    <th align="right" title={countsTitle(changes.countsAre)}>Updated</th>
                     <th align="left">Merge</th>
                     <th align="left"></th>
                   </tr>
@@ -284,6 +286,7 @@ function BranchDetail({ tenant, tenantDb, branch, refresh, onDiff }: {
                 </tbody>
               </table>
             )}
+          {conflictsNote && <p className="subtle" style={{ margin: '8px 0 4px 0' }}>{conflictsNote}</p>}
           {changes.tables.some(t => t.rowConflicts) && (
             <div style={{ marginTop: 8 }}>
               <strong>Row merge, as proposed</strong>
