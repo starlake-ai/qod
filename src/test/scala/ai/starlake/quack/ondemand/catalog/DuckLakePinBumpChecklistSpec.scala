@@ -135,29 +135,30 @@ class DuckLakePinBumpChecklistSpec extends AnyFlatSpec with Matchers with Postgr
           schedCount.getLong(1) should be > 0L
         }
 
-        // Invariant A: EVERY sched row's schedule_start equality-joins the snapshot_time of its
-        // own triggering snapshot (same transaction). Compaction is not the only scheduler:
-        // flushing inlined deletes/updates rewrites a delete file and schedules the superseded
-        // one at the FLUSH snapshot (observed on 1.5.5, snapshot-mapped via LEFT JOIN). The sched
-        // CTE in listTableHistory relies on the strict-equality join attributing each row.
+        // Invariant A: EVERY sched row is written by the transaction that writes its own
+        // triggering snapshot, and that transaction writes exactly one snapshot, at or after the
+        // row's schedule_start (DuckDB 2.0.1 stamps snapshot_time with clock_timestamp() and
+        // schedule_start with NOW(), so they no longer equal). Compaction is not the only
+        // scheduler: flushing inlined deletes/updates rewrites a delete file and schedules the
+        // superseded one at the FLUSH snapshot (observed on 1.5.5). The sched CTE in
+        // listTableHistory relies on ScheduledSnapshotSql attributing each row.
         val orphans = st.executeQuery(
           """SELECT count(*) FROM ducklake_files_scheduled_for_deletion f
-            |LEFT JOIN ducklake_snapshot s ON s.snapshot_time = f.schedule_start
-            |WHERE s.snapshot_id IS NULL""".stripMargin
+            |WHERE (SELECT count(*) FROM ducklake_snapshot s
+            |        WHERE s.xmin = f.xmin AND s.snapshot_time >= f.schedule_start) <> 1""".stripMargin
         )
         orphans.next() shouldBe true
         withClue(
-          "schedule_start rows no longer match any snapshot_time exactly; " +
-            "the sched CTE equality join in listTableHistory silently loses filesRemoved. "
+          "a scheduled file no longer shares its transaction with exactly one snapshot; " +
+            "ScheduledSnapshotSql in listTableHistory misattributes or loses filesRemoved. "
         ) {
           orphans.getLong(1) shouldBe 0L
         }
 
         // The compaction snapshot itself must be among the schedulers.
         val mergeSched = st.executeQuery(
-          s"""SELECT count(*) FROM ducklake_files_scheduled_for_deletion f
-             |JOIN ducklake_snapshot s ON s.snapshot_time = f.schedule_start
-             |WHERE s.snapshot_id = $mergeSid""".stripMargin
+          s"""SELECT count(*) FROM (${DuckLakeCatalogReader.ScheduledSnapshotSql}) m
+             |WHERE m.snapshot_id = $mergeSid""".stripMargin
         )
         mergeSched.next() shouldBe true
         withClue("compaction no longer schedules its merged files at its own snapshot. ") {
@@ -168,9 +169,8 @@ class DuckLakePinBumpChecklistSpec extends AnyFlatSpec with Matchers with Postgr
         // listTableHistory SUMS tr (end_snapshot-keyed removals) and sched, so any overlap
         // double-counts filesRemoved. Compaction hard-deletes superseded data-file rows.
         val overlap = st.executeQuery(
-          """SELECT count(*) FROM (
-            |  SELECT DISTINCT s.snapshot_id FROM ducklake_files_scheduled_for_deletion f
-            |  JOIN ducklake_snapshot s ON s.snapshot_time = f.schedule_start
+          s"""SELECT count(*) FROM (
+            |  SELECT DISTINCT m.snapshot_id FROM (${DuckLakeCatalogReader.ScheduledSnapshotSql}) m
             |) sched JOIN ducklake_data_file df ON df.end_snapshot = sched.snapshot_id""".stripMargin
         )
         overlap.next() shouldBe true
