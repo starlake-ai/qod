@@ -411,6 +411,12 @@ MCP troubleshooting:
   fresh PAT.
 - **Tool missing from tools/list**: wrong tier - admin tools need an admin-owned PAT.
 - **run_sql denied**: the ACL message names the table and missing verb; fix the grant.
+- **A plain user's discovery tools** (`list_databases`, `list_tables`, `describe_table`,
+  `table_history`) show the databases of their tenant with a pool they may connect to, and
+  only the tables their grants cover for reading (`RO`, `RW` or `ALL`, as `SHOW TABLES`
+  lists them); any other table answers `not_found`. `no_pool_access`: no pool of that
+  database admits them. A row count of `-1` is withheld: the user holds a row policy, so
+  count with `run_sql`. `list_snapshots` needs an admin.
 - **"pool is resuming"**: the suspended pool is waking; retry in a few seconds.
 - Row caps: `run_sql` is truncated server-side at `QOD_MCP_MAX_ROWS` (default 500).
 
@@ -2251,7 +2257,12 @@ nothing, even of a table they altered on their own branch), and
 table, and a key on one as for a table not in the change set. They see a table's
 row numbers only when their own count of it succeeds, and the count of a user
 holding a column or row policy never does: such a user gets no `rowConflicts` at
-all. An OPA tenant's users see what their QoD grants cover for reading, as with
+all. Row conflicts come from a proposal only: `branch changes` says which in
+`rowConflictsStatus` (`current`, the open proposal's with main and the branch where
+it read them; `stale`, either moved since, so they are left out: propose again;
+`not_computed`, no open proposal), and its insert/delete/update counts are change
+events (`countsAre`), one per snapshot a row changed in, where a proposal's are net.
+An OPA tenant's users see what their QoD grants cover for reading, as with
 their `SHOW TABLES`, since OPA does not narrow those grants: nothing with no such
 grant, and every name on the default built-ins.
 `mergeable` is always the whole branch's, and a refusal's text can still name
