@@ -5,16 +5,23 @@
 ### Security
 
 - **The functions that show the running statement's text are refused to principals holding column
-  or row policies.** The gateway applies such a principal's masks and row filters by rewriting the
-  statement, so `current_query()`, its `pg_catalog.current_query()` macro,
-  `duckdb_prepared_statements()` and the `pg_catalog.pg_prepared_statements` view would show the
-  policies' expressions (a mask's salt, a row filter's predicate). The node's decision now refuses
-  them to any principal holding at least one column or row policy, whatever table the policy
-  names, whether the statement calls them directly or reaches them through a view, a secure view,
-  a macro or a stored expression (a generated column, a default, a CHECK constraint): `QoD:
-  function <name> is not available to principals with column or row policies`, a permanent
-  refusal booked as a denial. Principals without policies and superusers keep them. Prepared
-  statements themselves are unaffected.
+  or row policies, wherever a plan reaches them.** The gateway applies such a principal's masks and
+  row filters by rewriting the statement, so `current_query()`, its `pg_catalog.current_query()`
+  macro, `duckdb_prepared_statements()` and the `pg_catalog.pg_prepared_statements` view would show
+  the policies' expressions (a mask's salt, a row filter's predicate). The gateway's statement-text
+  screen already refused a statement whose own text names one of them; the node's decision now also
+  refuses them to any principal holding at least one column or row policy, whatever table the
+  policy names, when the plan reaches them: a direct call, a view or a secure view (one another
+  user created included), a generated column, a default, a CHECK constraint, a `query()` literal, a
+  `SET VARIABLE` value, a `LIMIT` or `OFFSET`. The refusal reads `QoD: function <name> is not
+  available to principals with column or row policies`, is permanent and is booked as a denial.
+  Principals without policies and superusers keep them.
+  - Not covered yet: an argument a table function evaluates while binding (`unnest(...)`,
+    `range(...)`, `json_each(...)` and the like) holds no call in the plan, so a view body or other
+    stored SQL calling one of these functions there is not refused. In the client's own statement
+    the gateway's statement-text screen refuses it.
+  - Prepared statements themselves are unaffected: FlightSQL prepared statements keep working for
+    policy holders, masks and row filters applying as before.
 
 ## 0.14.2
 
