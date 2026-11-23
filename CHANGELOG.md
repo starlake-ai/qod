@@ -252,6 +252,16 @@
   the Java runtime and DuckDB. The file replaces the default CAs, so it must hold the public ones
   too, and must be readable by the service user; `deploy/host/README.md`, "What needs the
   network", says which download reads what.
+- **`branch_changes` (and `GET .../changes`) no longer show missing or stale row conflicts as
+  current** (#298). Only a proposal computes row conflicts, so before one the reply had no
+  `rowConflicts` although main changed the same cell, and after an early one it kept that
+  proposal's numbers once main moved (the merge itself was refused, `409 conflicts_changed`). The
+  reply now carries `rowConflictsStatus`: `current` (the open proposal's, main and the branch
+  where it read them), `stale` (either moved since: the numbers are left out, propose again) or
+  `not_computed` (no open proposal). It also carries `countsAre: change_events`: its
+  `inserted` / `deleted` / `updated` count one event per snapshot a row changed in (a row set
+  back to its fork value still counts), where a proposal's counts are net. The `branch_changes`
+  and `diff` tool descriptions say so.
 - **The Quack door serves clients that send each statement as `<alias>.query('<sql>')`** (#299),
   such as Columnar's `quack` ADBC driver: they signed in, then every statement failed with
   `Catalog Error: Table Function with name query does not exist!`. The DuckDB client binds that

@@ -91,9 +91,13 @@ object BranchEndpoints:
       .description(
         "The branch's change set since its fork: touched tables classified as created, dropped, " +
           "recreated, modified or altered (with insert/delete/update counts unless counts=false), " +
-          "the conflicts against main, and the changes v1 cannot merge. `mergeable` means no " +
-          "table conflict and nothing unsupported: row conflicts are the merge's to decide, and " +
-          "the proposal shows them. Unless the caller is an admin, tables and conflicts name only " +
+          "the conflicts against main, and the changes v1 cannot merge. The counts are change " +
+          "events (countsAre: change_events), one per snapshot a row changed in; a proposal's " +
+          "are net. `mergeable` means no table conflict and nothing unsupported: row conflicts " +
+          "are the merge's to decide, and only a proposal computes them: rowConflictsStatus is " +
+          "current when they are the open proposal's and main and the branch have not moved " +
+          "since, stale when either has (they are left out: propose again), and not_computed " +
+          "with no open proposal. Unless the caller is an admin, tables and conflicts name only " +
           "the tables they hold a read grant on (RO, RW or ALL), as their SHOW TABLES does, " +
           "unsupported is empty, otherTables counts the rest, " +
           "and a table they may not count has no rowConflicts; `mergeable` stays the whole " +
