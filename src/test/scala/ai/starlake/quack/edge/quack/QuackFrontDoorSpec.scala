@@ -10,7 +10,7 @@ import ai.starlake.quack.model.*
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.rbac.{AuthorizedHandshake, EffectiveSet}
 import ai.starlake.quack.ondemand.runtime.QuackBackend
-import ai.starlake.quack.ondemand.state.{InMemoryControlPlaneStore, RbacUser}
+import ai.starlake.quack.ondemand.state.{InMemoryControlPlaneStore, RbacUser, RoleColumnPolicy}
 import ai.starlake.quack.ondemand.telemetry.EventJournal
 import ai.starlake.quack.ondemand.telemetry.testkit.RecordingTelemetryStore
 import ai.starlake.quack.spi.{ManagerEvent, ManagerEventSink}
@@ -113,6 +113,7 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
     @volatile var statementTransportFailures: Int = 0
     @volatile var abortsTx: Boolean               = false
     @volatile var fetchChunksBeforeEnd: Int       = 1
+    @volatile var fetchReply: Option[Array[Byte]] = None
     val posted: ArrayBuffer[Frame]                = ArrayBuffer.empty
     val prepared: ArrayBuffer[Prepared]           = ArrayBuffer.empty
     val prepareUris: ArrayBuffer[URI]             = ArrayBuffer.empty
@@ -207,7 +208,9 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
               aborted.getOrElse(failure.map(encodeError).getOrElse(prepareResp(prepareNeedsMore)))
             case Type.FetchRequest =>
               fetchesServed += 1
-              if fetchesServed <= fetchChunksBeforeEnd then fetchResp(true) else fetchResp(false)
+              fetchReply.getOrElse(
+                if fetchesServed <= fetchChunksBeforeEnd then fetchResp(true) else fetchResp(false)
+              )
             // The pinned node refuses CANCEL_REQUEST; a fake that accepted it would hide that.
             case Type.CancelRequest => encodeError("Unsupported message type for server")
             case _                  => success
@@ -254,7 +257,9 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
         */
       beforePick: NodeLoadTracker => Unit = _ => (),
       /** Told every manager event as it is emitted, on the emitting fiber. */
-      onEvent: ManagerEvent => Unit = _ => ()
+      onEvent: ManagerEvent => Unit = _ => (),
+      /** The column policies the session's principal holds. */
+      columnPolicies: List[RoleColumnPolicy] = Nil
   ): Fixture =
     val backend = new QuackBackend:
       def allowsLocalFiles = true
@@ -345,7 +350,7 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
       "alice",
       kind = if superuser then "admin" else "user"
     )
-    val eff       = EffectiveSet(user, Nil, Nil, Nil, Nil)
+    val eff       = EffectiveSet(user, Nil, Nil, Nil, Nil, columnPolicies = columnPolicies)
     val handshake = new EdgeHandshake(
       auth,
       lookupPool = (t, p) =>
@@ -512,6 +517,75 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
     fx.transport.prepareError = None
     fx.journal.drainNow()
     fx.store.events.map(e => (e.origin, e.outcome)).toList shouldBe List(("quack", "denied"))
+
+  "a FETCH's node error" should "reach a policy holder without the excerpt, others as sent" in:
+    // A policy holder's statement is the gateway's rewrite, which DuckDB's excerpt would quote.
+    val mask = RoleColumnPolicy("cp-1", "r-1", "*", "*", "t", "email", "mask", Some("'***'"))
+    val head = "Binder Error: Referenced column \"nonexist\" not found in FROM clause!"
+    val err  = encodeError(
+      s"$head\n\nLINE 1: ...FROM t AS __qod_rls WHERE region = 'EU') AS t WHERE nonexist = 1\n" +
+        "                                                         ^^^^^^^^"
+    )
+    def fetched(policies: List[RoleColumnPolicy]): Array[Byte] =
+      val fx = setup(columnPolicies = policies)
+      fx.transport.prepareNeedsMore = true
+      val connId = connect(fx)
+      prepare(fx, connId, "SELECT 1") shouldBe prepareResp(true)
+      fx.transport.fetchReply = Some(err)
+      val resp = fetch(fx, connId)
+      fx.sessions.get(connId).get.current.get() shouldBe None
+      resp
+    errorText(fetched(List(mask))) shouldBe head
+    fetched(Nil) shouldBe err
+
+  it should "reach a policy holder without the offsets its extra info carries, others as sent" in:
+    // Under errors_as_json a node's error keeps `position` and `location`, offsets into the
+    // rewrite, in its extra info (field 3), which the fetch relay copies.
+    val mask = RoleColumnPolicy("cp-1", "r-1", "*", "*", "t", "email", "mask", Some("'***'"))
+    def str(v: String): Array[Byte] =
+      val b = v.getBytes("UTF-8")
+      b.length.toByte +: b
+    def entry(k: String, v: String): Array[Byte] =
+      Array[Byte](0, 0) ++ str(k) ++ Array[Byte](1, 0) ++ str(v) ++ Array[Byte](-1, -1)
+    def withExtraInfo(entries: List[Array[Byte]]): Array[Byte] =
+      encodeHeader(Header(Type.ErrorResponse, "", InvalidIndex)) ++
+        Array[Byte](1, 0) ++ str("Referenced column \"nonexist\" not found") ++
+        Array[Byte](2, 0) ++ str("Binder") ++
+        Array[Byte](3, 0, entries.length.toByte) ++ entries.flatten ++ Array[Byte](-1, -1)
+    val subtype = entry("error_subtype", "COLUMN_NOT_FOUND")
+    val err     = withExtraInfo(
+      List(entry("location", "[97,8]"), subtype, entry("position", "97"), entry("name", "nonexist"))
+    )
+    def fetched(policies: List[RoleColumnPolicy]): Array[Byte] =
+      val fx = setup(columnPolicies = policies)
+      fx.transport.prepareNeedsMore = true
+      val connId = connect(fx)
+      prepare(fx, connId, "SELECT 1") shouldBe prepareResp(true)
+      fx.transport.fetchReply = Some(err)
+      val resp = fetch(fx, connId)
+      fx.sessions.get(connId).get.current.get() shouldBe None
+      resp
+    fetched(List(mask)).toList shouldBe
+      withExtraInfo(List(subtype, entry("name", "nonexist"))).toList
+    fetched(Nil) shouldBe err
+
+  it should "answer a policy holder a fixed text, never the bytes, when it cannot read them" in:
+    val mask = RoleColumnPolicy("cp-1", "r-1", "*", "*", "t", "email", "mask", Some("'***'"))
+    // An ERROR_RESPONSE whose field 9, unknown to this build, holds the statement's text.
+    val secret     = "LINE 1: SELECT 'SECRET'".getBytes("UTF-8")
+    val unreadable = encodeHeader(Header(Type.ErrorResponse, "", InvalidIndex)) ++
+      Array[Byte](9, 0, secret.length.toByte) ++ secret ++ Array[Byte](-1, -1)
+    def fetched(policies: List[RoleColumnPolicy]): Array[Byte] =
+      val fx = setup(columnPolicies = policies)
+      fx.transport.prepareNeedsMore = true
+      val connId = connect(fx)
+      prepare(fx, connId, "SELECT 1") shouldBe prepareResp(true)
+      fx.transport.fetchReply = Some(unreadable)
+      fetch(fx, connId)
+    val held = fetched(List(mask))
+    errorText(held) shouldBe ai.starlake.quack.edge.policy.StatementExcerpt.Unreadable
+    new String(held, "UTF-8") should not include "SECRET"
+    fetched(Nil) shouldBe unreadable
 
   it should "relay a client data scan, which only the front door can feed" in:
     // The front door is the one edge that relays SEND_DATA, so it alone lets a DuckDB 2.0

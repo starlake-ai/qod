@@ -1125,6 +1125,9 @@ final class FlightSqlRouter(
     // With the session's authorization context: the handle digests it and the decision endpoint
     // judges the statement's plan with it (MintedHandles).
     val principal = NodePrincipal.of(effectiveSet, poolKey, purpose)
+    // A policy holder's statement runs rewritten: its node errors are answered and recorded
+    // without DuckDB's excerpt of it (StatementExcerpt).
+    val excerptWithheld = ai.starlake.quack.edge.policy.StatementExcerpt.withheldFor(effectiveSet)
     // The text the active-statement registry shows (ActiveStatementHandlers.list, to the tenant's
     // admins): a system statement's values masked, as history and audit mask them (review M1).
     val activeSql =
@@ -1366,7 +1369,22 @@ final class FlightSqlRouter(
         ) match
           case None         => Right(rewrittenSql)
           case Some(reason) =>
-            val denial = s"policy rewrite: $reason"
+            // What the refusal quotes of the rewrite stays in the manager's log for a policy
+            // holder, whose answer and history leave it out. It is logged at ERROR, which the
+            // default log level keeps: the log is then the only place that names what the rewrite
+            // reached, and a row policy whose predicate reads another table is refused this way on
+            // every statement of its holders, so its author needs that list to see why. The
+            // reason can quote the caller's text, so the line has no control character.
+            val shown =
+              if excerptWithheld then
+                FlightSqlRouter.log.error(
+                  FlightSqlRouter.oneLogLine(
+                    s"policy rewrite refused for $user on $poolKey: $reason"
+                  )
+                )
+                ai.starlake.quack.edge.policy.RewriteScope.withoutDetail(reason)
+              else reason
+            val denial = s"policy rewrite: $shown"
             maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(denial))
             Left(RouterFailure.AccessDenied(s"access denied: $denial"))
 
@@ -1601,12 +1619,14 @@ final class FlightSqlRouter(
                                 internal = internal,
                                 prelude = prelude,
                                 patId = patId,
+                                excerptWithheld = excerptWithheld,
                                 recordOutcome = maybeRecord(_, _, _, _)
                               )
 
                           case NodeOutcome.Permanent(raw, latency) =>
                             stmtId.foreach(registry.deregister)
-                            val (unavailable, m) = readNodeError(nodeId, principal, raw)
+                            val (unavailable, m) =
+                              readNodeError(nodeId, principal, raw, excerptWithheld)
                             // The node's own refusal is a denial, journaled like the gateway's.
                             maybeRecord(nodeId, latency, nodeErrorStatus(m, unavailable), Some(m))
                             IO.pure(
@@ -1805,6 +1825,7 @@ final class FlightSqlRouter(
       internal: Boolean,
       prelude: Option[String],
       patId: Option[String],
+      excerptWithheld: Boolean,
       recordOutcome: (String, Long, String, Option[String]) => Unit
   ): IO[Either[RouterFailure, Routed[A]]] =
     supervisor.snapshot(poolKey) match
@@ -1850,7 +1871,7 @@ final class FlightSqlRouter(
                       else Left(FlightSqlRouter.outcomeUnknown(s"retry failed (transient): $m"))
                     case NodeOutcome.Permanent(raw, latency) =>
                       stmtId.foreach(registry.deregister)
-                      val (unavailable, m) = readNodeError(nodeId, principal, raw)
+                      val (unavailable, m) = readNodeError(nodeId, principal, raw, excerptWithheld)
                       // Booked against the node that answered, as on the first try: a refusal on
                       // the retry node is a denial too.
                       recordOutcome(nodeId, latency, nodeErrorStatus(m, unavailable), Some(m))
@@ -1889,16 +1910,20 @@ final class FlightSqlRouter(
 
   /** Node `nodeId`'s permanent error `raw` for a statement of `principal`, read once for both the
     * first try and the retry: whether it is a verified "authorization unavailable"
-    * ([[nodeAuthzUnavailable]]), and the text the history records and the client reads (without its
-    * markers when it is; untouched otherwise).
+    * ([[nodeAuthzUnavailable]]), and the text the history records and the client reads: without its
+    * markers when it is, and without DuckDB's excerpt of the statement when `excerptWithheld` (a
+    * principal with column or row policies, whose statement the gateway rewrote:
+    * [[ai.starlake.quack.edge.policy.StatementExcerpt]]).
     */
   private def readNodeError(
       nodeId: String,
       principal: NodePrincipal,
-      raw: String
+      raw: String,
+      excerptWithheld: Boolean
   ): (Boolean, String) =
     val unavailable = nodeAuthzUnavailable(nodeId, principal, raw)
-    (unavailable, if unavailable then NodeHandles.withoutUnavailableMarkers(raw) else raw)
+    val text        = if unavailable then NodeHandles.withoutUnavailableMarkers(raw) else raw
+    (unavailable, ai.starlake.quack.edge.policy.StatementExcerpt.shownTo(excerptWithheld, text))
 
   /** The history status of a node's permanent error: `denied` for its refusal, `permanent` else. */
   private def nodeErrorStatus(message: String, unavailable: Boolean): String =
@@ -1934,6 +1959,14 @@ final class FlightSqlRouter(
     else RouterFailure.BadRequest(full)
 
 object FlightSqlRouter:
+
+  private val log = org.slf4j.LoggerFactory.getLogger(classOf[FlightSqlRouter])
+
+  /** `text` as one log line: every control character, line breaks and tabs included, shown as `?`,
+    * so text a caller wrote (a refusal can quote it) cannot start a line of its own in the log.
+    */
+  private[edge] def oneLogLine(text: String): String =
+    text.map(c => if c.isControl then '?' else c)
 
   /** The text the policy steps read for a statement: for a principal holding column or row
     * policies, `sql` with every word JSqlParser misreads where DuckDB reads a column quoted

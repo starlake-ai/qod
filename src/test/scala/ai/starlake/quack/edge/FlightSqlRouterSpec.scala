@@ -473,6 +473,50 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     latest.error shouldBe Some(ai.starlake.quack.edge.admin.AdminSqlParser.RedactedPlaceholder)
     latest.error.foreach(_ should not include "topsecret")
 
+  "a node error's statement excerpt" should "be withheld from a policy holder, kept otherwise" in:
+    // DuckDB quotes the statement the node ran around the error position; for a policy holder that
+    // is the gateway's rewrite, holding the policies' predicates and masks.
+    val excerptErr = () =>
+      QuackResponse.Failed(
+        QuackError.Permanent(
+          "Binder Error: Referenced column \"nonexist\" not found in FROM clause!\n\n" +
+            "LINE 1: ...FROM main.customer AS __qod_rls WHERE c_region = 'X') AS t WHERE " +
+            "nonexist = 1\n" +
+            "                                                                         ^"
+        ),
+        1L
+      )
+    val sql = "SELECT * FROM main.orders WHERE nonexist = 1"
+    def answered(eff: ai.starlake.quack.ondemand.rbac.EffectiveSet, conn: String) =
+      val (router, _, _) = setup(stub = excerptErr)
+      val out            =
+        router.execute(conn, "alice", poolKey, sql, effectiveSet = Some(eff)).unsafeRunSync()
+      val reason = out match
+        case Left(f)  => f.reason
+        case Right(_) => fail("expected the node's error")
+      (reason, router.history.snapshot(1).head.error.getOrElse(""))
+    val holders = List(
+      effWithRowPolicies(List(rowPolicyCustomer)),
+      effWithPolicies(List(maskCustomerEmail))
+    )
+    holders.zipWithIndex.foreach { (eff, i) =>
+      val (reason, recorded) = answered(eff, s"c-excerpt-$i")
+      withClue(reason) {
+        reason should include("Referenced column \"nonexist\" not found")
+        reason should not include "LINE 1:"
+        reason should not include "c_region = 'X'"
+        reason should not include "^"
+      }
+      recorded should include("Referenced column \"nonexist\" not found")
+      recorded should not include "LINE 1:"
+      recorded should not include "c_region"
+    }
+    val plain = ai.starlake.quack.ondemand.rbac.EffectiveSet(tenantUser, Nil, Nil, Nil, Nil)
+    val (plainReason, plainRecorded) = answered(plain, "c-ex-p")
+    plainReason should include("LINE 1:")
+    plainReason should include("c_region = 'X'")
+    plainRecorded should include("LINE 1:")
+
   "FlightSqlRouter.execute" should "route a SELECT to the only DUAL node and return Ok" in:
     val beforeCount =
       mmReg.counter("statements_total", "tenant", "acme", "pool", "sales", "status", "ok").count()
@@ -1564,8 +1608,36 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync()
     out shouldBe a[Left[?, ?]]
     out.left.get shouldBe a[RouterFailure.AccessDenied]
-    out.left.get.reason should include("memory.main.secret")
+    // A policy holder is told the rewrite reached more, not what: the list is read from the
+    // rewritten statement, which holds the policies' expressions.
+    out.left.get.reason should include(ai.starlake.quack.edge.policy.RewriteScope.ReachesBeyond)
+    out.left.get.reason should not include "memory.main.secret"
+    router.history.snapshot(1).head.error.getOrElse("") should not include "memory.main.secret"
     capturedSql() shouldBe ""
+
+  it should "log its refusal for a policy holder as one line, whatever the reason quotes" in:
+    // The reason quotes the parser's message about the rewrite, which can hold the caller's text.
+    val (router, _, _) = setupWithRewriter(
+      qualifyingRewriter("SELECT c_id FROM customer WHERE c_email = 'x\nFORGED: line' AND (((")
+    )
+    val (out, events) =
+      ai.starlake.quack.ondemand.runtime.testkit.LogCapture
+        .logged("ai.starlake.quack.edge.FlightSqlRouter") {
+          router
+            .execute(
+              "cls-log-1",
+              "alice",
+              poolKey,
+              "SELECT c_id FROM customer WHERE c_email = 'x'",
+              Some(effWithPolicies(List(maskCustomerEmailCls)))
+            )
+            .unsafeRunSync()
+        }
+    out.left.get.reason should include(ai.starlake.quack.edge.policy.RewriteScope.CannotAuthorize)
+    val lines = events.map(_.getFormattedMessage).filter(_.startsWith("policy rewrite refused"))
+    lines should have size 1
+    lines.head should include(ai.starlake.quack.edge.policy.RewriteScope.CannotAuthorize)
+    lines.head.exists(_.isControl) shouldBe false
 
   it should "run an ordinary CTE query of a policy holder, the CTE reference left unqualified" in:
     val (router, capturedSql, _) = setupWithRewriter(

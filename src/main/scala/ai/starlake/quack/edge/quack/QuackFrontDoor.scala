@@ -350,7 +350,13 @@ final class QuackFrontDoor(
           if catalogRead then s.catalogNode.set(Some(routed.nodeId))
           // A failed recovery keeps the fence: the client is still inside its dead transaction.
           if reopenTx then s.txAborted.set(None)
-          afterPrepare(s, cq, prep.sql, routed)
+          afterPrepare(
+            s,
+            cq,
+            prep.sql,
+            routed,
+            ai.starlake.quack.edge.policy.StatementExcerpt.withheldFor(Some(eff))
+          )
       }
       // A link the node answered on but no statement took (a cancel between the router's Ok and
       // `afterPrepare`) is released here, with its hold on the node.
@@ -360,11 +366,12 @@ final class QuackFrontDoor(
       s: QuackSession,
       cq: Long,
       sql: String,
-      routed: Routed[PrepareOutcome]
+      routed: Routed[PrepareOutcome],
+      excerptWithheld: Boolean
   ): IO[Array[Byte]] =
     val po        = routed.value
     val kind      = router.classifier.classify(sql)
-    val statement = QuackStatement(po.link, routed.nodeId, kind, cq, routed.close)
+    val statement = QuackStatement(po.link, routed.nodeId, kind, cq, routed.close, excerptWithheld)
     statement.pendingCommit.set(po.stamped)
     val moreOpt: Option[Boolean] =
       if messageType(po.response) == Type.PrepareResponse then
@@ -836,7 +843,9 @@ final class QuackFrontDoor(
                         node.nodeId,
                         StatementKind.Select,
                         cq,
-                        closer(s, link, cq, reused = false)
+                        closer(s, link, cq, reused = false),
+                        // The manager's own rendering, as the system principal.
+                        excerptWithheld = false
                       )
                       if QuackNodeLink.nativeNeedsMore(resp).contains(false) then
                         finishStatement(s, st, commit = false).as(resp)
@@ -892,13 +901,39 @@ final class QuackFrontDoor(
   // Statement lifecycle
   // -------------------------------------------------------------------------------------------
 
+  /** A node's answer to a policy holder's statement, which is the gateway's rewrite: an error goes
+    * back without DuckDB's excerpt of the statement (`StatementExcerpt.strip`) and without the
+    * offsets into it its extra info may carry (`StatementExcerpt.OffsetKeys`), every other byte as
+    * the node sent it. An answer the manager cannot read is never relayed, since it may hold an
+    * error the strip never saw: the holder gets a fixed text and the manager's log at ERROR, the
+    * default level, gets the answer.
+    */
+  private def shownToHolder(resp: Array[Byte], st: QuackStatement): Array[Byte] =
+    QuackWire.mapErrorMessage(
+      resp,
+      ai.starlake.quack.edge.policy.StatementExcerpt.strip,
+      ai.starlake.quack.edge.policy.StatementExcerpt.OffsetKeys
+    ) match
+      case Right(out) => out
+      case Left(why)  =>
+        // One log line, whatever the answer holds: a line break in it cannot start a line of its own.
+        val text = ai.starlake.quack.edge.FlightSqlRouter.oneLogLine(
+          new String(resp.take(4096), java.nio.charset.StandardCharsets.UTF_8)
+        )
+        logger.error(
+          s"unreadable node answer to a policy holder's statement on ${st.nodeId} " +
+            s"(${why.getMessage}; ${resp.length} bytes, the first 4096 as text): $text"
+        )
+        encodeError(ai.starlake.quack.edge.policy.StatementExcerpt.Unreadable)
+
   private def forwardToCurrent(s: QuackSession, f: Frame, onNone: Array[Byte]): IO[Array[Byte]] =
     s.current.get() match
       case None     => IO.pure(onNone)
       case Some(st) =>
         st.link.forward(f).flatMap {
-          case Left(fail)  => IO.pure(encodeError(fail.message))
-          case Right(resp) =>
+          case Left(fail)   => IO.pure(encodeError(fail.message))
+          case Right(resp0) =>
+            val resp    = if st.excerptWithheld then shownToHolder(resp0, st) else resp0
             val isFetch = f.header.msgType == Type.FetchRequest
             if isFetch && messageType(resp) == Type.FetchResponse && isTerminalFetch(resp) then
               // The client has the whole result. A pending stamping bracket commits now; the
