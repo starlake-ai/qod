@@ -233,6 +233,17 @@ class MaskAllowlistSpec extends AnyFlatSpec with Matchers:
       withClue(mask)(validate(mask, col) shouldBe a[Invalid])
     }
 
+  /** SQL's `SUBSTRING(<value> FROM <start> FOR <length>)` spelling: a bound read from the row is
+    * judged like any other argument, whatever spelling holds it.
+    */
+  it should "judge SUBSTRING ... FROM ... FOR like substring's arguments" in {
+    validate("SUBSTRING(c FROM CAST(c AS INTEGER) FOR 2)", "c") shouldBe a[Invalid]
+    validate("SUBSTRING(c FROM 2 FOR CAST(c AS INTEGER))", "c") shouldBe a[Invalid]
+    validate("SUBSTRING(c FROM 2 FOR 3)", "c") match
+      case Valid(_)        => ()
+      case Invalid(reason) => reason should include("a mask may use only")
+  }
+
   private def supervisor() =
     val store = new InMemoryControlPlaneStore()
     val sup   = new PoolSupervisor(new StubQuackBackend(), new NodeLoadTracker, store)
