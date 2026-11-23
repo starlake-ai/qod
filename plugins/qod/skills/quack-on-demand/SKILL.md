@@ -1881,13 +1881,19 @@ The same views are just SQL under the hood, usable directly through `qod sql`
 (or any DuckDB client behind the ATTACH):
 
 ```sql
--- a raw snapshot list for ad hoc queries; `qod catalog history ... --iceberg` instead reads
--- iceberg_load_table_response, which carries per-snapshot summary counts this function does not
+-- a raw snapshot list for ad hoc queries, superuser only (see below); `qod catalog history
+-- ... --iceberg` instead reads iceberg_load_table_response, which carries per-snapshot summary
+-- counts this function does not
 SELECT * FROM iceberg_snapshots(icelake.analytics.orders);
 
 -- what `qod catalog preview ... --iceberg --as-of <id>` runs
 SELECT * FROM icelake.analytics.orders AT (VERSION => 7761858545720969174);
 ```
+
+`iceberg_snapshots`, like the other `iceberg_*` metadata functions, is superuser class, so that
+query only runs for a superuser: `qod sql` runs with your own rights and refuses it for anyone
+else, a tenant admin included. An admin gets the snapshot history from `qod catalog history ...
+--iceberg`, where the manager reads the metadata itself, privileged, on the admin's behalf.
 
 Limits and differences from the DuckLake views:
 
