@@ -336,12 +336,16 @@
   the four tools above do, and gets only the snapshots that touched a table their grants cover
   for reading, each naming only those tables, with `changes` empty (the raw text lists the whole
   database's activity). Inlined writes and maintenance (a flush, a merge) on a table they read
-  count as touching it. `rowsAdded`, `filesAdded` and `filesRemoved` are `-1` when the snapshot
-  also touched a table they cannot read or has a change that names no table (a view, a verb a
-  later version adds), and on every snapshot for a member holding a row policy. Tags are kept
-  only on a snapshot they see, after `limit` applies. `limit` applies after that filtering, over
-  the newest 50 times `limit` snapshots, 1000 at most, so a member may get fewer than `limit`.
-  Author and commit message are shown as `table_history` shows them. Admins get what they got.
+  count as touching it; a snapshot of a schema-only DDL, or with no table, does not. When the
+  snapshot also touched a table they cannot read or has a change that names no table (a view, a
+  verb a later version adds), its `commitMessage` is null and `rowsAdded`, `filesAdded` and
+  `filesRemoved` are `-1`; the counts are also `-1` on every snapshot for a member holding a row
+  policy, which alone leaves the message. The author is shown. Tags are kept on every snapshot
+  they can see, judged one by one however old the snapshot and whatever `limit`. `limit` applies
+  after the filtering, over the newest 50 times `limit` snapshots, 1000 at most, so a member may
+  get fewer than `limit`. What stays visible: gaps in snapshot numbers and jumps in
+  `schemaVersion` show that a write or a DDL they cannot see took place, not where. Admins get
+  what they got.
 - **The Quack door serves clients that send each statement as `<alias>.query('<sql>')`** (#299),
   such as Columnar's `quack` ADBC driver: they signed in, then every statement failed with
   `Catalog Error: Table Function with name query does not exist!`. The DuckDB client binds that

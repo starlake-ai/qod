@@ -417,11 +417,14 @@ MCP troubleshooting:
   as `SHOW TABLES` lists them); any other table answers `not_found`. `no_pool_access`: no
   pool of that database admits them. A row count of `-1` is withheld: the user holds a row
   policy, so count with `run_sql`. `list_snapshots` shows a plain user only the snapshots
-  that touched a table they can read (so possibly fewer than `limit`, which applies to the
-  newest 1000 snapshots at most), naming only those tables; its counts are `-1` when a
-  snapshot also touched a table they cannot read or has a change that names no table, and
-  on every snapshot while they hold a row policy. Their tags are those on the snapshots
-  returned.
+  that touched a table they can read (a write, inlined included, a flush or a maintenance
+  on it counts; a schema-only DDL snapshot does not), so possibly fewer than `limit`, which
+  applies to the newest 1000 snapshots at most. It names only those tables. When a snapshot
+  also touched a table they cannot read or has a change that names no table, its
+  `commitMessage` is null and its counts are `-1`; the counts are also `-1` on every
+  snapshot while they hold a row policy. Their tags are those on any snapshot they can see,
+  however old. Gaps in snapshot ids and jumps in `schemaVersion` show that a write or a DDL
+  they cannot see took place, not where.
 - **"pool is resuming"**: the suspended pool is waking; retry in a few seconds.
 - Row caps: `run_sql` is truncated server-side at `QOD_MCP_MAX_ROWS` (default 500).
 

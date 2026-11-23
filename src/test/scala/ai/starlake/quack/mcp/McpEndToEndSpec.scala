@@ -306,20 +306,31 @@ class McpEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll w
   /** The `limit` the last `listSnapshots` read was given (the window the tool asked for). */
   private val lastSnapshotWindow = new AtomicInteger(-1)
 
-  /** A catalog of two schemas: `sales.orders` (bob's grant below), `sales.secret`, `hr.salaries`.
+  /** A catalog of two schemas: `sales.orders` (bob's grant below), `sales.secret`, `hr.salaries`,
+    * whose history is `snaps` (newest first); the ids in `unaccounted` have a change no table was
+    * attributed to. It reads a member's snapshots by window or by ids, like the real reader.
     */
-  private val memberCatalog: (String, String) => DuckLakeCatalogReader = (_, _) =>
+  private def memberCatalogOf(
+      snaps: List[CatalogSnapshotEntry] = catalogSnapshots,
+      unaccounted: Set[Long] = Set.empty
+  ): (String, String) => DuckLakeCatalogReader = (_, _) =>
     new DuckLakeCatalogReader(null):
+      private def asMember(s: CatalogSnapshotEntry) =
+        DuckLakeCatalogReader.MemberSnapshot(s, accounted = !unaccounted(s.snapshotId))
       override def listSnapshots(
           limit: Int,
           before: Option[Long],
           table: Option[(String, String)]
       ): List[CatalogSnapshotEntry] =
         lastSnapshotWindow.set(limit)
-        catalogSnapshots.take(limit)
+        snaps.take(limit)
       override def listSnapshotsForMember(limit: Int): List[DuckLakeCatalogReader.MemberSnapshot] =
         lastSnapshotWindow.set(limit)
-        catalogSnapshots.take(limit).map(DuckLakeCatalogReader.MemberSnapshot(_, accounted = true))
+        snaps.take(limit).map(asMember)
+      override def listSnapshotsByIdsForMember(
+          ids: Set[Long]
+      ): List[DuckLakeCatalogReader.MemberSnapshot] =
+        snaps.filter(s => ids(s.snapshotId)).map(asMember)
       private def entry(schema: String, table: String) =
         CatalogTableEntry(schema, table, 10L, 1, Some(s"s3://lake/$schema/$table/"))
       private val tables = Map(
@@ -370,6 +381,8 @@ class McpEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll w
             hasMore = false
           )
         )
+
+  private val memberCatalog: (String, String) => DuckLakeCatalogReader = memberCatalogOf()
 
   /** bob, a plain member, may connect to `sales` and reads `sales.orders` through a role. */
   private def grantBobOrders(fix: SecurityFixtures.Fixture): Unit =
@@ -665,17 +678,17 @@ class McpEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll w
       }
     }
 
-  it should "show a member each kept snapshot's author and commit message" in
+  it should "show a member each kept snapshot's author, and the commit message of a snapshot of visible tables only" in
     withHarness(prepare = snapshotsForBob, catalogReader = Some(memberCatalog)) { h =>
       val bob        = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.BobUsername)
       val (_, text)  = callTool(h, bob, "list_snapshots", acmeMain)
       val (snaps, _) = parsedSnapshots(text)
       withClue(text) {
-        snaps.keySet should not be empty
-        snaps.foreach { (id, s) =>
-          stringOf(s, "author") shouldBe stored(id).author
-          stringOf(s, "commitMessage") shouldBe stored(id).commitMessage
-        }
+        snaps.keySet shouldBe Set(1L, 3L)
+        snaps.foreach((id, s) => stringOf(s, "author") shouldBe stored(id).author)
+        stringOf(snaps(1L), "commitMessage") shouldBe stored(1L).commitMessage
+        // Snapshot 3 also touched sales.secret: its message is the whole snapshot's.
+        stringOf(snaps(3L), "commitMessage") shouldBe None
       }
     }
 
@@ -710,9 +723,10 @@ class McpEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll w
       withClue(s"$two / $one") {
         parsedSnapshots(two)._1.keySet shouldBe Set(1L, 3L)
         parsedSnapshots(one)._1.keySet shouldBe Set(3L)
-        // A member's tags follow the page they get back.
+        // A member's tags do not follow the page: the tag on snapshot 1, visible to them, stays
+        // when limit leaves 1 off the page.
         parsedSnapshots(two)._2 shouldBe List("visible-tag")
-        parsedSnapshots(one)._2 shouldBe Nil
+        parsedSnapshots(one)._2 shouldBe List("visible-tag")
       }
     }
 
@@ -938,8 +952,226 @@ class McpEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll w
         tags.toSet shouldBe Set("visible-tag", "hidden-tag", "unresolved-tag")
         // An admin's limit still applies to the catalog's newest snapshots.
         parsedSnapshots(two)._1.keySet shouldBe Set(3L, 2L)
-        // ... but not to their tags, which a member's page narrows.
+        // ... but not to their tags, which name every snapshot's.
         parsedSnapshots(two)._2.toSet shouldBe Set("visible-tag", "hidden-tag", "unresolved-tag")
+      }
+    }
+
+  // Second round (#311): the commit message of a snapshot the member sees only part of, and the
+  // tags of any snapshot the member sees, wherever it sits in the history.
+
+  it should "hide the commit message of a snapshot that also touched a table the member cannot read" in
+    withHarness(prepare = snapshotsForBob, catalogReader = Some(memberCatalog)) { h =>
+      val bob        = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.BobUsername)
+      val alice      = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.AliceUsername)
+      val (_, text)  = callTool(h, bob, "list_snapshots", acmeMain)
+      val (_, admin) = callTool(h, alice, "list_snapshots", acmeMain)
+      val (snaps, _) = parsedSnapshots(text)
+      withClue(s"$text / $admin") {
+        // Snapshot 3 also touched sales.secret: no message, but its author stays.
+        stringOf(snaps(3L), "commitMessage") shouldBe None
+        stringOf(snaps(3L), "author") shouldBe stored(3L).author
+        stringOf(snaps(1L), "commitMessage") shouldBe Some("commit 1")
+        text should not include "commit 3"
+        // An admin keeps it.
+        stringOf(parsedSnapshots(admin)._1(3L), "commitMessage") shouldBe Some("commit 3")
+      }
+    }
+
+  it should "hide the commit message of a snapshot with a change no table is attributed to" in
+    withHarness(
+      prepare = snapshotsForBob,
+      catalogReader = Some(memberCatalogOf(unaccounted = Set(1L)))
+    ) { h =>
+      val bob        = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.BobUsername)
+      val (_, text)  = callTool(h, bob, "list_snapshots", acmeMain)
+      val (snaps, _) = parsedSnapshots(text)
+      withClue(text) {
+        stringOf(snaps(1L), "commitMessage") shouldBe None
+        stringOf(snaps(1L), "author") shouldBe stored(1L).author
+        countsOf(snaps(1L)) shouldBe withheldCounts
+        text should not include "commit 1"
+      }
+    }
+
+  it should "keep the commit message of a member holding a row policy, whose counts are withheld" in
+    withHarness(prepare = snapshotsForFilteredBob, catalogReader = Some(memberCatalog)) { h =>
+      val bob        = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.BobUsername)
+      val (_, text)  = callTool(h, bob, "list_snapshots", acmeMain)
+      val (snaps, _) = parsedSnapshots(text)
+      withClue(text) {
+        stringOf(snaps(1L), "commitMessage") shouldBe Some("commit 1")
+        countsOf(snaps(1L)) shouldBe withheldCounts
+        stringOf(snaps(3L), "commitMessage") shouldBe None
+      }
+    }
+
+  /** The newest 59 snapshots touch `sales.secret` alone (ids 60 to 2), then comes the one of
+    * `sales.orders` (1) and the unresolved one (0): beyond a member's window of 50 for `limit` 1.
+    */
+  private val longHistory =
+    (60L to 2L by -1L).toList.map(id =>
+      snapshotEntry(id, "inserted_into_table:2", "sales" -> "secret")
+    ) ++ catalogSnapshots.filter(_.snapshotId <= 1L)
+
+  it should "keep a member's tag on a visible snapshot older than the window, whatever limit" in
+    withHarness(prepare = snapshotsForBob, catalogReader = Some(memberCatalogOf(longHistory))) {
+      h =>
+        val bob        = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.BobUsername)
+        val alice      = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.AliceUsername)
+        val (_, one)   = callTool(h, bob, "list_snapshots", acmeMain, "limit" -> Json.fromInt(1))
+        val (_, admin) = callTool(h, alice, "list_snapshots", acmeMain, "limit" -> Json.fromInt(1))
+        withClue(s"$one / $admin") {
+          // The window of 50 holds only snapshots of sales.secret: no snapshot, yet the tag on
+          // snapshot 1 (orders) stays, and the tags on 2 (secret alone) and 0 (no table) do not.
+          parsedSnapshots(one)._1 shouldBe empty
+          parsedSnapshots(one)._2 shouldBe List("visible-tag")
+          // An admin gets every tag.
+          parsedSnapshots(admin)._2.toSet shouldBe Set(
+            "visible-tag",
+            "hidden-tag",
+            "unresolved-tag"
+          )
+        }
+    }
+
+  it should "keep the tag of a visible snapshot even when limit leaves it off the page" in
+    withHarness(prepare = snapshotsForBob, catalogReader = Some(memberCatalog)) { h =>
+      val bob      = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.BobUsername)
+      val (_, one) = callTool(h, bob, "list_snapshots", acmeMain, "limit" -> Json.fromInt(1))
+      withClue(one) {
+        parsedSnapshots(one)._1.keySet shouldBe Set(3L)
+        parsedSnapshots(one)._2 shouldBe List("visible-tag")
+      }
+    }
+
+  it should "judge a member's tags on any snapshot of the real catalog, not on the page (real DuckLake)" in
+    withCatalog("mcpsnapstags", engineWrites) { (reader, _) =>
+      val stored   = reader.listSnapshots(limit = 1000).map(s => s.snapshotId -> s).toMap
+      val ordersId = reader.currentTableInfo("sales", "orders").get._1
+      val secretId = reader.currentTableInfo("sales", "secret").get._1
+      def names(id: Long, table: String, tid: Long): Boolean =
+        stored(id).changes
+          .split(",")
+          .exists(e => e.endsWith(s":$tid") || e.endsWith(s"\"sales\".\"$table\""))
+      def onlyTable(id: Long, table: String, tid: Long): Boolean =
+        stored(id).changes
+          .split(",")
+          .forall(e => e.endsWith(s":$tid") || e.endsWith(s"\"sales\".\"$table\""))
+      val ordersOldest = stored.keySet.filter(id => onlyTable(id, "orders", ordersId)).min
+      val secretOnly   = stored.keySet.filter(id => onlyTable(id, "secret", secretId)).min
+      val schemaOnly   =
+        stored.keySet.filter(id => stored(id).changes.startsWith("created_schema")).min
+      ordersOldest should be < stored.keySet.max
+      names(ordersOldest, "orders", ordersId) shouldBe true
+      def tagMine(fix: SecurityFixtures.Fixture): Unit =
+        snapshotsForBob(fix)
+        List("orders-tag" -> ordersOldest, "secret-tag" -> secretOnly, "schema-tag" -> schemaOnly)
+          .foreach { (name, snapshotId) =>
+            fix.store.createSnapshotTag(
+              SnapshotTag(
+                id = s"tag-$name",
+                tenant = SecurityFixtures.TenantId,
+                tenantDb = SecurityFixtures.TenantDbName,
+                name = name,
+                snapshotId = snapshotId
+              )
+            )
+          }
+      withHarness(prepare = tagMine, catalogReader = Some((_, _) => reader)) { h =>
+        val bob           = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.BobUsername)
+        val (err, one)    = callTool(h, bob, "list_snapshots", acmeMain, "limit" -> Json.fromInt(1))
+        val (snaps, tags) = parsedSnapshots(one)
+        withClue(s"stored ${stored.values.map(s => s.snapshotId -> s.changes)}: $one") {
+          err shouldBe false
+          snaps.keySet should not contain ordersOldest
+          tags should contain("orders-tag")
+          tags should not contain "secret-tag"
+          tags should not contain "schema-tag"
+        }
+      }
+    }
+
+  // Maintainer's point 5 (#311): a table renamed, and a table dropped, since the snapshots.
+
+  /** The snapshots whose raw changes name table id `tid` (a write, a flush, a rename, a drop). */
+  private def touching(stored: Map[Long, CatalogSnapshotEntry], tid: Long): Set[Long] =
+    stored.keySet.filter(id => stored(id).changes.split(",").exists(_.endsWith(s":$tid")))
+
+  it should "judge a renamed table by its name at each snapshot, so a grant on the new name shows no earlier snapshot (real DuckLake)" in
+    withCatalog(
+      "mcpsnapsrename",
+      """CREATE SCHEMA lake.sales;
+        |CREATE TABLE lake.sales.orders_old (id INTEGER, v VARCHAR);
+        |INSERT INTO lake.sales.orders_old VALUES (1, 'a');
+        |INSERT INTO lake.sales.orders_old SELECT range, 'bulk' FROM range(1000);
+        |""".stripMargin
+    ) { (reader, _) =>
+      val beforeRename = reader.maxSnapshotId().get
+      runSqlOnCatalog("ALTER TABLE lake.sales.orders_old RENAME TO orders;")
+      val renameId = reader.maxSnapshotId().get
+      runSqlOnCatalog(
+        """INSERT INTO lake.sales.orders VALUES (2, 'b');
+          |INSERT INTO lake.sales.orders SELECT range, 'more' FROM range(1000);
+          |""".stripMargin
+      )
+      val ordersId  = reader.currentTableInfo("sales", "orders").get._1
+      val stored    = reader.listSnapshots(limit = 1000).map(s => s.snapshotId -> s).toMap
+      val writes    = touching(stored, ordersId)
+      val oldWrites = writes.filter(_ <= beforeRename)
+      val newWrites = writes.filter(_ > renameId)
+      withHarness(prepare = snapshotsForBob, catalogReader = Some((_, _) => reader)) { h =>
+        val bob        = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.BobUsername)
+        val alice      = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.AliceUsername)
+        val (err, txt) = callTool(h, bob, "list_snapshots", acmeMain)
+        val (_, admin) = callTool(h, alice, "list_snapshots", acmeMain)
+        val (snaps, _) = parsedSnapshots(txt)
+        info(s"rename snapshot $renameId shown to the member: ${snaps.contains(renameId)}")
+        withClue(s"stored ${stored.values.map(s => s.snapshotId -> s.changes)}: $txt") {
+          err shouldBe false
+          // The table was written under both names.
+          oldWrites should not be empty
+          newWrites should not be empty
+          parsedSnapshots(admin)._1.keySet should contain allElementsOf (oldWrites ++ newWrites)
+          // bob's grant names sales.orders: the snapshots of sales.orders_old are not his.
+          snaps.keySet.intersect(oldWrites) shouldBe empty
+          snaps.keySet should contain allElementsOf newWrites
+          snaps.values.foreach(s => tablesOf(s) shouldBe List("sales" -> "orders"))
+          txt should not include "orders_old"
+        }
+      }
+    }
+
+  it should "show a member whose grant still names a dropped table the snapshots that wrote and dropped it (real DuckLake, current behaviour)" in
+    withCatalog(
+      "mcpsnapsdrop",
+      """CREATE SCHEMA lake.sales;
+        |CREATE TABLE lake.sales.orders (id INTEGER, v VARCHAR);
+        |CREATE TABLE lake.sales.secret (id INTEGER, v VARCHAR);
+        |INSERT INTO lake.sales.orders VALUES (1, 'a');
+        |INSERT INTO lake.sales.orders SELECT range, 'bulk' FROM range(1000);
+        |INSERT INTO lake.sales.secret VALUES (1, 's');
+        |""".stripMargin
+    ) { (reader, _) =>
+      val ordersId = reader.currentTableInfo("sales", "orders").get._1
+      val lastLive = reader.maxSnapshotId().get
+      runSqlOnCatalog("DROP TABLE lake.sales.orders;")
+      val dropId = reader.maxSnapshotId().get
+      reader.currentTableInfo("sales", "orders") shouldBe None
+      val stored = reader.listSnapshots(limit = 1000).map(s => s.snapshotId -> s).toMap
+      val writes = touching(stored, ordersId).filter(_ <= lastLive)
+      withHarness(prepare = snapshotsForBob, catalogReader = Some((_, _) => reader)) { h =>
+        val bob        = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.BobUsername)
+        val (err, txt) = callTool(h, bob, "list_snapshots", acmeMain)
+        val (snaps, _) = parsedSnapshots(txt)
+        withClue(s"stored ${stored.values.map(s => s.snapshotId -> s.changes)}: $txt") {
+          err shouldBe false
+          writes should not be empty
+          snaps.keySet should contain allElementsOf writes
+          snaps.keySet should contain(dropId)
+          snaps.values.foreach(s => tablesOf(s) shouldBe List("sales" -> "orders"))
+          txt should not include "secret"
+        }
       }
     }
 

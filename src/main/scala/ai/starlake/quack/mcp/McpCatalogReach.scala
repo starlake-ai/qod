@@ -165,10 +165,11 @@ object McpCatalogReach:
         )
 
     /** A member's snapshots: those that touched a table they can see, naming only those tables and
-      * no raw change text (it lists the whole database's activity). The counts are the whole
-      * snapshot's, so they are withheld when it also touched a table the member cannot see, when
-      * some entry of its changes named no table the reader resolved (fail closed: that entry may be
-      * a hidden table's), and for a member who does not count rows.
+      * no raw change text (it lists the whole database's activity). The counts and the commit
+      * message are the whole snapshot's, so they are withheld when it also touched a table the
+      * member cannot see or when some entry of its changes named no table the reader resolved (fail
+      * closed: that entry may be a hidden table's); the counts also for a member who does not count
+      * rows. The author stays.
       */
     def snapshots(ss: List[MemberSnapshot]): List[CatalogSnapshotEntry] =
       if !isMember then ss.map(_.entry)
@@ -177,10 +178,14 @@ object McpCatalogReach:
           val seen = s.affectedTables.filter(t => visible(t.schema, t.name))
           if seen.isEmpty then None
           else
-            val whole = countsRows && accounted && seen.size == s.affectedTables.size
-            val named = s.copy(changes = "", affectedTables = seen)
+            val clean = accounted && seen.size == s.affectedTables.size
+            val named = s.copy(
+              changes = "",
+              affectedTables = seen,
+              commitMessage = if clean then s.commitMessage else None
+            )
             Some(
-              if whole then named
+              if clean && countsRows then named
               else
                 named.copy(
                   rowsAdded = Withheld,
@@ -190,9 +195,11 @@ object McpCatalogReach:
             )
         }
 
-    /** The tags a member sees: those on a snapshot they were shown. */
-    def tags(ts: List[CatalogTagEntry], keptSnapshots: Set[Long]): List[CatalogTagEntry] =
-      if !isMember then ts else ts.filter(t => keptSnapshots.contains(t.snapshotId))
+    /** The tags a member sees: those on a snapshot visible to them (`visibleSnapshots`: the ids
+      * [[snapshots]] kept out of the snapshots the tags name, wherever those sit in the history).
+      */
+    def tags(ts: List[CatalogTagEntry], visibleSnapshots: Set[Long]): List[CatalogTagEntry] =
+      if !isMember then ts else ts.filter(t => visibleSnapshots.contains(t.snapshotId))
 
     /** The handlers' own answer for a table that does not exist, so a hidden one reads the same. */
     def notFound(schema: String, table: String): String =

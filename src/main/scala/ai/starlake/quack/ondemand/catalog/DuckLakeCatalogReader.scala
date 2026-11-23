@@ -611,7 +611,7 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource)
     val fetchLimit = table match
       case None    => limit
       case Some(_) => math.min(limit.toLong * 50L, Int.MaxValue.toLong).toInt
-    val entries  = snapshotPage(before, fetchLimit, TableChangeVerbs).map(_.entry)
+    val entries  = snapshotPage(before, None, fetchLimit, TableChangeVerbs).map(_.entry)
     val filtered = table match
       case None                    => entries
       case Some((schema, tblName)) =>
@@ -626,16 +626,27 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource)
     * could not attribute may hide a table the member cannot see.
     */
   def listSnapshotsForMember(limit: Int): List[DuckLakeCatalogReader.MemberSnapshot] =
-    snapshotPage(None, limit, DuckLakeCatalogReader.SnapshotTableVerbs)
+    snapshotPage(None, None, limit, DuckLakeCatalogReader.SnapshotTableVerbs)
+
+  /** The snapshots `ids` name, read as [[listSnapshotsForMember]] reads them (the same verbs and
+    * the same `accounted` flag), wherever they sit in the catalog's history: a member's tags are
+    * judged on these. An id no snapshot has is absent from the answer.
+    */
+  def listSnapshotsByIdsForMember(ids: Set[Long]): List[DuckLakeCatalogReader.MemberSnapshot] =
+    if ids.isEmpty then Nil
+    else snapshotPage(None, Some(ids), ids.size, DuckLakeCatalogReader.SnapshotTableVerbs)
 
   private def snapshotPage(
       before: Option[Long],
+      ids: Option[Set[Long]],
       fetchLimit: Int,
       verbs: Set[String]
   ): List[DuckLakeCatalogReader.MemberSnapshot] =
-    val (whereClause, whereParams) = before match
-      case None    => ("", Nil)
-      case Some(n) => ("\n WHERE s.snapshot_id < ?", List(n))
+    val (whereClause, whereParams) = (before, ids) match
+      case (Some(n), _) => ("\n WHERE s.snapshot_id < ?", List(n))
+      case (_, Some(s)) =>
+        (s"\n WHERE s.snapshot_id IN (${s.toList.map(_ => "?").mkString(",")})", s.toList)
+      case _ => ("", Nil)
     val snapSql =
       s"""SELECT s.snapshot_id,
          |       s.snapshot_time,
