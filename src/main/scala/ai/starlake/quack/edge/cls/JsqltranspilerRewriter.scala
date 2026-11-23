@@ -434,27 +434,20 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
             // to each Column's own (table, column) qualifier.
             visitor.topLevelOverride =
               if origins.indices.contains(idx) then Some(origins(idx)) else None
-            val expr     = si.getExpression
-            val replaced = visitor.visit(expr)
-            if replaced ne expr then
-              val item = si.asInstanceOf[SelectItem[Expression]]
-              item.setExpression(replaced)
-              // A bare `SELECT c_phone` (no explicit AS) relies on the projected Column's own name
-              // for the result-set's field name. Masking replaces that Column with a value
-              // expression (e.g. the literal `'***'`), which has no name of its own -- DuckDB would
-              // otherwise synthesize one from the expression text, changing the column name a
-              // client sees out from under it (breaking `SELECT c_phone ...` -> a result column NOT
-              // named `c_phone`). Preserve the original name as an explicit alias so masking is
-              // transparent to the caller. Only for a directly-masked top-level Column: an explicit
-              // user alias (`SELECT c_phone AS foo`) is left alone, and a masked column nested
-              // inside a function/CASE/etc. keeps whatever name that enclosing expression gets --
-              // there's no bare column name to preserve there.
-              if item.getAlias == null then
-                expr match
-                  case col: net.sf.jsqlparser.schema.Column =>
-                    item.setAlias(new net.sf.jsqlparser.expression.Alias(col.getColumnName))
-                  case _ => ()
-              changed.set(true)
+            val expr = si.getExpression
+            // DuckDB names an unaliased item after its expression, which after the rewrite holds
+            // the mask's text. An item the rewrite changes is named after the item as it read
+            // before (ResultNames), so the name never depends on a policy; the caller's own alias
+            // is kept. The visitor rewrites most nodes in place, so whether this item changed is
+            // read from the change flag, cleared for it and merged back after.
+            val name        = Option.when(si.getAlias == null)(ResultNames.aliasFor(expr))
+            val earlier     = changed.getAndSet(false)
+            val replaced    = visitor.visit(expr)
+            val itemChanged = changed.get || (replaced ne expr)
+            changed.set(earlier || itemChanged)
+            val item = si.asInstanceOf[SelectItem[Expression]]
+            if replaced ne expr then item.setExpression(replaced)
+            if itemChanged then name.foreach(item.setAlias)
             visitor.topLevelOverride = None
             idx += 1
         Option(ps.getWhere).foreach { w =>

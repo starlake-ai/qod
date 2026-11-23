@@ -1022,6 +1022,29 @@ grant, column policy or row policy whose names hold a non-ASCII cased letter
 (`NonAsciiPolicyNameReport`), as such a row matches only an object spelled with exactly those
 letters. The OPA input carries names folded the same way.
 
+**Masks and result names.** DuckDB names an unaliased select item after its expression, so the
+column rewriter (`JsqltranspilerRewriter.applyPolicies`) gives every item it changes that has no
+alias of the caller's one from `ResultNames.aliasFor`, taken before the mask goes in: a bare column
+its column name, anything else the item's JSqlParser text (trimmed, line breaks as spaces) as a
+quoted identifier, never the mask. That covers every select at any depth (CTE bodies, derived
+tables, set-operation arms, scalar subqueries, the prepare probe); a caller's CTE or derived-table
+column list still wins, and an unchanged item keeps DuckDB's naming. The text is the parser's print
+of the statement the policy steps read (method calls desugared, `#n` resolved, misread words and
+time keywords quoted), so it can differ from DuckDB's own name (operators and `CASE` without
+DuckDB's parentheses, the caller's function-name case, `::` kept); the CHANGELOG lists the forms.
+A time-travel placeholder or a same-name table's temporary name printed into such a name is put
+back by `TimeTravelCarrier.restore` and `SameNameTables.restore` (`ResultNames.rewriteAliases`).
+A star over a CTE whose item is an unaliased expression is expanded by the resolver under a name
+of its own (`c.lower`) that DuckDB does not bind, before and after this rule: the statement fails.
+`TransformSqlValidator` refuses a new or updated mask that uses, outside `TRY(...)`, a form DuckDB
+can answer with an error quoting the row's value (`RaisingForms`: a non-text `CAST` / `::`,
+`strptime`, JSON parsing, base64 / hex decoding, `error()`, date and time constructors,
+overflowing arithmetic, `%` / `//` by a non-constant, a regex, date part or time zone read from the
+row, a comparison of possibly-text with a non-text constant), and one JSqlParser reads only in part
+(it stops at `//`: the mask is parsed again inside parentheses). Stored and imported masks are not
+judged; boot prints one stderr `WARN:` line per stored mask a create would refuse
+(`StoredMaskReport`), never its text.
+
 ### OPA authorization (per tenant)
 
 `qodstate_tenant.acl_mode` (Liquibase `0044`, null = `QOD_ACL_MODE`, default `qod`) hands a tenant's data-access decisions to its own OPA server: pool access at handshake (gate 4 through `OpaPoolAccess`) and table and file access per statement, asked by the node decider (`AuthzDecider`, `OpaAuthorizer.decide`) on the objects DuckDB resolved, after the rules QoD always enforces: each access carries `kind`, `columns` and `via` (the outermost secure view it is read through), and `locations` lists the files already admitted, with the scope that admitted each (`OpaInput.decide`, `client.edge` `node`, never `statement.text`). The gateway sends OPA nothing per statement. QoD grant tables are ignored for that tenant; memberships are still sent as identity. Any mode other than exactly `qod` is OPA.

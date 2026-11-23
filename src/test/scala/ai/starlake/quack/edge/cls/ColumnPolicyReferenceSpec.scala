@@ -74,10 +74,12 @@ class ColumnPolicyReferenceSpec extends AnyFlatSpec with Matchers:
     """left\((?:(?:"[^"]*"|\w+)\.)*(?:"[^"]*"|\w+), 3\) \|\| '\*\*\*'"""
 
   /** The rewritten text with every inserted mask removed: what is left must not name c_email,
-    * except as the output alias a masked projection keeps.
+    * except as the output alias a masked projection keeps, or inside the quoted result name a
+    * changed item gets (the item as the caller wrote it: text, not a read of the column).
     */
   private def residue(sql: String): String =
     sql
+      .replaceAll("(?i)\\bAS\\s+\"(?:[^\"]|\"\")*\"", "")
       .replaceAll(s"\\($InsertedMask\\)", "")
       .replaceAll(InsertedMask, "")
       .replaceAll("""(?i)\bAS\s+"?c_email"?""", "")

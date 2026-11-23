@@ -401,6 +401,66 @@ final class AuthzStack(
       raw.close()
       allocator.close()
 
+  /** The result column names of `sql` through the FlightSQL edge as `user`: those its FlightInfo
+    * announces (the prepare probe's) and those its stream carries (Right), or the error (Left).
+    */
+  def flightNames(
+      sql: String,
+      user: String,
+      password: String,
+      tenant: String,
+      pool: String
+  ): Either[String, (List[String], List[String])] =
+    val allocator = new RootAllocator()
+    val raw       =
+      FlightClient.builder(allocator, Location.forGrpcInsecure("127.0.0.1", flightPort)).build()
+    try
+      val hdrs = new FlightCallHeaders()
+      hdrs.insert("tenant", tenant)
+      hdrs.insert("pool", pool)
+      hdrs.insert(
+        "authorization",
+        "Basic " + Base64.getEncoder.encodeToString(s"$user:$password".getBytes("UTF-8"))
+      )
+      val opt  = new HeaderCallOption(hdrs)
+      val fsql = new FlightSqlClient(raw)
+      try
+        val info      = fsql.execute(sql, opt)
+        val announced = info.getSchema.getFields.asScala.map(_.getName).toList
+        val stream    = fsql.getStream(info.getEndpoints.get(0).getTicket, opt)
+        try
+          val carried = stream.getSchema.getFields.asScala.map(_.getName).toList
+          while stream.next() do ()
+          Right((announced, carried))
+        finally stream.close()
+      catch case e: FlightRuntimeException => Left(e.getMessage)
+    finally
+      raw.close()
+      allocator.close()
+
+  /** The result column names of `sql` through the native Quack front door, as the DuckDB 2.0 CLI
+    * describes the result `quack_query` hands it (Right), or the CLI's stderr (Left).
+    */
+  def doorNames(
+      sql: String,
+      user: String,
+      password: String,
+      tenant: String,
+      pool: String
+  ): Either[String, List[String]] =
+    val token = doorToken(user, password, tenant, pool)
+    cli(
+      "SELECT column_name FROM (DESCRIBE SELECT * FROM quack_query(" +
+        s"'quack:127.0.0.1:$quackPort', ${AuthzStack.lit(sql)}, " +
+        s"token := ${AuthzStack.lit(token)}));"
+    ).map(
+      _.map(n =>
+        if n.length >= 2 && n.startsWith("\"") && n.endsWith("\"") then
+          n.substring(1, n.length - 1).replace("\"\"", "\"")
+        else n
+      )
+    )
+
   /** FlightSQL GetTables as `user` on `pool`: every row as `catalog,schema,table,type` (Right), or
     * the error the client got (Left).
     */

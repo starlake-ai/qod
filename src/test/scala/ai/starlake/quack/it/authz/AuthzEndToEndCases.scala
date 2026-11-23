@@ -2137,6 +2137,36 @@ abstract class AuthzEndToEndCases(
     }
   }
 
+  // ---------- result names under a mask ----------
+
+  "a result column under a mask" should "be named as the caller wrote it, never after the mask" in {
+    ready()
+    feedRange
+    // mona's mask on feed_a.email is the literal '***'. An unaliased item holding the masked
+    // column is named after the item as written, on both doors: the FlightInfo schema (the prepare
+    // probe's), the stream and the native front door's result.
+    List(
+      s"SELECT lower(email) FROM $lake.main.feed_a WHERE id = 1"            -> List("lower(email)"),
+      s"SELECT email FROM $lake.main.feed_a WHERE id = 1"                   -> List("email"),
+      s"SELECT id, upper(lower(email)) FROM $lake.main.feed_a WHERE id = 1" ->
+        List("id", "upper(lower(email))"),
+      s"SELECT * FROM (SELECT md5(email) FROM $lake.main.feed_a WHERE id = 1) s" -> List(
+        "md5(email)"
+      ),
+      s"SELECT lower(email) AS e FROM $lake.main.feed_a WHERE id = 1" -> List("e")
+    ).foreach { (sql, names) =>
+      withClue(s"[Flight] mona: $sql -> ") {
+        stack.flightNames(sql, "mona", Passwords("mona"), Acme, "lake") shouldBe Right(
+          (names, names)
+        )
+      }
+      if AuthzStack.cliPresent then
+        withClue(s"[Native] mona: $sql -> ") {
+          stack.doorNames(sql, "mona", Passwords("mona"), Acme, "lake") shouldBe Right(names)
+        }
+    }
+  }
+
   // ---------- a DuckLake table at an earlier snapshot: judged as the table it is now (review M1) ----------
 
   /** `vault` with one row, renamed `vault_now` (its `email` renamed `contact`), then a new `vault`

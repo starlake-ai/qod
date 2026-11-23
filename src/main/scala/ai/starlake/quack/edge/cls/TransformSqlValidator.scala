@@ -71,6 +71,11 @@ object TransformSqlValidator:
     val expr: Expression = Try(CCJSqlParserUtil.parseExpression(trimmed)) match
       case Success(e)  => e
       case Failure(ex) => return Invalid(s"transformSql does not parse: ${ex.getMessage}")
+    // The parse above stops at a token it cannot read (`//`, DuckDB's integer division) and returns
+    // the expression before it, which would then be stored as the mask. Read again inside
+    // parentheses, which the parser must close, a text it reads only in part fails instead.
+    if Try(CCJSqlParserUtil.parseExpression("(" + trimmed + ")", false)).isFailure then
+      return Invalid("transformSql does not parse as one expression (DuckDB's // is not read)")
 
     val violations = scala.collection.mutable.ListBuffer.empty[String]
     // Every column reference of the expression, as the rewriter reads it when it splices the mask:
@@ -112,6 +117,13 @@ object TransformSqlValidator:
           violations += s"function '$name' is not allowed in transformSql"
       case _ => ()
     }
+
+    val raising = RaisingForms.of(expr)
+    if raising.nonEmpty then
+      violations += s"transformSql uses ${raising.mkString(", ")}, which can raise an error " +
+        "quoting the unmasked value on a row it cannot convert or compute; use TRY_CAST " +
+        "instead of CAST or ::, try_strptime instead of strptime, or wrap the expression in " +
+        "TRY(...)"
 
     if violations.nonEmpty then return Invalid(violations.distinct.mkString("; "))
 

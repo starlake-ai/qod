@@ -904,12 +904,12 @@ class ColumnPolicyRewriterSpec extends AnyFlatSpec with Matchers:
     out shouldBe Passthrough
   }
 
-  // An unaliased aggregate over a masked column (`min(c_phone)`) stays unaliased: DuckDB names the
-  // slot itself. It used to fail at the node through the FlightSQL prepare probe
+  // An unaliased aggregate over a masked column (`min(c_phone)`) is named as written, never after
+  // the mask (MaskResultNameSpec). It used to fail at the node through the FlightSQL prepare probe
   // `SELECT * FROM (<query>) AS _qod_probe LIMIT 0`: the resolver expanded the probe's star under
   // its own name for the slot (`_qod_probe.min`), which DuckDB does not bind. The probe's star is
-  // now kept as written (JsqltranspilerRewriterSpec runs both shapes on DuckDB).
-  it should "leave an unaliased aggregate projection unaliased after masking" in {
+  // kept as written (JsqltranspilerRewriterSpec runs both shapes on DuckDB).
+  it should "name an unaliased aggregate projection as written after masking" in {
     val catWithPhone = new ColumnCatalog.MapCatalog(
       Map(("acme_tpch", "tpch1", "customer") -> List("c_mktsegment", "c_phone"))
     )
@@ -946,13 +946,14 @@ class ColumnPolicyRewriterSpec extends AnyFlatSpec with Matchers:
 
     unaliasedOut match
       case Rewritten(sql) =>
-        sql shouldBe "SELECT c_mktsegment, min('***') FROM tpch1.customer GROUP BY 1"
+        sql shouldBe
+          "SELECT c_mktsegment, min('***') AS \"min(c_phone)\" FROM tpch1.customer GROUP BY 1"
       case other => fail(s"expected Rewritten, got $other")
 
     probedOut match
       case Rewritten(sql) =>
-        sql shouldBe "SELECT * FROM (SELECT c_mktsegment, min('***') FROM tpch1.customer " +
-          "GROUP BY 1) AS _qod_probe LIMIT 0"
+        sql shouldBe "SELECT * FROM (SELECT c_mktsegment, min('***') AS \"min(c_phone)\" " +
+          "FROM tpch1.customer GROUP BY 1) AS _qod_probe LIMIT 0"
       case other => fail(s"expected Rewritten, got $other")
 
     aliasedOut match
@@ -1038,7 +1039,7 @@ class ColumnPolicyRewriterSpec extends AnyFlatSpec with Matchers:
   it should "mask a method call on a masked column and deny a field read of one" in {
     val effSet = eff(tenantUser, List(maskEmail))
     rw.rewrite("SELECT c_email.lower() FROM customer", StatementKind.Select, effSet, ctx)
-      .unsafeRunSync() shouldBe Rewritten("SELECT lower('***') FROM customer")
+      .unsafeRunSync() shouldBe Rewritten("SELECT lower('***') AS \"lower(c_email)\" FROM customer")
     rw.rewrite(
       "SELECT c_id FROM customer c WHERE c.c_email.contains('alice')",
       StatementKind.Select,
@@ -1208,7 +1209,7 @@ class ColumnPolicyRewriterSpec extends AnyFlatSpec with Matchers:
     run("SELECT `c_email` FROM customer") shouldBe
       Rewritten("SELECT '***' AS \"c_email\" FROM customer")
     run("SELECT upper(`c_email`) FROM customer") shouldBe
-      Rewritten("SELECT upper('***') FROM customer")
+      Rewritten("SELECT upper('***') AS \"upper(\"\"c_email\"\")\" FROM customer")
     run("SELECT c_id FROM customer WHERE `c_email` LIKE '%a%'") should not be Passthrough
   }
 
