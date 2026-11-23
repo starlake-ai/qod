@@ -119,7 +119,13 @@ final class ColumnPolicyRewriter(
         ParserInput.render(sql) match
           case Left(_)      => IO.pure(PassthroughParseFailed)
           case Right(input) =>
-            carryTimeTravel(input.text, eff, ctx).map {
+            // A word JSqlParser misreads where DuckDB reads a column is quoted first, so the table
+            // walk and every step after it parse the statement DuckDB runs. The router hands every
+            // policy step the normalized text already; normalizing again changes nothing.
+            val normalized = MisreadNames.normalized(input.text, columnPolicies = true)
+            normalized.refusal.fold(carryTimeTravel(normalized.text, eff, ctx))(reason =>
+              IO.pure(Denied(reason))
+            ).map {
               // The rewrite is printed from the parser input, which is not the caller's statement
               // here (ParserInput.Rendered.exact): shipping it would run a different statement.
               case Rewritten(_) if !input.exact => Denied(InexactRefusal)
@@ -143,6 +149,21 @@ final class ColumnPolicyRewriter(
         }
 
   private def rewriteCanonical(sql: String, eff: EffectiveSet, ctx: SchemaContext): IO[Outcome] =
+    droppedArgument(sql) match
+      case Some(reason) => IO.pure(Denied(reason))
+      case None         => rewriteChecked(sql, eff, ctx)
+
+  /** Some(refusal) when JSqlParser kept fewer arguments of a call than the statement's text gives
+    * it (ResidualColumns.droppedArgument): every later step prints from that parse, so the text is
+    * compared with it before anything else reads it.
+    */
+  private def droppedArgument(sql: String): Option[String] =
+    val text = ai.starlake.sql.JSqlStatements.firstText(sql)
+    Try(CCJSqlParserUtil.parse(text)).toOption.flatMap(stmt =>
+      ResidualColumns.droppedArgument(text, List(stmt))
+    )
+
+  private def rewriteChecked(sql: String, eff: EffectiveSet, ctx: SchemaContext): IO[Outcome] =
     if readsOnlyCatalogFunctions(sql) then IO.pure(Passthrough)
     else
       buildSchema(sql, eff.user.tenant.getOrElse(""), ctx).map {

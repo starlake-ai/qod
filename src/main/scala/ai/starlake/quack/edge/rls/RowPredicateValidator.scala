@@ -81,7 +81,10 @@ object RowPredicateValidator:
     // literal 'NULL', which is harmless for the parse check.
     val probe = TokenRegex.replaceAllIn(trimmed, "NULL")
 
-    val expr: Expression = Try(CCJSqlParserUtil.parseCondExpression(probe)) match
+    // Read as the rewriter reads it at splice time (MisreadNames.stored).
+    val read = ai.starlake.quack.edge.cls.MisreadNames.stored(probe)
+    if read.refusal.isDefined then return Invalid(read.refusal.get)
+    val expr: Expression = Try(CCJSqlParserUtil.parseCondExpression(read.text)) match
       case Success(e)  => e
       case Failure(ex) => return Invalid(s"predicateSql does not parse: ${ex.getMessage}")
 

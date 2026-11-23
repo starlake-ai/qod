@@ -379,8 +379,14 @@ class RowPolicyRewriter(
       // A time-travel clause is invisible to jsqlparser: carry it on its table reference, which
       // maybeWrap keeps as the BASE table inside the filtered view, and put it back afterwards
       // (TimeTravelCarrier). A Passthrough forwards the caller's original text, clause included.
+      // The text every policy step reads (MisreadNames.normalized): a word JSqlParser misreads
+      // where DuckDB reads a column is quoted, so the rewrite keeps that column, and for a column
+      // policy holder a method call is the plain call DuckDB makes of it.
+      val text = ai.starlake.quack.edge.cls.MisreadNames
+        .normalized(sql, columnPolicies = eff.columnPolicies.nonEmpty)
+        .text
       val parsed = ParserInput
-        .render(sql)
+        .render(text)
         .toOption
         .flatMap { in =>
           TimeTravelCarrier.carry(in.text) match
@@ -626,7 +632,12 @@ class RowPolicyRewriter(
         try
           val predicate =
             matched.map(p => "(" + substitute(p.predicateSql, values) + ")").mkString(" OR ")
-          val parsed = CCJSqlParserUtil.parseCondExpression(predicate)
+          // Read as DuckDB reads it, by the function stored masks are read with: a method call in
+          // it is the plain call DuckDB makes of it (MisreadNames.stored); one it cannot write so
+          // fails the policy closed.
+          val stored = ai.starlake.quack.edge.cls.MisreadNames.stored(predicate)
+          stored.refusal.foreach(reason => throw new IllegalArgumentException(reason))
+          val parsed = CCJSqlParserUtil.parseCondExpression(stored.text)
           val read   = qualifyPredicate(parsed, ownQualifiers(t, ctx), rowAlias)
           requireColumns(
             t,

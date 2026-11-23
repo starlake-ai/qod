@@ -67,16 +67,23 @@ final class ProtectedWriteGuard(
     * False denies it as an incomplete extraction.
     */
   def check(
-      sql: String,
+      statement: String,
       kind: StatementKind,
       eff: EffectiveSet,
       ctx: SchemaContext,
       clientDataScans: Boolean = false
   ): GuardOutcome =
+    // The text every policy step reads (MisreadNames.normalize): the column rewriter parses this
+    // one, so this guard must too, or a word JSqlParser misreads would hide a read from it alone.
     val colPolicies = if clsEnabled then eff.columnPolicies else Nil
     val rowPolicies = if rlsEnabled then eff.rowPolicies else Nil
+    val normalized  = ai.starlake.quack.edge.cls.MisreadNames
+      .normalized(statement, columnPolicies = colPolicies.nonEmpty && !eff.user.isSuperuser)
+    val sql = normalized.text
     if eff.user.isSuperuser then Allow // superuser
     else if colPolicies.isEmpty && rowPolicies.isEmpty then Allow
+    // A method call the column rewriter could not write as a plain call: refused there too.
+    else if normalized.refusal.isDefined then Deny(s"access denied: ${normalized.refusal.get}")
     else
       // Every kind, a plain SELECT included: a table named in a string is invisible to the
       // rewriters, so the read would come back unfiltered and unmasked. A quoted name holding a
@@ -166,8 +173,15 @@ final class ProtectedWriteGuard(
     // the extractor's per-statement results by index. Anything that breaks that pairing is a read
     // we cannot isolate, so it denies.
     parseAsts(sql) match
-      case Some(asts) if asts.size == results.size =>
-        evaluate(results.zip(asts), eff, ctx, colPolicies, rowPolicies, clientDataScans)
+      case Some((text, asts)) if asts.size == results.size =>
+        // A call JSqlParser kept fewer arguments of than the text gives drops a word DuckDB reads
+        // as a column: nothing below would see that read.
+        ai.starlake.sql.TooDeep.orElse(Some(ai.starlake.sql.TooDeep.Reason))(
+          callRefusal(text, colPolicies.nonEmpty)
+        ) match
+          case Some(reason) => Deny(s"access denied: $reason")
+          case None         =>
+            evaluate(results.zip(asts), eff, ctx, colPolicies, rowPolicies, clientDataScans)
       case _ => Deny(IncompleteDeny)
 
   private def evaluate(
@@ -269,14 +283,38 @@ final class ProtectedWriteGuard(
     else if inner.nonEmpty then None
     else Some(sel.withWithItemsList(outer.asJava))
 
+  /** Some(refusal) when a statement of `text` holds a call JSqlParser kept fewer arguments of than
+    * its text gives (each statement parsed alone, so the parser's token positions are its own), or,
+    * under column policies, a call left in method form ([[ResidualColumns.methodCallLeft]]).
+    */
+  private def callRefusal(text: String, columnPolicies: Boolean): Option[String] =
+    ai.starlake.sql.SqlCommentStripper
+      .statementSpans(text)
+      .iterator
+      .flatMap { (from, until) =>
+        val one = text.substring(from, until)
+        scala.util.Try(CCJSqlParserUtil.parse(one)).toOption.flatMap { stmt =>
+          ai.starlake.quack.edge.cls.ResidualColumns
+            .droppedArgument(one, List(stmt))
+            .orElse(
+              Option
+                .when(columnPolicies)(
+                  ai.starlake.quack.edge.cls.ResidualColumns.methodCallLeft(stmt)
+                )
+                .flatten
+            )
+        }
+      }
+      .nextOption()
+
   /** Re-parse the whole (stripped, lexer-canonical: the input `SqlParser.extract` parses) input
     * into its statement list, or None on any rendering or parse failure.
     */
-  private def parseAsts(sql: String): Option[List[Statement]] =
+  private def parseAsts(sql: String): Option[(String, List[Statement])] =
     ai.starlake.sql.ParserInput.renderWithoutTimeTravel(sql).toOption.flatMap { input =>
       try
         val stmts = ai.starlake.sql.JSqlStatements.parseBatch(input.text, configure)
-        Option(stmts).map(_.asScala.toList)
+        Option(stmts).map(s => input.text -> s.asScala.toList)
       catch case _: Throwable => None
     }
 
