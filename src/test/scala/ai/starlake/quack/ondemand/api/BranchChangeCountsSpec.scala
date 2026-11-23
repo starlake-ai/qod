@@ -1010,6 +1010,61 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
     f.restTables(RootSessionTok, RootScope).flatMap(_.rowConflicts) shouldBe empty
   }
 
+  // ---------- issue #298: what `changes` says of row conflicts, and what its counts are ----------
+
+  private def changesOf(f: Fixture): BranchChangesResponse =
+    f.handlers
+      .changes("acme", f.parent.name, "feature", Some(true), Some(RootSessionTok))(RootScope)
+      .unsafeRunSync()
+      .fold(e => fail(s"changes: $e"), identity)
+
+  private def proposeAsRoot(f: Fixture): Unit =
+    f.handlers
+      .propose(BranchProposeRequest("acme", f.parent.name, "feature"), Some(RootSessionTok))(
+        RootScope
+      )
+      .unsafeRunSync()
+      .fold(e => fail(s"propose: $e"), _ => ())
+
+  it should "say its row conflicts are not computed when no proposal is open" in {
+    val f = new Fixture(ConflictingNode)
+    f.mainTouchesRegion()
+    val reply = changesOf(f)
+    reply.rowConflictsStatus shouldBe "not_computed"
+    reply.tables.flatMap(_.rowConflicts) shouldBe empty
+  }
+
+  it should "leave out an open proposal's row conflicts once main moved past it, and say so" in {
+    val f = new Fixture(ConflictingNode)
+    proposeAsRoot(f)
+    val current = changesOf(f)
+    current.rowConflictsStatus shouldBe "current"
+    current.tables.flatMap(_.rowConflicts).map(_.cellConflicts) shouldBe List(2L, 2L)
+    f.mainTouchesRegion()
+    val stale = changesOf(f)
+    stale.rowConflictsStatus shouldBe "stale"
+    stale.tables.flatMap(_.rowConflicts) shouldBe empty
+    // Proposing again computes them against main as it is now.
+    proposeAsRoot(f)
+    changesOf(f).rowConflictsStatus shouldBe "current"
+  }
+
+  it should "call an open proposal's row conflicts stale once the branch moved past it" in {
+    val f = new Fixture(ConflictingNode)
+    proposeAsRoot(f)
+    f.branchDropsNation()
+    val reply = changesOf(f)
+    reply.rowConflictsStatus shouldBe "stale"
+    reply.tables.flatMap(_.rowConflicts) shouldBe empty
+  }
+
+  it should "label its counts as change events, which a proposal's net counts are not" in {
+    val f = new Fixture
+    changesOf(f).countsAre shouldBe "change_events"
+    val tool = new McpBranchTools(f.handlers, RootScope).tools.find(_.name == "branch_changes").get
+    tool.description should include("change events")
+  }
+
   it should "be refused for a branch that does not exist" in {
     val f = new Fixture
     f.handlers
@@ -1022,13 +1077,21 @@ class BranchChangeCountsSpec extends AnyFlatSpec with Matchers:
   "a table the branch dropped after the proposal" should "show a viewer who never counted it a flag, not the stored numbers" in {
     val f = new Fixture(ConflictingNode)
     // The numbers stored with the proposal are the system's. Nothing freezes a proposed branch.
-    f.handlers
+    val proposed = f.handlers
       .propose(BranchProposeRequest("acme", f.parent.name, "feature"), Some(RootSessionTok))(
         RootScope
       )
       .unsafeRunSync()
-      .isRight shouldBe true
+      .fold(e => fail(s"propose: $e"), identity)
     f.branchDropsNation()
+    // The branch moved past the proposal, so `changes` leaves its numbers out (issue #298)...
+    val moved = changesOf(f)
+    moved.rowConflictsStatus shouldBe "stale"
+    moved.tables.flatMap(_.rowConflicts) shouldBe empty
+    // ...unless the proposal is taken as read at the new head: what is shown of them is then
+    // still decided table by table.
+    val stored = f.store.getBranchMerge(proposed.merge.id).get
+    f.store.createBranchMerge(stored.copy(headSnapshotAtPropose = Some(moved.headSnapshot)))
     val asAlice = f.restTables(SessionTok, AliceScope).map(t => t.table -> t).toMap
     // Only a modified table is counted. For the dropped one the counts were asked for and none
     // failed, which must not read as a count that succeeded: nothing says alice may read it.

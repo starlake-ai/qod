@@ -138,3 +138,16 @@ class NameRuleWritersSpec extends AnyFlatSpec with Matchers:
     f.database("other").unsafeRunSync().isRight shouldBe true
     f.pool("eu_west", tenantDb = "acme_other").unsafeRunSync().isRight shouldBe true
   }
+
+  it should "answer 409 pool_name_taken for a name another database of the tenant uses, writing nothing" in {
+    val f = new Fixture
+    f.pool("bi").unsafeRunSync().isRight shouldBe true
+    f.database("other").unsafeRunSync().isRight shouldBe true
+    val before          = f.store.snapshot().pools
+    val (status, error) = f.pool("bi", tenantDb = "acme_other").unsafeRunSync().left.toOption.get
+    status shouldBe StatusCode.Conflict
+    error.error shouldBe "pool_name_taken"
+    error.message should include("'bi'")
+    f.store.snapshot().pools shouldBe before
+    f.sup.get(PoolKey("acme", "acme_other", "bi")) shouldBe None
+  }

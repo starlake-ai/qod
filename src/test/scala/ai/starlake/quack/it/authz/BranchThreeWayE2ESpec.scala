@@ -1603,10 +1603,10 @@ class BranchThreeWayE2ESpec
     read(branchesOf(td), agent).hcursor.downField("branches").downN(0).get[String]("owner") shouldBe
       Right("bob")
     tableNames(read(s"${branchesOf(td)}/feature/changes", agent)) shouldBe List("fact")
-    // The catalog tools are an admin's, branch or no branch; run_sql reads what the token may.
-    tool("list_tables", "branch" -> s("feature")) match
-      case Left(err) => err should include("tenant_forbidden")
-      case Right(t)  => fail(s"a plain token read the catalog: $t")
+    // The catalog tools list what the token's owner may read (issue #297), as SHOW TABLES does.
+    val listed = ok(tool("list_tables", "branch" -> s("feature"))).noSpaces
+    listed should include("fact")
+    listed should not include "secret"
     val shown = ok(tool("run_sql", "sql" -> s("SHOW TABLES"), "branch" -> s("feature"))).noSpaces
     shown should include("fact")
     shown should not include "secret"

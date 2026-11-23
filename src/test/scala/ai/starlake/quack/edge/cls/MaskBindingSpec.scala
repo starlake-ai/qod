@@ -214,7 +214,7 @@ class MaskBindingSpec extends AnyFlatSpec with Matchers:
     }
 
   "a row predicate in method form" should "be read as DuckDB reads it" in {
-    val rls = new ai.starlake.quack.edge.rls.RowPolicyRewriter(enabled = true)
+    val rls = ai.starlake.quack.edge.rls.RowPolicyRewriterSpec.withNoCatalog()
     val p   = ai.starlake.quack.ondemand.state
       .RoleRowPolicy("rp-1", "r-1", "*", "main", "secret", "region.upper() = 'SECRET-EU'")
     val eff = EffectiveSet(user, Nil, Nil, Nil, Nil, Nil, List(p))
@@ -222,10 +222,12 @@ class MaskBindingSpec extends AnyFlatSpec with Matchers:
       "SELECT id FROM secret",
       StatementKind.Select,
       eff,
-      ai.starlake.quack.edge.rls.SchemaContext(Some(Catalog), Some("main"))
+      ai.starlake.quack.edge.rls.SchemaContext(Some(Catalog), Some("main"), None)
     ) match
       case ai.starlake.quack.edge.rls.RowPolicyRewriter.Rewritten(out) =>
-        out should include("upper(region) = 'SECRET-EU'")
+        out.replaceAll("__qod_rls_[0-9a-f]{32}\\.", "") should include(
+          "upper(region) = 'SECRET-EU'"
+        )
         Using.resource(database())(conn => rowsOf(conn, out) shouldBe Right(List(List("1"))))
       case other => fail(s"expected Rewritten, got $other")
     ai.starlake.quack.edge.rls.RowPredicateValidator.validate(

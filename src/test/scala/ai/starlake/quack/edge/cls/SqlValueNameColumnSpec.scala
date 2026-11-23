@@ -417,7 +417,7 @@ class SqlValueNameColumnSpec extends AnyFlatSpec with Matchers:
     }
 
   "the row filter" should "filter a table read whole through a time keyword" in {
-    val rls = new ai.starlake.quack.edge.rls.RowPolicyRewriter(enabled = true)
+    val rls = ai.starlake.quack.edge.rls.RowPolicyRewriterSpec.withNoCatalog()
     val p   = ai.starlake.quack.ondemand.state
       .RoleRowPolicy("rp-1", "r-1", "*", "main", "current_date", "id = 1")
     val eff = EffectiveSet(user, Nil, Nil, Nil, Nil, Nil, List(p))
@@ -425,7 +425,7 @@ class SqlValueNameColumnSpec extends AnyFlatSpec with Matchers:
       "SELECT current_date FROM current_date",
       StatementKind.Select,
       eff,
-      ai.starlake.quack.edge.rls.SchemaContext(Some(Catalog), Some("main"))
+      ai.starlake.quack.edge.rls.SchemaContext(Some(Catalog), Some("main"), None)
     ) match
       case ai.starlake.quack.edge.rls.RowPolicyRewriter.Rewritten(sql) => sql
       case other => fail(s"expected Rewritten, got $other")

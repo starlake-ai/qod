@@ -70,7 +70,10 @@ final class FlightSqlRouter(
         new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(Map.empty)
       ),
     val rowPolicyRewriter: ai.starlake.quack.edge.rls.RowPolicyRewriter =
-      new ai.starlake.quack.edge.rls.RowPolicyRewriter(),
+      new ai.starlake.quack.edge.rls.RowPolicyRewriter(
+        new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(Map.empty),
+        ai.starlake.quack.edge.cls.UnresolvedMode.Pass
+      ),
     val registry: ActiveStatementRegistry = new ActiveStatementRegistry(),
     val journal: EventJournal = EventJournal.noop,
     val stampWrites: Boolean = false,
@@ -1250,7 +1253,8 @@ final class FlightSqlRouter(
         val r0         = System.nanoTime()
         val schemaCtxR = ai.starlake.quack.edge.rls.SchemaContext(
           defaultDatabase = defaultDb,
-          defaultSchema = defaultSchm
+          defaultSchema = defaultSchm,
+          pool = Some(poolKey)
         )
         val outcome   = rowPolicyRewriter.rewrite(rewrittenSql, kind, eff, schemaCtxR)
         val elapsedMs = (System.nanoTime() - r0) / 1_000_000L

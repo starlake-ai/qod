@@ -178,6 +178,9 @@ object QuackProtocol:
   /** A bounded request ([[QuackTransport.bounded]]) the node did not begin to answer in time. */
   val NoAnswer = "the Quack node did not answer in time"
 
+  /** The connection to the node ended with no answer: the node stopped, or was killed (an OOM). */
+  val ConnectionLost = "the Quack node closed the connection without answering (stopped or killed?)"
+
   /** A node's answer other than 200, as clients read it: the status and no address, which only the
     * log carries (#240).
     */
@@ -242,6 +245,12 @@ object QuackProtocol:
           case e: java.net.http.HttpTimeoutException =>
             logger.warn(s"Quack node at $uri did not answer in time: $e")
             throw QuackWireError.Transient(QuackProtocol.NoAnswer)
+          // The connection ended with no answer: the node closed it, or was killed (an OOM kill
+          // reads "HTTP/1.1 header parser received no bytes"). Transient, never the node's refusal:
+          // the router retries a lone read elsewhere and answers a write whose outcome is unknown.
+          case e: java.io.IOException =>
+            logger.warn(s"Quack node at $uri closed the connection without answering: $e")
+            throw QuackWireError.Transient(QuackProtocol.ConnectionLost)
       // Any other status reaches clients too: the text names the status, the log the address.
       resp.statusCode() match
         case 200                         => resp.body()

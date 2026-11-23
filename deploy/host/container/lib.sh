@@ -213,6 +213,22 @@ EOF
   mv -f "$tmp" "$COMPOSE_FILE"
 }
 
+# verify_image IMAGE:TAG: the image's cosign signature, made keyless by this repository's release or
+# snapshot workflow (scripts/release/sign-image.sh). Skipped, with a warning, when cosign is not
+# installed; refuses an image with no valid signature. Images built elsewhere (--image) are not
+# signed by those workflows: pass --no-verify for them.
+SIGNER_ISSUER="https://token.actions.githubusercontent.com"
+SIGNER_IDENTITY='^https://github.com/starlake-ai/(qod|quack-on-demand)/\.github/workflows/(release|snapshot)\.yml@'
+verify_image() {
+  if ! command -v cosign >/dev/null; then
+    say "WARN: cosign is not installed: the signature of $1 is not checked (https://docs.sigstore.dev/cosign/system_config/installation/)"
+    return 0
+  fi
+  cosign verify --certificate-oidc-issuer "$SIGNER_ISSUER" --certificate-identity-regexp "$SIGNER_IDENTITY" "$1" >/dev/null 2>&1 ||
+    die "$1 has no valid signature from the QoD release workflows (cosign verify); pass --no-verify only for an image you built yourself"
+  say "signature of $1 verified"
+}
+
 compose() { docker compose --progress quiet -p "$PROJECT" -f "$COMPOSE_FILE" --env-file "$VERSION_ENV" "$@"; }
 
 # ---------------------------------------------------------------------------------------------

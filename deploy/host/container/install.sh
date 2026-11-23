@@ -4,7 +4,7 @@
 #
 #   install.sh --version VERSION --settings FILE [--workers N] [--worker-size <cpus>cpu,<GiB>g]
 #              [--postgres external|bundled] [--data-dir DIR] [--spill-root DIR]
-#              [--image REPO] [--name NAME] [--no-pull] [--skip-smoke]
+#              [--image REPO] [--name NAME] [--no-pull] [--no-verify] [--skip-smoke]
 #
 # --settings FILE  the manager's own settings, KEY=VALUE lines: QOD_PG_* for an external
 #                  PostgreSQL, QOD_DUCKLAKE_DATA_PATH and QOD_S3_* for object storage, any other
@@ -24,7 +24,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 source "$HERE/lib.sh"
 
 VERSION="" SETTINGS="" WORKERS="" WORKER_SIZE="" POSTGRES=external DATA_DIR="" SPILL_ROOT=/fastdisk/qod-spill
-QOD_IMAGE=starlakeai/quack-on-demand HOST_NAME="$(hostname -s)" PULL=1 SMOKE=1
+QOD_IMAGE=starlakeai/quack-on-demand HOST_NAME="$(hostname -s)" PULL=1 SMOKE=1 VERIFY=1
 while (( $# )); do
   case "$1" in
     --version) VERSION="$2"; shift 2 ;;
@@ -37,6 +37,7 @@ while (( $# )); do
     --image) QOD_IMAGE="$2"; shift 2 ;;
     --name) HOST_NAME="$2"; shift 2 ;;
     --no-pull) PULL=0; shift ;;
+    --no-verify) VERIFY=0; shift ;;
     --skip-smoke) SMOKE=0; shift ;;
     -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
     *) die "unknown argument '$1' (install.sh --help)" ;;
@@ -130,6 +131,7 @@ if (( PULL )); then
   [[ "$POSTGRES" == bundled ]] && docker pull -q postgres:16 >/dev/null
 fi
 docker image inspect "$QOD_IMAGE:$VERSION" >/dev/null 2>&1 || die "image $QOD_IMAGE:$VERSION is not on this host"
+if (( VERIFY )); then verify_image "$QOD_IMAGE:$VERSION"; else say "WARN: --no-verify: the signature of $QOD_IMAGE:$VERSION is not checked"; fi
 
 # ---------------------------------------------------------------------------------------------
 # 3. Directories (spec sections 7 and 9.1)

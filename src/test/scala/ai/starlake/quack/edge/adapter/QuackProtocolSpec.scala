@@ -492,6 +492,33 @@ class QuackProtocolSpec extends AnyFunSpec with Matchers:
       finally silent.close()
     }
 
+    it("reports a connection the node closes without answering as Transient, naming no address") {
+      // What a node killed mid-request (an OOM) does: it took the request, then the connection
+      // ended with no status line. The JDK reads "HTTP/1.1 header parser received no bytes".
+      val server = new java.net.ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress)
+      val port   = server.getLocalPort
+      val node   = new Thread(() =>
+        try
+          val s = server.accept()
+          s.getInputStream.read(new Array[Byte](4096)): Unit
+          s.close()
+        catch case _: java.io.IOException => ()
+      )
+      node.setDaemon(true)
+      node.start()
+      try
+        val transport = new QuackProtocol.JdkHttpTransport(java.net.http.HttpClient.newHttpClient())
+        val err       = intercept[QuackWireError.Transient] {
+          transport
+            .post(URI.create(s"http://127.0.0.1:$port/quack"), Array.emptyByteArray)
+            .unsafeRunSync()
+        }
+        err.msg shouldBe QuackProtocol.ConnectionLost
+        err.msg should not include "127.0.0.1"
+        err.msg should not include port.toString
+      finally server.close()
+    }
+
     /** `body` against a local server that answers every request with `status`. */
     def answering[A](status: Int)(body: Int => A): A =
       val server = com.sun.net.httpserver.HttpServer

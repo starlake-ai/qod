@@ -89,10 +89,12 @@ final class ProtectedWriteGuard(
       // rewriters, so the read would come back unfiltered and unmasked. A quoted name holding a
       // dot is matched by the rewriters as a qualified name, not as the one table DuckDB reads
       // (DottedIdentifierScreen). A SQL-valued setting runs SQL nobody reads, and a batch that
-      // moves the schema or search path resolves its bare names past the policies.
+      // moves the schema or search path resolves its bare names past the policies. A function
+      // returning the statement's text would show the policies applied to it.
       DottedIdentifierScreen
         .find(sql)
         .orElse(CatalogReachingCalls.find(sql).map(CatalogReachingCalls.denyReason))
+        .orElse(StatementTextScreen.find(sql).map(StatementTextScreen.denyReason))
         .orElse(
           CatalogReachingCalls.sqlValuedSetting(sql).map(CatalogReachingCalls.settingDenyReason)
         )

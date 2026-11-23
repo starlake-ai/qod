@@ -411,6 +411,12 @@ MCP troubleshooting:
   fresh PAT.
 - **Tool missing from tools/list**: wrong tier - admin tools need an admin-owned PAT.
 - **run_sql denied**: the ACL message names the table and missing verb; fix the grant.
+- **A plain user's discovery tools** (`list_databases`, `list_tables`, `describe_table`,
+  `table_history`) show the databases of their tenant with a pool they may connect to, and
+  only the tables their grants cover for reading (`RO`, `RW` or `ALL`, as `SHOW TABLES`
+  lists them); any other table answers `not_found`. `no_pool_access`: no pool of that
+  database admits them. A row count of `-1` is withheld: the user holds a row policy, so
+  count with `run_sql`. `list_snapshots` needs an admin.
 - **"pool is resuming"**: the suspended pool is waking; retry in a few seconds.
 - Row caps: `run_sql` is truncated server-side at `QOD_MCP_MAX_ROWS` (default 500).
 
@@ -643,7 +649,7 @@ qod pool set-resources --tenant acme --db acme_tpch --pool bi --cpu 2 --memory 8
 qod pool set-pod-template --tenant acme --db acme_tpch --pool bi --file pod-template.yaml
 ```
 
-The local backend ignores cpu/memory/template; use database or pool `initSql` (`SET memory_limit='...'`) for local memory control. The Helm chart's `resources` block sizes the MANAGER container, not node pods; use `qod pool set-resources` for node-pod sizing.
+On the local and fleet runtimes a pool's cpu and memory become each node's DuckDB `threads` (cpu rounded up) and `memory_limit`, set before the database's and pool's `initSql`, so a `SET threads` / `SET memory_limit` there still wins; a pool that sets neither keeps DuckDB's defaults (all cores, 80% of the host's memory locally). DuckDB enforces it, not the kernel. The local backend ignores the pod template. The Helm chart's `resources` block sizes the MANAGER container, not node pods; use `qod pool set-resources` for node-pod sizing.
 
 `pool/setResources` is mutation-gated as of 2026-08-13, like `pool/create` and `pool/scale`: a module gate may refuse it, and the refusal surfaces as **HTTP 429 `quota_exceeded`** with the reason in the body. Superuser callers (a superuser session or PAT) bypass the gate, as everywhere. Zero-module (plain OSS) boots have no gates registered, so nothing changes there.
 
@@ -2251,7 +2257,12 @@ nothing, even of a table they altered on their own branch), and
 table, and a key on one as for a table not in the change set. They see a table's
 row numbers only when their own count of it succeeds, and the count of a user
 holding a column or row policy never does: such a user gets no `rowConflicts` at
-all. An OPA tenant's users see what their QoD grants cover for reading, as with
+all. Row conflicts come from a proposal only: `branch changes` says which in
+`rowConflictsStatus` (`current`, the open proposal's with main and the branch where
+it read them; `stale`, either moved since, so they are left out: propose again;
+`not_computed`, no open proposal), and its insert/delete/update counts are change
+events (`countsAre`), one per snapshot a row changed in, where a proposal's are net.
+An OPA tenant's users see what their QoD grants cover for reading, as with
 their `SHOW TABLES`, since OPA does not narrow those grants: nothing with no such
 grant, and every name on the default built-ins.
 `mergeable` is always the whole branch's, and a refusal's text can still name

@@ -26,7 +26,7 @@ class PolicyTextSpec extends AnyFlatSpec with Matchers:
   private val Catalog = "acme_lake"
   private val user    = RbacUser("u-1", Some("acme"), "alice", "user")
   private val ctx     = SchemaContext(Some(Catalog), Some("main"), attachedCatalogs = Set.empty)
-  private val rctx    = ai.starlake.quack.edge.rls.SchemaContext(Some(Catalog), Some("main"))
+  private val rctx    = ai.starlake.quack.edge.rls.SchemaContext(Some(Catalog), Some("main"), None)
 
   /** Every word the enumeration found (MisreadNames.QuotedWords). */
   private val Words = (MisreadNames.QuotedWords ++ Set("output", "preferring", "xor")).toList.sorted
@@ -38,7 +38,10 @@ class PolicyTextSpec extends AnyFlatSpec with Matchers:
   private val catalog = new ColumnCatalog.MapCatalog(columns)
   private val cls     = new ColumnPolicyRewriter(catalog)
   private val guard   = new ProtectedWriteGuard(catalog, clsEnabled = true, rlsEnabled = true)
-  private val rls     = new RowPolicyRewriter(enabled = true)
+  private val rls     = ai.starlake.quack.edge.rls.RowPolicyRewriterSpec.withNoCatalog()
+
+  private def unaliased(r: RowPolicyRewriter.Outcome): String =
+    r.toString.replaceAll("__qod_rls_[0-9a-f]{32}", "__qod_rls")
 
   private def deny(column: String) =
     RoleColumnPolicy(s"cd-$column", "r-1", "*", "main", "kv", column, "deny", None)
@@ -153,8 +156,9 @@ class PolicyTextSpec extends AnyFlatSpec with Matchers:
           guard.check(text, StatementKind.Dml, withPolicies, ctx)
         cls.rewrite(raw, StatementKind.Select, withPolicies, ctx).unsafeRunSync() shouldBe
           cls.rewrite(text, StatementKind.Select, withPolicies, ctx).unsafeRunSync()
-        rls.rewrite(raw, StatementKind.Select, withPolicies, rctx) shouldBe
-          rls.rewrite(text, StatementKind.Select, withPolicies, rctx)
+        // Each wrap draws a fresh random alias, so the two texts are compared with it erased.
+        unaliased(rls.rewrite(raw, StatementKind.Select, withPolicies, rctx)) shouldBe
+          unaliased(rls.rewrite(text, StatementKind.Select, withPolicies, rctx))
       }
     }
 

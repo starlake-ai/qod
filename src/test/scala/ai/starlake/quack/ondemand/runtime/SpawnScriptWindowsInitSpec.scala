@@ -116,6 +116,28 @@ class SpawnScriptWindowsInitSpec extends AnyFlatSpec with Matchers with SpawnScr
     Files.exists(dir) shouldBe false
   }
 
+  // Decision D6, mirror of SpawnScriptTenantInitSpec: the pool's cpu/memory SETs (resourceSql, the
+  // manager's) right after the nonce and the proxy settings, closed by a `;` line, and before the
+  // tenant-db's initSql, so an operator's own SET there still wins.
+  it should "run the pool's resourceSql before the tenant's initSql" in {
+    val tmp                 = Files.createDirectories(tempDir.resolve("t"))
+    val ((rc, out, err), _) =
+      dryRun(
+        tmp,
+        secrets = Map(NodeSecretFiles.TenantDbInitTrustedKey -> "SET threads = 7;"),
+        extraEnv = Seq("resourceSql" -> "SET threads = 2;\nSET memory_limit = '4096MiB';\n")
+      )
+    withClue(err)(rc shouldBe 0)
+    val lines = out.linesIterator.map(_.stripSuffix("\r")).toVector
+    withClue(lines.mkString("\n")) {
+      lines.slice(1, 3) shouldBe Vector("SET threads = 2;", "SET memory_limit = '4096MiB';")
+      val close = lines.indexOf(";", 3)
+      close should be > 2
+      close should be < lines.indexWhere(_.startsWith("SET temp_directory = '"))
+      lines.indexOf("SET threads = 7;") should be > close
+    }
+  }
+
   // Task 20 Part B, mirror of SpawnScriptTenantInitSpec: trusted initSql in place, untrusted inside
   // the marker lines, a marker line inside a tenant's text dropped.
   it should "hand a tenant's initSql to qod-node in place when trusted, marked when not" in {

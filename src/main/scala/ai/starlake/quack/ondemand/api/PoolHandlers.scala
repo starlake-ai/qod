@@ -382,6 +382,10 @@ final class PoolHandlers(
                           Left(
                             (StatusCode.Conflict, ErrorResponse("pool_reads_alike", r.getMessage))
                           )
+                        case t: PoolSupervisor.PoolNameTaken =>
+                          Left(
+                            (StatusCode.Conflict, ErrorResponse("pool_name_taken", t.getMessage))
+                          )
                         case t =>
                           // The supervisor logs nothing when the first node fails to start.
                           logger.error(s"pool create for $key failed", t)

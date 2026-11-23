@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.14.2
 
 ### Upgrading
 
@@ -64,6 +64,14 @@
   this release takes none from an earlier manager. Set `QOD_FLEET_NODE_S3_ENDPOINT` on the manager
   where servers reach the store at another address than the manager, and give every HA replica the
   same `QOD_S3_*`.
+- Local runtime: a pool that sets `cpu` or `memory` now gets them as its nodes' DuckDB `threads`
+  and `memory_limit` (Changed below), from each node's next start. Such a pool used to get every
+  core and 80% of the host's memory, so its nodes can now be much smaller. Before upgrading, list
+  those pools on the control-plane database with
+  `SELECT tenant_db_id, name, cpu, memory FROM qodstate_pool WHERE cpu <> '' OR memory <> ''`,
+  and clear the ones that should keep the host's size (`qod pool set-resources --cpu '' --memory
+  ''`) or set the size they should have. A `SET threads` or `SET memory_limit` in the database's
+  or the pool's `initSql` still wins.
 
 ### Security
 
@@ -82,6 +90,51 @@
   - An OPA tenant's input now carries catalog, schema, table, column and secure view names folded
     as DuckDB folds them (`"SECRET_ÉTÉ"` arrives as `secret_ÉtÉ`, formerly `secret_été`); a Rego
     rule written against the old lowercased form must be updated.
+- **A row policy no longer filters a reference that DuckDB binds to a CTE.** A statement whose
+  WITH clause declares a CTE named like a table the caller holds a row policy on had its
+  references to the CTE filtered as if they read that table. Inside the filter the name still
+  meant the CTE, so the policy's predicate was evaluated against another table of the statement
+  instead, which told the caller, row by row, whether that other table's values satisfied the
+  predicate. An unqualified reference is now left as written when a CTE of its name is in scope
+  where it stands, as DuckDB 2.0 scopes CTEs (WITH RECURSIVE bodies included), and both the CTE's
+  name and the reference are unquoted or quoted with nothing but double quotes or backticks
+  around a plain name; so is `recurring.<name>` anywhere in the recursive term of the recursive
+  CTE `<name>`, which DuckDB binds to that CTE. Every other reference to a row-policy table is
+  filtered as before: a qualified name (`recurring.<name>` outside that term included), one no
+  CTE of its name covers, and one whose spelling or whose CTE's spelling holds a bracket or a
+  quote inside the name. A statement reading a row-policy table where the gateway cannot place a
+  reference or a WITH clause in its scope is refused.
+- **A row predicate reads only its own table.** The filter wrapped around a row-policy table
+  named its columns bare, and DuckDB binds a name the table does not have to another FROM item
+  of the statement. A predicate naming a column the table no longer has (a column dropped or
+  renamed after the policy was written) therefore read a column of an item the caller placed
+  beside the table, and could admit every row. Two changes close it:
+  - Such a policy now fails to apply, and the statement is denied with `row policy failed to
+    apply - contact an administrator`, which names neither the predicate nor the column. The
+    gateway reads the table's columns from the catalog the column policies use. A time-travel
+    read `AT (VERSION => n)` is judged on the columns of snapshot `n`, any other clause on the
+    current columns. A table whose columns cannot be read is handled as
+    `quack-on-demand.cls.unresolvedTable` (`QOD_CLS_UNRESOLVED_TABLE`) says for column policies:
+    `pass` (the default) applies the predicate unchecked, `deny` refuses the statement.
+  - The filter reads its table under an alias drawn at random for each filtered table
+    (`__qod_rls_` and 32 hex digits), and each column of the predicate is qualified with it, so
+    a column the table lacks is a binder error on the node even where the gateway could not
+    check it. The alias is unpredictable and never shared, because DuckDB also looks an unbound
+    qualified name up as a struct column of the caller's other FROM items, and a caller can bring
+    in a column of any name without writing it (a view, a file's JSON keys, a PIVOT over data
+    values).
+
+  A column the predicate qualifies by its table's own name keeps working; another qualifier reads
+  as a struct field of the table; `rowid`, lambda parameters and `current_user`, `user`,
+  `current_role`, `session_user`, `current_schema`, `current_catalog`, `localtime` and
+  `localtimestamp` are left as written. A predicate holding a subquery whose columns are not all
+  qualified by the subquery's own FROM items or by the table's name fails to apply.
+- **Functions returning the statement's text are refused to principals with column or row
+  policies.** The node runs the statement as the gateway rewrote it, with every row filter and
+  mask in it, so `current_query()` (and `pg_catalog.current_query()`),
+  `duckdb_prepared_statements()` and `pg_catalog.pg_prepared_statements` showed such a principal
+  the administrator's predicates and the filters' aliases. A statement naming one of them is now
+  refused to such a principal, on every statement kind.
 - **Several column policies on one column: a deny wins, a policy naming the table beats a
   wildcard one, and two different masks are refused.** The policy applied used to depend on the
   order of roles and of the tables a statement named, so a weaker policy could apply in place of
@@ -198,6 +251,10 @@
 
 ### Changed
 
+- **The local runtime sizes nodes from the pool's `cpu` and `memory`**, as the fleet runtime does:
+  `cpu` becomes DuckDB's `threads` (rounded up, at least 1) and `memory` its `memory_limit` (at
+  least 64 MiB), set before the database's and the pool's `initSql`. A pool that sets neither keeps
+  DuckDB's defaults. A pool moved from the local runtime to fleet no longer changes size.
 - `qod user create --superuser` now creates an account of kind `admin`. Earlier releases created
   kind `user`, which was not a superuser on the management plane.
 - **One Docker image for every role.** `starlakeai/quack-on-demand` now also runs a fleet server:
@@ -243,6 +300,15 @@
 
 ### Added
 
+- **Signed images, with an SBOM.** Every release and snapshot of `starlakeai/quack-on-demand` (and
+  of `quack-on-demand-node` and the `quack-on-demand-worker` alias) is signed keyless with cosign
+  by its GitHub workflow and carries an SBOM and SLSA provenance as attestations; the workflow's
+  summary records each platform's compressed size. Verify one with `cosign verify
+  starlakeai/quack-on-demand:<tag> --certificate-oidc-issuer
+  https://token.actions.githubusercontent.com --certificate-identity-regexp
+  '^https://github.com/starlake-ai/(qod|quack-on-demand)/\.github/workflows/(release|snapshot)\.yml@'`.
+  `deploy/host/container/install.sh` and `switch.sh` run that check when `cosign` is installed and
+  refuse an unsigned image (`--no-verify` for one you built).
 - **One host as containers: `deploy/host/container/`.** `install.sh --version V --settings FILE`
   installs the manager and its fleet workers from the one image on one Linux server under systemd:
   host networking, read-only containers with their own limits, the worker count and size from the
@@ -281,11 +347,48 @@
 
 ### Fixed
 
+- `pool/create` with a pool name another database of the tenant already uses answers `409
+  pool_name_taken`, naming the pool, instead of `500 start_failed`. Pool names are unique per
+  tenant; nothing is written.
+- A node that dies while it runs a statement (an OOM kill, a crash) no longer reaches the client as
+  `INVALID_ARGUMENT ... permanent failure: HTTP/1.1 header parser received no bytes`. A connection
+  the node closes with no answer is a lost node, as a refused connect is: a lone read is retried on
+  another node of the pool (or answers `UNAVAILABLE`, retryable), and any other statement answers
+  that its outcome is unknown.
 - **`deploy/host/install.sh` hands `SSL_CERT_FILE` of `/etc/qod/qod.env` to its download run**
   (#280), so a proxy that re-signs TLS with a company CA no longer fails the download of the jar,
   the Java runtime and DuckDB. The file replaces the default CAs, so it must hold the public ones
   too, and must be readable by the service user; `deploy/host/README.md`, "What needs the
   network", says which download reads what.
+- **`branch_changes` (and `GET .../changes`) no longer show missing or stale row conflicts as
+  current** (#298). Only a proposal computes row conflicts, so before one the reply had no
+  `rowConflicts` although main changed the same cell, and after an early one it kept that
+  proposal's numbers once main moved (the merge itself was refused, `409 conflicts_changed`). The
+  reply now carries `rowConflictsStatus`: `current` (the open proposal's, main and the branch
+  where it read them), `stale` (either moved since: the numbers are left out, propose again) or
+  `not_computed` (no open proposal). It also carries `countsAre: change_events`: its
+  `inserted` / `deleted` / `updated` count one event per snapshot a row changed in (a row set
+  back to its fork value still counts), where a proposal's counts are net. The `branch_changes`
+  and `diff` tool descriptions say so.
+- **The MCP discovery tools answer a plain tenant member** (#297). `list_databases`,
+  `list_tables`, `describe_table` and `table_history` read through the catalog handlers' admin
+  gate, so every member who was not an admin got `tenant_forbidden: session has no admin grant on
+  tenant '...'` while `run_sql` worked with the same token. A member now gets the databases of
+  their tenant with a pool they may connect to (name, kind and those pools, within the token's
+  axes), and the schemas and tables their grants cover for reading (`RO`, `RW` or `ALL`, what
+  their `SHOW TABLES` lists). A table outside them answers `not_found` like one that does not
+  exist, and storage paths (`folder`, data files) are left out of a member's replies. A member
+  holding any row policy gets `-1` for every row count (`rowCount`, and a commit's `rowsAdded` /
+  `rowsRemoved`): the catalog counts the whole table, so the number would tell how many rows the
+  policy hides. Admins get what they got. `list_snapshots` and the `iceberg` arguments still need
+  an admin.
+- **The Quack door serves clients that send each statement as `<alias>.query('<sql>')`** (#299),
+  such as Columnar's `quack` ADBC driver: they signed in, then every statement failed with
+  `Catalog Error: Table Function with name query does not exist!`. The DuckDB client binds that
+  macro through the attached catalog's `main` schema, which it builds from `duckdb_schemas()`, and
+  the metadata filter hid `main` from a principal holding no grant in it (an admin's attach
+  worked). The filtered `duckdb_schemas()` now always keeps the session catalog's `main` row; the
+  tables in it stay filtered.
 
 ## 0.14.1
 

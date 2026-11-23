@@ -281,14 +281,17 @@ final class BranchHandlers(
         .flatMap {
           case Left(f)        => IO.pure(Left(toErr(f)))
           case Right((b, cs)) =>
-            IO.blocking(service.proposalOf(b)).map { proposal =>
+            IO.blocking(service.proposalOf(b)).map { open =>
+              // Only here: a proposal's and a merge's replies carry the numbers they computed.
+              val (proposal, status) = BranchHandlers.rowConflictsOf(open, cs)
               Right(
                 BranchHandlers.changesResponse(
                   b,
                   cs,
                   proposal,
                   a.actor,
-                  t => a.superuser || (countsAs.nonEmpty && t.counted)
+                  t => a.superuser || (countsAs.nonEmpty && t.counted),
+                  status
                 )
               )
             }
@@ -395,7 +398,9 @@ final class BranchHandlers(
                   cs,
                   Some(m),
                   a.actor,
-                  t => a.superuser || t.counted
+                  t => a.superuser || t.counted,
+                  // A proposal's reply carries the numbers it just computed.
+                  BranchChangesResponse.RowConflictsCurrent
                 )
               )
             })
@@ -420,7 +425,15 @@ final class BranchHandlers(
           BranchMergeResponse(
             entry(b),
             BranchHandlers.mergeEntry(m, a.superuser, a.actor),
-            BranchHandlers.changesResponse(b, cs, Some(m), a.actor, _ => a.superuser)
+            BranchHandlers.changesResponse(
+              b,
+              cs,
+              Some(m),
+              a.actor,
+              _ => a.superuser,
+              // A merge's reply carries the numbers its own run computed.
+              BranchChangesResponse.RowConflictsCurrent
+            )
           )
         })
     }
@@ -553,14 +566,15 @@ object BranchHandlers:
     *
     * A non-admin's lists name only the tables they see, and `otherTables` counts the rest, with the
     * raw verbs of `unsupported`, which can name views and macros. `mergeable` is the whole
-    * branch's.
+    * branch's. `rowConflictsStatus`: what the reply says of the numbers ([[rowConflictsOf]]).
     */
   private[api] def changesResponse(
       b: Branch,
       cs: BranchChangeSet,
       proposal: Option[BranchMerge],
       actor: BranchActor,
-      mayCount: TableChange => Boolean
+      mayCount: TableChange => Boolean,
+      rowConflictsStatus: String
   ): BranchChangesResponse =
     val rows =
       proposal.toList.flatMap(m => RowCounts.listFromJson(m.rowConflictsJson).getOrElse(Nil))
@@ -600,8 +614,29 @@ object BranchHandlers:
         .map(c => BranchConflictEntry(c.schema, c.table, c.reason)),
       unsupported = if actor.isAdmin then cs.unsupported else Nil,
       mergeable = cs.mergeable,
-      otherTables = if actor.isAdmin then 0 else others + cs.unsupported.size
+      otherTables = if actor.isAdmin then 0 else others + cs.unsupported.size,
+      rowConflictsStatus = rowConflictsStatus
     )
+
+  /** The open proposal whose row numbers a change set read may show, and what the reply says of
+    * them (issue #298). Row conflicts are computed by a proposal, on a merge node: a read of the
+    * change set does not start one. So the numbers are the open proposal's, shown only while main
+    * and the branch are where the proposal read them: once either moved they may be out of date
+    * (the merge would compare again and refuse with `conflicts_changed`), and they are left out
+    * rather than shown as if current. A proposal stored with no branch head reads as moved.
+    */
+  private[api] def rowConflictsOf(
+      open: Option[BranchMerge],
+      cs: BranchChangeSet
+  ): (Option[BranchMerge], String) =
+    open match
+      case None =>
+        (None, BranchChangesResponse.RowConflictsNotComputed)
+      case Some(m)
+          if m.mainSnapshotAtPropose == cs.mainSnapshot &&
+            m.headSnapshotAtPropose.contains(cs.headSnapshot) =>
+        (Some(m), BranchChangesResponse.RowConflictsCurrent)
+      case Some(_) => (None, BranchChangesResponse.RowConflictsStale)
 
   /** A stored merge summary with every table's counts zeroed and flagged `countsUnavailable`, the
     * shape a refused count has in a change set.

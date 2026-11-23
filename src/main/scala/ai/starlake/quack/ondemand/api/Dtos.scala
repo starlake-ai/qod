@@ -1888,11 +1888,12 @@ final case class BranchRowConflicts(
     samples: Map[String, List[Long]] = Map.empty
 )
 
-/** `kind`: created | dropped | recreated | modified | altered. Counts are zero unless computed;
-  * `countsUnavailable`: they were asked for and refused to the requester or failed, so the zeros
-  * are no counts. `rowConflicts` carries numbers only for a superuser and for a viewer whose own
-  * count of the table succeeded: for any other admin it says `countsUnavailable`, with zeros that
-  * are no counts, and for anyone else it is absent.
+/** `kind`: created | dropped | recreated | modified | altered. Counts are zero unless computed, and
+  * count change events since the fork, one per snapshot a row changed in (see
+  * `BranchChangesResponse.countsAre`); `countsUnavailable`: they were asked for and refused to the
+  * requester or failed, so the zeros are no counts. `rowConflicts` carries numbers only for a
+  * superuser and for a viewer whose own count of the table succeeded: for any other admin it says
+  * `countsUnavailable`, with zeros that are no counts, and for anyone else it is absent.
   */
 final case class BranchTableChange(
     schema: String,
@@ -1915,6 +1916,17 @@ final case class BranchConflictEntry(schema: String, table: String, reason: Stri
 /** `tables` and `conflicts` name what the viewer may see: an admin, every table; anyone else, the
   * tables they hold a read grant on, and no `unsupported` (raw verbs can name views and macros).
   * `otherTables` counts what that left out. `mergeable` is the whole branch's, whatever is listed.
+  *
+  * `rowConflictsStatus` says what the tables' `rowConflicts` are (issue #298). Row conflicts are
+  * computed by a proposal, on a merge node, never by a read of the change set: `current`, the
+  * proposal's, computed against main and the branch as they are now (always so on a proposal's or a
+  * merge's reply); `stale`, main or the branch moved since the open proposal, so its numbers are
+  * left out (propose again, as a merge would refuse with `conflicts_changed`); `not_computed`, no
+  * proposal is open.
+  *
+  * `countsAre` says what the tables' `inserted` / `deleted` / `updated` count: `change_events`, one
+  * per snapshot a row changed in since the fork, so a row updated twice counts twice and a row set
+  * back to its fork value still counts. A proposal's `toInsert` / `toUpdate` / `toDelete` are net.
   */
 final case class BranchChangesResponse(
     branch: String,
@@ -1925,8 +1937,16 @@ final case class BranchChangesResponse(
     conflicts: List[BranchConflictEntry],
     unsupported: List[String],
     mergeable: Boolean,
-    otherTables: Int = 0
+    otherTables: Int = 0,
+    rowConflictsStatus: String = BranchChangesResponse.RowConflictsCurrent,
+    countsAre: String = BranchChangesResponse.ChangeEvents
 )
+
+object BranchChangesResponse:
+  val RowConflictsCurrent     = "current"
+  val RowConflictsStale       = "stale"
+  val RowConflictsNotComputed = "not_computed"
+  val ChangeEvents            = "change_events"
 
 final case class BranchProposeResponse(
     branch: BranchEntry,
