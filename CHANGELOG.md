@@ -252,6 +252,15 @@
   the Java runtime and DuckDB. The file replaces the default CAs, so it must hold the public ones
   too, and must be readable by the service user; `deploy/host/README.md`, "What needs the
   network", says which download reads what.
+- **The MCP discovery tools answer a plain tenant member** (#297). `list_databases`,
+  `list_tables`, `describe_table` and `table_history` read through the catalog handlers' admin
+  gate, so every member who was not an admin got `tenant_forbidden: session has no admin grant on
+  tenant '...'` while `run_sql` worked with the same token. A member now gets the databases of
+  their tenant with a pool they may connect to (name, kind and those pools, within the token's
+  axes), and the schemas and tables their grants cover for reading (`RO`, `RW` or `ALL`, what
+  their `SHOW TABLES` lists). A table outside them answers `not_found` like one that does not
+  exist, and storage paths (`folder`, data files) are left out of a member's replies. Admins get
+  what they got. `list_snapshots` and the `iceberg` arguments still need an admin.
 
 ## 0.14.1
 
