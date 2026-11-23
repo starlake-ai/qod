@@ -1725,8 +1725,11 @@ abstract class AuthzEndToEndCases(
     // mona and rhea hold RO on the view: the grant passes, the function in its body does not.
     List("mona", "rhea").foreach(u => refused(u, "lake", s"SELECT q FROM $view", TextRefusal))
     // The node's refusal is booked as a denial, for each of them.
-    val booked = deniedInHistory("stmt_text_v").filter(
-      _.hcursor.get[String]("error").exists(_.contains(TextRefusal))
+    def ofText(rows: List[Json]) =
+      rows.filter(_.hcursor.get[String]("error").exists(_.contains(TextRefusal)))
+    def users(rows: List[Json]) = rows.flatMap(_.hcursor.get[String]("username").toOption).toSet
+    val booked = ofText(
+      deniedInHistory("stmt_text_v", rows => Set("mona", "rhea").subsetOf(users(ofText(rows))))
     )
     booked.flatMap(_.hcursor.get[String]("username").toOption) should contain allOf ("mona", "rhea")
   }
@@ -2049,10 +2052,20 @@ abstract class AuthzEndToEndCases(
   /** The `denied` rows of the statement history (`GET /api/history/statements`) whose text holds
     * `fragment`, polled while the journal flushes (every 500 ms).
     */
-  private def deniedInHistory(fragment: String): List[Json] = inHistory("denied", fragment)
+  private def deniedInHistory(
+      fragment: String,
+      until: List[Json] => Boolean = _.nonEmpty
+  ): List[Json] = inHistory("denied", fragment, until)
 
-  /** The statement history rows of `status` whose text holds `fragment`, once some are recorded. */
-  private def inHistory(status: String, fragment: String): List[Json] =
+  /** The statement history rows of `status` whose text holds `fragment`, once `until` holds of
+    * them (some are recorded, by default) or 15 s have passed: history is written after the
+    * answer, so a case expecting several principals' rows waits for all of them.
+    */
+  private def inHistory(
+      status: String,
+      fragment: String,
+      until: List[Json] => Boolean = _.nonEmpty
+  ): List[Json] =
     val q        = java.net.URLEncoder.encode(fragment, java.nio.charset.StandardCharsets.UTF_8)
     val deadline = System.nanoTime() + 15.seconds.toNanos
     def rows(): List[Json] =
@@ -2063,7 +2076,7 @@ abstract class AuthzEndToEndCases(
         .as[List[Json]]
         .getOrElse(Nil)
     var found = rows()
-    while found.isEmpty && System.nanoTime() < deadline do
+    while !until(found) && System.nanoTime() < deadline do
       Thread.sleep(250)
       found = rows()
     found
