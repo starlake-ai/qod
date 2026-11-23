@@ -439,6 +439,19 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
       .snapshot(50)
       .exists(r => r.status == "denied" && r.sql.contains("duckdb_tables()")) shouldBe false
 
+  it should "run a whole statement through the attached catalog's query() (issue #299)" in:
+    assume(liveReady, "DuckDB 2.0 CLI or a qod-node build not available")
+    // alice holds no grant in acme_db.main, and the client binds `q.query(...)` through the
+    // attached catalog's `main` schema: the form a client that sends whole statements uses.
+    val (rc, out, err) =
+      cli(s"$attach SELECT * FROM q.query('SELECT count(*) FROM tpch1.customer');")
+    withClue(err)(rc shouldBe 0)
+    out shouldBe "2000"
+    // The statement itself is still judged on alice's grants.
+    val (rc2, _, err2) = cli(s"$attach SELECT * FROM q.query('SELECT * FROM tpch1.secret');")
+    rc2 should not be 0
+    err2 should include("lacks grants on acme_db.tpch1.secret:Read")
+
   it should "stream a large single-column result through the fetch loop" in:
     assume(liveReady, "DuckDB 2.0 CLI or a qod-node build not available")
     val (rc, out, err) = cli(s"$attach SELECT count(*), max(id) FROM q.tpch1.ids;")

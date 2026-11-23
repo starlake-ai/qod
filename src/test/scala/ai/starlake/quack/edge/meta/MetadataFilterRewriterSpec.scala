@@ -791,6 +791,29 @@ class MetadataFilterRewriterSpec extends AnyFlatSpec with Matchers:
       case other => fail(s"expected Rewritten, got $other")
   }
 
+  it should "keep the session catalog's main schema in duckdb_schemas(), grants or none" in {
+    // The quack client binds `<alias>.query(...)` through the attached catalog's `main` schema,
+    // which it builds from this listing: without the row, a member with no grant in `main` gets
+    // "Table Function with name query does not exist" on every statement (issue #299).
+    val keepMain = "(lower(database_name) = 'acme_tpch' AND schema_name = 'main')"
+    go("SELECT * FROM duckdb_schemas()", eff(tenantUser, grant("acme_tpch", "tpch1", "t"))) match
+      case Rewritten(sql) =>
+        sql should include(keepMain)
+        sql should include("schema_name = 'tpch1'")
+      case other => fail(s"expected Rewritten, got $other")
+    go("SELECT * FROM duckdb_schemas()", eff(tenantUser)) match
+      case Rewritten(sql) =>
+        sql should include(keepMain)
+        sql.toUpperCase should not include "WHERE FALSE"
+      case other => fail(s"expected Rewritten, got $other")
+    // Tables stay grant-filtered: a schema row lists no table.
+    go("SELECT * FROM duckdb_tables()", eff(tenantUser)) match
+      case Rewritten(sql) =>
+        sql should not include "'main'"
+        sql.toUpperCase should include("WHERE FALSE)")
+      case other => fail(s"expected Rewritten, got $other")
+  }
+
   it should "collapse a wildcard grant to TRUE and a zero-grant principal to FALSE" in {
     // jsqlparser re-serializes boolean literals in lowercase.
     go("SELECT * FROM duckdb_tables()", eff(tenantUser, grant("*", "*", "*", verb = "RO"))) match
