@@ -296,7 +296,15 @@ class SqlValueNameColumnSpec extends AnyFlatSpec with Matchers:
     "SELECT (SELECT count(*) FILTER (WHERE {c} = 'x')) AS r FROM {t}",
     "SELECT EXISTS (SELECT 1 FROM o HAVING max({c}) = 'x') AS r FROM {t}",
     "SELECT id FROM {t} WHERE (SELECT max({c}) FROM o) = 'x'",
-    "SELECT (SELECT max({c}) OVER () FROM o LIMIT 1) AS r FROM {t}"
+    "SELECT (SELECT max({c}) OVER () FROM o LIMIT 1) AS r FROM {t}",
+    // A method call is its function over the receiver (review round 3, R-C1).
+    "SELECT (SELECT {c}.max()) AS r FROM {t}",
+    "SELECT (SELECT {c}.max() FROM o) AS r FROM {t}",
+    "SELECT (SELECT \"{c}\".max()) AS r FROM {t}",
+    "SELECT (SELECT {c}.string_agg(',')) AS r FROM {t}",
+    "SELECT (SELECT {c}.list()) AS r FROM {t}",
+    "SELECT (SELECT max({c}.upper())) AS r FROM {t}",
+    "SELECT (SELECT count(*) FILTER (WHERE {c}.upper() = 'x')) AS r FROM {t}"
   )
 
   "a SQL value name inside an aggregate of a subquery" should

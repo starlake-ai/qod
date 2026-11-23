@@ -178,3 +178,13 @@ class MaskBindingSpec extends AnyFlatSpec with Matchers:
       rewritten("SELECT l FROM lists", List(arrow)) shouldBe
         "SELECT list_transform(l, x -> concat(x, '*')) AS l FROM lists"
     }
+
+  "a stored mask expanding a star or a COLUMNS(..) expression" should "be refused" in
+    List("concat(region, COLUMNS('id'))", "to_json(*)", "concat(region, $1)").foreach { text =>
+      val mask = policy("secret", "region", "mask", Some(text))
+      withClue(text) {
+        rewrite("SELECT region FROM secret", List(mask)) match
+          case Denied(reason) => reason should include("reads another column")
+          case other          => fail(s"expected Denied, got $other")
+      }
+    }

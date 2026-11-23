@@ -67,12 +67,15 @@ final class ProtectedWriteGuard(
     * False denies it as an incomplete extraction.
     */
   def check(
-      sql: String,
+      statement: String,
       kind: StatementKind,
       eff: EffectiveSet,
       ctx: SchemaContext,
       clientDataScans: Boolean = false
   ): GuardOutcome =
+    // The text every policy step reads (MisreadNames.normalize): the column rewriter parses this
+    // one, so this guard must too, or a word JSqlParser misreads would hide a read from it alone.
+    val sql         = ai.starlake.quack.edge.cls.MisreadNames.normalize(statement)
     val colPolicies = if clsEnabled then eff.columnPolicies else Nil
     val rowPolicies = if rlsEnabled then eff.rowPolicies else Nil
     if eff.user.isSuperuser then Allow // superuser
@@ -164,8 +167,15 @@ final class ProtectedWriteGuard(
     // the extractor's per-statement results by index. Anything that breaks that pairing is a read
     // we cannot isolate, so it denies.
     parseAsts(sql) match
-      case Some(asts) if asts.size == results.size =>
-        evaluate(results.zip(asts), eff, ctx, colPolicies, rowPolicies, clientDataScans)
+      case Some((text, asts)) if asts.size == results.size =>
+        // A call JSqlParser kept fewer arguments of than the text gives drops a word DuckDB reads
+        // as a column: nothing below would see that read.
+        ai.starlake.sql.TooDeep.orElse(Some(ai.starlake.sql.TooDeep.Reason))(
+          ai.starlake.quack.edge.cls.ResidualColumns.droppedArgument(text, asts)
+        ) match
+          case Some(reason) => Deny(s"access denied: $reason")
+          case None         =>
+            evaluate(results.zip(asts), eff, ctx, colPolicies, rowPolicies, clientDataScans)
       case _ => Deny(IncompleteDeny)
 
   private def evaluate(
@@ -270,11 +280,11 @@ final class ProtectedWriteGuard(
   /** Re-parse the whole (stripped, lexer-canonical: the input `SqlParser.extract` parses) input
     * into its statement list, or None on any rendering or parse failure.
     */
-  private def parseAsts(sql: String): Option[List[Statement]] =
+  private def parseAsts(sql: String): Option[(String, List[Statement])] =
     ai.starlake.sql.ParserInput.renderWithoutTimeTravel(sql).toOption.flatMap { input =>
       try
         val stmts = ai.starlake.sql.JSqlStatements.parseBatch(input.text, configure)
-        Option(stmts).map(_.asScala.toList)
+        Option(stmts).map(s => input.text -> s.asScala.toList)
       catch case _: Throwable => None
     }
 

@@ -1012,7 +1012,7 @@ object JsqltranspilerRewriter:
   private[cls] def sameOutcome(p: RoleColumnPolicy): (String, Option[String]) =
     (p.action, p.transformSql.map(_.trim))
 
-private[cls] object ResidualColumns:
+private[quack] object ResidualColumns:
   import scala.jdk.CollectionConverters._
   import ai.starlake.acl.parser.AstChildren
   import net.sf.jsqlparser.expression.TimeKeyExpression
@@ -1069,7 +1069,9 @@ private[cls] object ResidualColumns:
       inAggregate: java.util.Set[AnyRef],
       lambdaBound: java.util.Set[Column],
       opaque: List[String],
-      dateUnits: List[java.util.List[Any]]
+      dateUnits: List[java.util.List[Any]],
+      calls: List[AnyRef],
+      maskOnly: List[String]
   )
 
   /** Nodes that read columns with no column node of their own for the visitor to mask. */
@@ -1222,6 +1224,8 @@ private[cls] object ResidualColumns:
     )
     val opaque    = scala.collection.mutable.ListBuffer.empty[String]
     val dateUnits = scala.collection.mutable.ListBuffer.empty[java.util.List[Any]]
+    val callNodes = scala.collection.mutable.ListBuffer.empty[AnyRef]
+    val maskOnly  = scala.collection.mutable.ListBuffer.empty[String]
     // Whether the node walked sits in an aggregate's arguments of its own select, and the lambda
     // parameters in scope: set around each node's children, restored after.
     var aggregate = false
@@ -1234,6 +1238,8 @@ private[cls] object ResidualColumns:
     def walk(node: AnyRef, scopes: List[Scope], ctes: Map[String, Option[Set[String]]]): Unit =
       if visited.add(node) then
         MisreadNames.opaqueReading(node).foreach(opaque += _)
+        MisreadNames.maskOnlyReading(node).foreach(maskOnly += _)
+        if MisreadNames.parsedArguments(node).isDefined then callNodes += node
         if aggregate then inAggregate.add(node): Unit
         node match
           case c: Column
@@ -1395,7 +1401,9 @@ private[cls] object ResidualColumns:
       inAggregate,
       lambdaBound,
       opaque.toList,
-      dateUnits.toList
+      dateUnits.toList,
+      callNodes.toList,
+      maskOnly.toList
     )
 
   /** Every table node of `root` except column qualifiers, by identity. */
@@ -1417,9 +1425,25 @@ private[cls] object ResidualColumns:
     References(
       s.columns.map(_._1).filterNot(s.lambdaBound.contains),
       s.timeKeys.map(_._1),
-      s.opaque,
+      s.opaque ++ s.maskOnly,
       s.unknown
     )
+
+  /** Some(refusal) when the parse of `text` (`roots`, its statements) kept fewer arguments for a
+    * call than the text gives it ([[MisreadNames.droppedArgument]]).
+    */
+  def droppedArgument(text: String, roots: List[AnyRef]): Option[String] =
+    MisreadNames.droppedArgument(text, roots.flatMap(r => scan(r).calls))
+
+  /** The receiver of the method call `f` as a column reference ([[receiverOf]]), placed in an
+    * aggregate's arguments when `f` sits in one or names a method that is not a built-in scalar
+    * function (`user.max()` is `max(user)`), as an ordinary argument would be.
+    */
+  private def receiverIn(before: Scan, f: net.sf.jsqlparser.expression.Function): Column =
+    val c = receiverOf(f)
+    if before.inAggregate.contains(f) || MisreadNames.methodAggregate(f) then
+      before.inAggregate.add(c): Unit
+    c
 
   /** The scopes an unqualified SQL value name at `at` binds in: its own select's only, except
     * inside an aggregate's arguments, which DuckDB may move to an enclosing query, where the name
@@ -1562,7 +1586,7 @@ private[cls] object ResidualColumns:
     val coverage = new Coverage(before, policies, schema)
     val refusals = before.methodCalls.flatMap { (f, scopes) =>
       val parts  = f.getMultipartName.asScala.toList
-      val column = receiverOf(f)
+      val column = receiverIn(before, f)
       if !coverage.covered(column, scopes) then None
       else if f.getNamedParameters != null || f.getKeywordArguments != null || f.isDistinct ||
         f.isAllColumns || f.getChainedParameters != null || f.getExtraKeyword != null
@@ -1685,11 +1709,7 @@ private[cls] object ResidualColumns:
       !sources.exists(src => has(src, name).contains(true))
     // `c.to_json()` is `to_json(c)`: a method call's receiver binds like any column reference, so
     // a receiver naming a policy table's binding hands the whole row to the function.
-    val receivers = before.methodCalls.map { (f, scopes) =>
-      val c = receiverOf(f)
-      if before.inAggregate.contains(f) then before.inAggregate.add(c): Unit
-      c -> scopes
-    }
+    val receivers       = before.methodCalls.map((f, scopes) => receiverIn(before, f) -> scopes)
     val keyRefs         = keyColumns.map((_, c, scopes) => c -> scopes)
     val wholeRowRefusal = (before.columns ++ receivers ++ keyRefs).collectFirst {
       case (c, scopes) if wholeRow(c, scopes) =>

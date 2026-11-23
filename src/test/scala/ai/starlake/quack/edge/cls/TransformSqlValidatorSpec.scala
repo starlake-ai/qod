@@ -106,3 +106,15 @@ class TransformSqlValidatorSpec extends AnyFlatSpec with Matchers:
     validate("left(current_date, 2) || '***'", "current_date") shouldBe a[Valid]
     validate("CASE WHEN \"SSN\" IS NULL THEN '***' END", "ssn") shouldBe a[Valid]
   }
+
+  it should "reject a star, a COLUMNS(..) expression or a parameter (review round 3, m-r1)" in
+    List(
+      "concat(ssn, COLUMNS('id'))",
+      "COLUMNS('ss.*')",
+      "to_json(*)",
+      "struct_pack(*)",
+      "concat(ssn, $1)",
+      "concat(ssn, ?)"
+    ).foreach { mask =>
+      withClue(mask)(validate(mask, "ssn") shouldBe a[Invalid])
+    }

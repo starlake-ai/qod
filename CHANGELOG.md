@@ -97,11 +97,17 @@
   for a column named `key`, `prior`, `nextval`, `connect_by_root`, `exists`, `minus`,
   `distinctrow`, `high_priority`, `straight_join` or one of the `sql_*` select modifiers when
   another word follows it (`key k`), and for one named `year`, `month`, `day`, `hour`, `minute` or
-  `second` read as a function's argument (`max(year)`). Each is now read as DuckDB reads it, so its
-  mask or deny applies in every clause. A SQL value name (`current_date`, `current_user`, `user`,
+  `second` read as a function's argument (`max(year)`), and for one named `output`, `preferring` or
+  `xor` before `ORDER BY` in an aggregate's arguments (`list(output ORDER BY id)`), which the
+  rewriter read as no argument at all. Each is now read as DuckDB reads it, so its mask or deny
+  applies in every clause, and the protected-write guard and the row policy rewriter read the
+  statement the same way, so an `INSERT ... SELECT` or `CREATE TABLE ... AS SELECT` can no longer
+  copy such a column out. Under column or row policies, a statement whose parse keeps fewer
+  arguments of a call than its text gives is refused. A SQL value name (`current_date`, `current_user`, `user`,
   `localtime` and the others) binds the column when the select's own FROM has it and the function
-  otherwise, except inside an aggregate's arguments, where DuckDB can bind an enclosing query's
-  column: there it is refused when an enclosing table has a protected column of that name. Read
+  otherwise, except inside an aggregate's arguments (a method call such as `user.max()` included),
+  where DuckDB can bind an enclosing query's column: there it is refused when an enclosing table
+  has a protected column of that name. Read
   bare in a subquery outside an aggregate, a column named `current_user`, `session_user`, `user`,
   `current_role`, `current_schema`, `current_catalog`, `localtime` or `localtimestamp` is now the
   function, as DuckDB reads it, instead of a refusal. Under column policies, a statement using
@@ -115,8 +121,9 @@
   parameters are left as written. A mask that calls `current_date`, `current_time` or
   `current_timestamp` keeps calling the function beside a column of that name.
   - Creating or updating a mask that reads another column than its own is now refused wherever the
-    column appears (inside `IN`, `IS NULL`, `BETWEEN`, `NOT`, a list, or through `@`); the check
-    used to follow functions, operators, `CASE` and `CAST` only. A mask stored before, or imported
+    column appears (inside `IN`, `IS NULL`, `BETWEEN`, `NOT`, a list, or through `@`), and so is one
+    holding a star, a `COLUMNS(..)` expression or a statement parameter; the check used to follow
+    functions, operators, `CASE` and `CAST` only. A mask stored before, or imported
     from a manifest (which does not check masks), that reads another column is refused when a
     statement reads its column: that refusal is what guards such a row. Review stored masks before
     upgrading.
