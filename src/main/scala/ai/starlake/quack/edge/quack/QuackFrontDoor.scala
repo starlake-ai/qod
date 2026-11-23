@@ -916,8 +916,10 @@ final class QuackFrontDoor(
     ) match
       case Right(out) => out
       case Left(why)  =>
-        val text = new String(resp.take(4096), java.nio.charset.StandardCharsets.UTF_8)
-          .map(c => if c.isControl && c != '\n' && c != '\t' then '?' else c)
+        // One log line, whatever the answer holds: a line break in it cannot start a line of its own.
+        val text = ai.starlake.quack.edge.FlightSqlRouter.oneLogLine(
+          new String(resp.take(4096), java.nio.charset.StandardCharsets.UTF_8)
+        )
         logger.error(
           s"unreadable node answer to a policy holder's statement on ${st.nodeId} " +
             s"(${why.getMessage}; ${resp.length} bytes, the first 4096 as text): $text"
