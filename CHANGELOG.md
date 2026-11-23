@@ -252,6 +252,13 @@
   the Java runtime and DuckDB. The file replaces the default CAs, so it must hold the public ones
   too, and must be readable by the service user; `deploy/host/README.md`, "What needs the
   network", says which download reads what.
+- **The Quack door serves clients that send each statement as `<alias>.query('<sql>')`** (#299),
+  such as Columnar's `quack` ADBC driver: they signed in, then every statement failed with
+  `Catalog Error: Table Function with name query does not exist!`. The DuckDB client binds that
+  macro through the attached catalog's `main` schema, which it builds from `duckdb_schemas()`, and
+  the metadata filter hid `main` from a principal holding no grant in it (an admin's attach
+  worked). The filtered `duckdb_schemas()` now always keeps the session catalog's `main` row; the
+  tables in it stay filtered.
 
 ## 0.14.1
 
