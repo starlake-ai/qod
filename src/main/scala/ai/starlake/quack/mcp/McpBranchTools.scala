@@ -95,10 +95,15 @@ final class McpBranchTools(branches: BranchHandlers, scopeOf: SessionScope.Resol
     description =
       "The branch's change set since its fork: touched tables (created, dropped, recreated, " +
         "modified with insert/delete/update counts, or altered), conflicts against the live " +
-        "database, and anything v1 cannot merge. `mergeable` means no table conflict and " +
-        "nothing unsupported: row conflicts are the merge's to decide, and the proposal shows " +
-        "them. Unless you are an admin, only the tables you hold a read grant on (RO, RW or " +
-        "ALL) are named, and `otherTables` counts the rest.",
+        "database, and anything v1 cannot merge. The counts are change events (countsAre), one " +
+        "per snapshot a row changed in: a row updated twice counts twice, and one set back to " +
+        "its fork value still counts; propose_merge's toInsert/toUpdate/toDelete are net. " +
+        "`mergeable` means no table conflict and nothing unsupported: row conflicts are the " +
+        "merge's to decide, and only propose_merge computes them. rowConflictsStatus says " +
+        "whether rowConflicts are the open proposal's and current, left out as stale because " +
+        "main or the branch moved since (propose again), or not_computed (no open proposal). " +
+        "Unless you are an admin, only the tables you hold a read grant on (RO, RW or ALL) are " +
+        "named, and `otherTables` counts the rest.",
     inputSchema = objectSchema(
       required = List("database", "branch"),
       props = "database" -> strProp("Database (tenant-db) name."),
@@ -123,8 +128,9 @@ final class McpBranchTools(branches: BranchHandlers, scopeOf: SessionScope.Resol
     name = "diff",
     description =
       "Row-level diff of one table between the branch's fork and its head: inserted, deleted " +
-        "and updated rows (before/after), paginated with a cursor. Call branch_changes first to " +
-        "see which tables changed.",
+        "and updated rows (before/after), paginated with a cursor. Its rows and summary are " +
+        "change events, one per snapshot a row changed in, not net changes. Call " +
+        "branch_changes first to see which tables changed.",
     inputSchema = objectSchema(
       required = List("database", "branch", "schema", "table"),
       props = "database" -> strProp("Database (tenant-db) name."),

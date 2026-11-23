@@ -261,6 +261,16 @@
   their `SHOW TABLES` lists). A table outside them answers `not_found` like one that does not
   exist, and storage paths (`folder`, data files) are left out of a member's replies. Admins get
   what they got. `list_snapshots` and the `iceberg` arguments still need an admin.
+- **`branch_changes` (and `GET .../changes`) no longer show missing or stale row conflicts as
+  current** (#298). Only a proposal computes row conflicts, so before one the reply had no
+  `rowConflicts` although main changed the same cell, and after an early one it kept that
+  proposal's numbers once main moved (the merge itself was refused, `409 conflicts_changed`). The
+  reply now carries `rowConflictsStatus`: `current` (the open proposal's, main and the branch
+  where it read them), `stale` (either moved since: the numbers are left out, propose again) or
+  `not_computed` (no open proposal). It also carries `countsAre: change_events`: its
+  `inserted` / `deleted` / `updated` count one event per snapshot a row changed in (a row set
+  back to its fork value still counts), where a proposal's counts are net. The `branch_changes`
+  and `diff` tool descriptions say so.
 
 ## 0.14.1
 
