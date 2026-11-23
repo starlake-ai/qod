@@ -12,6 +12,8 @@ import net.sf.jsqlparser.expression.Expression
   *   2. Contains no subqueries (`SELECT`) or `EXISTS` clauses.
   *   3. Calls no side-effect or escape functions (denylist + `pragma_*` prefix).
   *   4. Is bounded in size (<= 1024 chars).
+  *   5. Holds no form DuckDB can answer with an error quoting a value of the row
+  *      ([[PredicateForms]]): the predicate runs on rows the policy hides too.
   *
   * Unlike [[ai.starlake.quack.edge.cls.TransformSqlValidator]] the predicate may reference ANY
   * column (it filters rows of the protected table), so there is no single-column containment check.
@@ -105,5 +107,31 @@ object RowPredicateValidator:
     if "(?<![a-z0-9_])pragma_[a-z0-9_]*\\s*\\(".r.findFirstIn(scan).isDefined then
       return Invalid("pragma_* functions are not allowed in predicateSql")
 
+    // A form whose error on a row quotes a value of it: DuckDB evaluates the predicate on every
+    // row it reads, hidden rows included (PredicateForms).
+    val raising = PredicateForms.refusals(expr)
+    if raising.nonEmpty then return Invalid(raisingRefusal(raising))
+
     // Keep the original (tokens intact) as the canonical stored form.
     Valid(trimmed)
+
+  /** The refusal of a predicate holding raising forms, each named, never the predicate. */
+  private def raisingRefusal(parts: List[String]): String =
+    s"predicateSql uses ${parts.take(5).mkString("; ")}, which can raise an error quoting a " +
+      s"value of the row (of a row the policy hides too); ${PredicateForms.NonRaising}"
+
+  /** The raising forms of a stored predicate, for the boot report: Some(parts), each a fixed phrase
+    * or a listed function's name, never the predicate's text; None when it reads whole and holds
+    * none (a predicate that does not read whole is refused at rewrite time and reported by
+    * [[StaleRowPolicyReport]]).
+    */
+  def raisingParts(predicateSql: String): Option[List[String]] =
+    val probe = TokenRegex.replaceAllIn(Option(predicateSql).map(_.trim).getOrElse(""), "NULL")
+    val read  = ai.starlake.quack.edge.cls.MisreadNames.stored(probe)
+    if read.refusal.isDefined then None
+    else
+      WholeExpression
+        .parse(read.text, cond = true)
+        .toOption
+        .map(PredicateForms.refusals)
+        .filter(_.nonEmpty)

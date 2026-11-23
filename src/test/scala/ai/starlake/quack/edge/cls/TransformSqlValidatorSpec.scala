@@ -16,9 +16,14 @@ class TransformSqlValidatorSpec extends AnyFlatSpec with Matchers:
     validate("regexp_replace(CAST(c_phone AS VARCHAR), '\\d', 'X')", "c_phone") shouldBe a[Valid]
   }
 
-  it should "refuse a text function over the bare column, whose type is not known" in {
+  it should "refuse md5, sha1, sha256 and length over the bare column, whose type is not known" in {
     validate("md5(c_email)", "c_email") shouldBe a[Invalid]
-    validate("regexp_replace(c_phone, '\\d', 'X')", "c_phone") shouldBe a[Invalid]
+    validate("length(c_email)", "c_email") shouldBe a[Invalid]
+  }
+
+  it should "admit the text functions DuckDB answers over a value of every type" in {
+    validate("regexp_replace(c_phone, '\\d', 'X')", "c_phone") shouldBe a[Valid]
+    validate("left(c_phone, 3)", "c_phone") shouldBe a[Valid]
   }
 
   it should "canonicalise whitespace" in {

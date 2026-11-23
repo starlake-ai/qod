@@ -157,7 +157,9 @@ class MaskFormsEvidenceSpec extends AnyFlatSpec with Matchers:
         "c::VARCHAR[]",
         "TRY(c IN (1, 2))",
         "TRY(timezone(c, TIMESTAMP '2020-01-01'))",
-        "CASE WHEN c THEN 'a' END"
+        "CASE WHEN c THEN 'a' END",
+        "c[CAST(c AS INTEGER)]",
+        "upper(c)[c::INTEGER]"
       ).foreach { mask =>
         withClue(mask) {
           Columns.flatMap((col, _) => leak(conn, mask, col)) should not be empty

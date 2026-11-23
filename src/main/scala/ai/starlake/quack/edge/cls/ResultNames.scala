@@ -114,11 +114,22 @@ private[quack] object ResultNames:
       val byNameSets: List[SetOperationList]
   )
 
-  /** [[Before]] of `root`, at any depth. */
+  /** [[Before]] of `root`, at any depth: the result columns of every select, never another list
+    * JSqlParser keeps as select items (`DISTINCT ON (..)`, where an alias does not parse).
+    */
   def before(root: AnyRef): Before =
-    val nodes = StarExpansion.nodes(root)
+    val nodes   = StarExpansion.nodes(root)
+    val columns = java.util.Collections.newSetFromMap(
+      new java.util.IdentityHashMap[AnyRef, java.lang.Boolean]()
+    )
+    nodes.foreach {
+      case ps: PlainSelect => Option(ps.getSelectItems).foreach(_.forEach(columns.add(_)))
+      case _               => ()
+    }
     val items = nodes.collect {
-      case si: SelectItem[?] if si.getAlias == null && si.getExpression != null && !isStar(si) =>
+      case si: SelectItem[?]
+          if columns.contains(si) && si.getAlias == null && si.getExpression != null &&
+            !isStar(si) =>
         (si, aliasFor(si.getExpression), si.getExpression.toString)
     }
     new Before(items, nodes.collect { case sol: SetOperationList if byName(sol) => sol })

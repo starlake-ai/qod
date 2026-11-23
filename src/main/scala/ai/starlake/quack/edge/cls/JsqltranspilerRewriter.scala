@@ -1850,12 +1850,18 @@ private[quack] object ResidualColumns:
     }
 
   /** A stored mask or policy expression parsed as DuckDB reads it: the words of
-    * [[MisreadNames.quoteWords]] quoted and its date parts made columns ([[bindDateUnits]]).
+    * [[MisreadNames.quoteWords]] quoted and its date parts made columns ([[bindDateUnits]]). It is
+    * read whole ([[ai.starlake.quack.edge.rls.WholeExpression]], as the validator reads it): a text
+    * the parser reads only in part (an imported mask is stored unchecked) is refused, never applied
+    * as the part it read.
     */
   def parseStoredExpression(text: String): net.sf.jsqlparser.expression.Expression =
     val desugared = MisreadNames.stored(text)
     desugared.refusal.foreach(reason => throw new StoredExpressionRefused(reason))
-    val expr = CCJSqlParserUtil.parseExpression(desugared.text)
+    val expr = ai.starlake.quack.edge.rls.WholeExpression.parse(desugared.text, cond = false) match
+      case Right(e)     => e
+      case Left(reason) =>
+        throw new StoredExpressionRefused(s"its text holds $reason, so it does not read whole")
     bindDateUnits(expr): Unit
     expr
 

@@ -2,6 +2,7 @@ package ai.starlake.quack.edge.cls
 
 import java.util.Locale
 import net.sf.jsqlparser.expression.{
+  ArrayExpression,
   BooleanValue,
   CaseExpression,
   CastExpression,
@@ -10,6 +11,7 @@ import net.sf.jsqlparser.expression.{
   Function => SqlFunction,
   LongValue,
   NullValue,
+  RangeExpression,
   SignedExpression,
   StringValue,
   TrimFunction
@@ -48,10 +50,15 @@ import scala.jdk.CollectionConverters._
   *   - `<x> || <x>` and `concat(<x>, ...)`, with string constants or NULL beside them;
   *   - `CAST(<x> AS VARCHAR)`, `TRY_CAST(<x> AS VARCHAR)`, `<x>::VARCHAR` (also `TEXT`, `STRING`, a
   *     length allowed) and `hash(<x>, ...)`;
-  *   - over `<text>` only: `md5`, `sha1`, `sha256`, `upper`, `lower`, `trim`, `ltrim`, `rtrim`
-  *     (with a string constant), `left` / `right` (an integer constant), `substr` / `substring`
-  *     (integer constants), `lpad` / `rpad` (an integer and a string constant), `regexp_replace`
-  *     (string constants), `length`;
+  *   - a subscript or a slice of `<x>` (`<x>[i]`, `<x>[a:b]`, `<x>[a:b:s]`, nested), each index an
+  *     integer or string constant and each slice bound or step an integer constant or left out: an
+  *     index that reads the value is cast to the subscript's type, and that cast quotes it;
+  *   - over `<x>`: `upper`, `lower`, `trim` (with a string constant), `left` / `right` (an integer
+  *     constant), `substr` (integer constants), `lpad` / `rpad` (an integer and a string constant),
+  *     `regexp_replace` (string constants): text or a binder error over a value of every type;
+  *   - over `<text>` only: `md5`, `sha1`, `sha256`, `length`, `ltrim`, `rtrim` (with a string
+  *     constant), `substring` (integer constants): over a `VARIANT` or `BIGNUM` value the first
+  *     four cast it to a blob or a bit string and quote it;
   *   - `coalesce(<x>, ...)` and `CASE WHEN <x> IS [NOT] NULL THEN <x> ... [ELSE <x>] END`, whose
   *     values are string constants or NULL beside either text forms only or one other form;
   *     `nullif(<x>, <string constant or NULL>)`;
@@ -111,9 +118,10 @@ private[quack] object MaskForms:
   /** The allowed forms, for a refusal's message. */
   val Allowed: String =
     "string and numeric constants, NULL, the column, || and concat, CAST or TRY_CAST to VARCHAR, " +
-      "hash, md5 / sha1 / sha256 / upper / lower / trim / ltrim / rtrim / left / right / " +
-      "substr / substring / lpad / rpad / regexp_replace / length over text (CAST(<column> AS " +
-      "VARCHAR) first) with constant arguments, coalesce, nullif with a text constant, CASE WHEN " +
+      "hash, a subscript or slice with constant indexes, upper / lower / trim / left / right / " +
+      "substr / lpad / rpad / regexp_replace with constant arguments, md5 / sha1 / sha256 / " +
+      "length / ltrim / rtrim / substring over text (CAST(<column> AS VARCHAR) first) with " +
+      "constant arguments, coalesce, nullif with a text constant, CASE WHEN " +
       "<x> IS [NOT] NULL THEN ... END, and DOUBLE arithmetic: TRY_CAST(<column> AS DOUBLE), / by " +
       "a nonzero constant, % by a positive integer, round / floor / ceil, + - *"
 
@@ -207,9 +215,6 @@ private[quack] object MaskForms:
     def refuse(part: String): Kind =
       found += part
       Unknown
-    def textArg(name: String, a: Expression): Unit =
-      if !textLike(kindOf(a, found)) then
-        found += s"$name() of a value that is not text (write $name(CAST(<column> AS VARCHAR)))"
     def constArg(name: String, ok: Boolean, what: String): Unit =
       if !ok then found += s"$name() with an argument that is not $what"
     unwrap(e) match
@@ -223,7 +228,20 @@ private[quack] object MaskForms:
           case Num => Num
           case Dbl => Dbl
           case _   => refuse("a minus sign outside DOUBLE arithmetic")
-      case _: Column => Unknown
+      case c: Column =>
+        Option(c.getArrayConstructor).foreach(ac => subscript(ac, found))
+        Unknown
+      case a: ArrayExpression =>
+        kindOf(a.getObjExpression, found)
+        val index  = Option(a.getIndexExpression).toList
+        val bounds = List(a.getStartIndexExpression, a.getStopIndexExpression, a.getStepExpression)
+          .filter(_ != null)
+        val ok = (index, bounds) match
+          case (List(i), Nil) => integerLiteral(i) || stringLiteral(i)
+          case (Nil, bs)      => bs.forall(integerLiteral)
+          case _              => false
+        if !ok then found += SubscriptPart
+        Unknown
       case c: Concat =>
         val kinds = List(c.getLeftExpression, c.getRightExpression).map(kindOf(_, found))
         if kinds.contains(Num) then found += "a numeric constant beside || (write a string one)"
@@ -244,7 +262,7 @@ private[quack] object MaskForms:
         if t.getTrimSpecification != null || t.isUsingFromKeyword then
           refuse("TRIM(BOTH | LEADING | TRAILING ... FROM ...)")
         else
-          textArg("trim", t.getExpression)
+          kindOf(t.getExpression, found): Unit
           Option(t.getFromExpression).foreach(f =>
             constArg("trim", stringLiteral(f), "a string constant")
           )
@@ -296,6 +314,29 @@ private[quack] object MaskForms:
         refuse("IS [NOT] NULL outside a CASE condition")
       case other => refuse(s"a ${describe(other)}")
 
+  private val SubscriptPart =
+    "a subscript or slice other than one with integer or string constant indexes (an index read " +
+      "from the value is cast, and the cast quotes it)"
+
+  /** A column's subscripts (`c[i]`, `c[a:b]`, `c[a:b:s]`): each index an integer or string
+    * constant, each slice bound or step an integer constant or left out.
+    */
+  private def subscript(
+      ac: net.sf.jsqlparser.expression.ArrayConstructor,
+      found: scala.collection.mutable.LinkedHashSet[String]
+  ): Unit =
+    val items =
+      Option(ac.getExpressions).map(_.asScala.toList.map(_.asInstanceOf[Expression])).getOrElse(Nil)
+    val ok = !ac.isArrayKeyword && ac.getDataType == null && items.size == 1 && (unwrap(
+      items.head
+    ) match
+      case r: RangeExpression =>
+        List(r.getStartExpression, r.getEndExpression, r.getStepExpression)
+          .filter(_ != null)
+          .forall(integerLiteral)
+      case i => integerLiteral(i) || stringLiteral(i))
+    if !ok then found += SubscriptPart
+
   private def functionKind(
       name: String,
       args: List[Expression],
@@ -313,34 +354,50 @@ private[quack] object MaskForms:
       val k = kindOf(a, found)
       if k == Num then found += s"a numeric constant as an argument of $name()"
       k
+    // The first argument of the functions DuckDB answers with text or a binder error over a value
+    // of every type (owner ruling): any allowed form.
+    def valueArg(a: Expression): Unit = kindOf(a, found): Unit
     name match
-      case "md5" | "sha1" | "sha256" | "upper" | "lower" =>
+      case "md5" | "sha1" | "sha256" =>
         if arity(args.size == 1) then textArg(args.head)
+        Text
+      case "upper" | "lower" =>
+        if arity(args.size == 1) then valueArg(args.head)
         Text
       case "ltrim" | "rtrim" =>
         if arity(args.size == 1 || args.size == 2) then
           textArg(args.head)
           args.lift(1).foreach(a => const(stringLiteral(a), "a string constant"))
         Text
+      case "trim" =>
+        if arity(args.size == 1 || args.size == 2) then
+          valueArg(args.head)
+          args.lift(1).foreach(a => const(stringLiteral(a), "a string constant"))
+        Text
       case "left" | "right" =>
         if arity(args.size == 2) then
-          textArg(args.head)
+          valueArg(args.head)
           const(integerLiteral(args(1)), "an integer constant")
         Text
-      case "substr" | "substring" =>
+      case "substr" =>
+        if arity(args.size == 2 || args.size == 3) then
+          valueArg(args.head)
+          args.tail.foreach(a => const(integerLiteral(a), "an integer constant"))
+        Text
+      case "substring" =>
         if arity(args.size == 2 || args.size == 3) then
           textArg(args.head)
           args.tail.foreach(a => const(integerLiteral(a), "an integer constant"))
         Text
       case "lpad" | "rpad" =>
         if arity(args.size == 3) then
-          textArg(args.head)
+          valueArg(args.head)
           const(integerLiteral(args(1)), "an integer constant")
           const(stringLiteral(args(2)), "a string constant")
         Text
       case "regexp_replace" =>
         if arity(args.size == 3 || args.size == 4) then
-          textArg(args.head)
+          valueArg(args.head)
           args.tail.foreach(a => const(stringLiteral(a), "a string constant"))
         Text
       case "length" =>

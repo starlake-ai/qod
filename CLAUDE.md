@@ -1047,22 +1047,42 @@ A new or updated mask may use only the forms of `MaskForms` (an allowlist, `Tran
 each admitted because DuckDB 2.0.0 answers it, over a value of every type the column may have, with
 a result, a binder error or an error that quotes no value (`MaskFormsEvidenceSpec` runs each over a
 column of every type, `VARIANT` holding an object and `BIGNUM` past a DOUBLE included): constants,
-the column, `||` / `concat`, `CAST` / `TRY_CAST` / `::` to `VARCHAR`, `hash`, the text functions
-(`md5`, `sha1`, `sha256`, `upper`, `lower`, `trim`, `ltrim`, `rtrim`, `left`, `right`, `substr`,
-`substring`, `lpad`, `rpad`, `regexp_replace`, `length`) over text only with constant arguments,
+the column, `||` / `concat`, `CAST` / `TRY_CAST` / `::` to `VARCHAR`, `hash`, a subscript or slice
+of any allowed form whose indexes are integer or string constants (bounds and step integer
+constants), `upper`, `lower`, `trim`, `left`, `right`, `substr`, `lpad`, `rpad` and
+`regexp_replace` with constant arguments over any allowed form (the bare column included: owner
+ruling, text or a binder error on every type), `md5`, `sha1`, `sha256`, `ltrim`, `rtrim`,
+`substring` and `length` over text only with constant arguments,
 `coalesce` / `CASE WHEN .. IS [NOT] NULL` with string constants beside text forms or one other form,
 `nullif` with a string constant, and DOUBLE arithmetic over `TRY_CAST(.. AS DOUBLE)`, `length` or
 `hash` (`/` by a nonzero constant, `%` by a positive integer, `round`, `floor`, `ceil`, `+ - *`).
 Function names must be plain (no quotes, no qualifier, nothing but `name(args)`). Anything else is
 refused naming the part (a fixed phrase or the function name), never the mask; the stored text and
-the rewriter's reading of it (`ResidualColumns.parseStoredExpression`) are both checked. A text or
-number function over the bare column is refused: DuckDB casts the column implicitly, and the cast of
-a `VARIANT` or `BIGNUM` value quotes it. A mask and a row predicate are both read whole
-(`WholeExpression`: every token read, no comment, which takes in `//`, and no `#`), and a stored row
-predicate is read whole again at rewrite time or the statement is refused (`Failed`), since one
-stored before could hold a parenthesis that joins the next policy's predicate. Stored and imported
-masks are not judged; boot prints one stderr `WARN:` line per stored mask a create would refuse
-(`StoredMaskReport`), naming the refused parts, never its text.
+the rewriter's reading of it (`ResidualColumns.parseStoredExpression`) are both checked. `md5`,
+`sha1`, `sha256`, `length` or a number function over the bare column is refused: DuckDB casts the
+column implicitly, and the cast of a `VARIANT` or `BIGNUM` value quotes it; so is a subscript whose
+index is not a constant (DuckDB casts the index). The validator's denylist and subquery walk is
+`StarExpansion.nodes`, so it sees every child (subscripts, lambda bodies, IN lists, CASE operands,
+a call's ORDER BY or FILTER). A mask and a row predicate are both read whole (`WholeExpression`:
+every token read, no comment, which takes in `//`, and no `#`), and a stored one is read whole again
+at rewrite time or the statement is refused (a row predicate `Failed`, since one stored before could
+hold a parenthesis that joins the next policy's predicate; a mask `Denied`, since an imported one is
+stored unchecked and would apply as the part the parser read, the bare column included). Stored
+masks that read whole are not judged; boot prints one stderr `WARN:` line per stored mask a create
+would refuse (`StoredMaskReport`), naming the refused parts, never its text.
+A new or updated row predicate may not use a form DuckDB can answer with an error quoting a value
+of the row when it reads a column (`PredicateForms`, in `RowPredicateValidator`): DuckDB evaluates
+the predicate on every row it reads, hidden ones included. Refused: `CAST` / `::` to anything but
+`VARCHAR`, `strptime`, JSON extraction (`json_*` but the builders and `json_valid`, `->`, `->>`,
+`JSON_VALUE`), base64 / hex / binary decoding, date, time and interval constructors (`to_days`
+family, `INTERVAL (<expr>)`), arithmetic (`+ - * << >>`, `add` .. `mod`, `abs`, `%` / `//` by
+anything but a positive integer constant), `chr`, `repeat`, `error()`, and a date part, time zone or
+regular expression read from the row; `TRY(...)` exempts nothing. It stays a predicate language
+(owner ruling): comparisons, `IN` lists, the identity tokens and every other function stay, so a
+text column compared with a constant of another type (`code = 42`) can still quote the value, an
+accepted residual. Stored predicates keep applying; boot prints one stderr `WARN:` line per stored
+predicate a create would refuse for this (`StoredPredicateReport`), naming the parts, never the
+text. `RaisingPredicateSpec` holds the DuckDB evidence for each refused form.
 
 ### OPA authorization (per tenant)
 

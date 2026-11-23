@@ -759,6 +759,12 @@ object Main extends IOApp with LazyLogging:
         .Try(ai.starlake.quack.edge.cls.StoredMaskReport.report(store))
         .failed
         .foreach(e => logger.warn(s"stored mask report: ${e.getClass.getSimpleName}"))
+      // Stored row predicates that can raise an error quoting a value of a row they hide: they
+      // keep applying, each reported for an operator.
+      scala.util
+        .Try(ai.starlake.quack.edge.rls.StoredPredicateReport.report(store))
+        .failed
+        .foreach(e => logger.warn(s"stored predicate report: ${e.getClass.getSimpleName}"))
       manifestFedStore.foreach { fs =>
         scala.util
           .Try {

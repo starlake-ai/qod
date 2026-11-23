@@ -27,10 +27,11 @@ class MaskAllowlistSpec extends AnyFlatSpec with Matchers:
     "md5(c)"                                         -> "md5() of a value that is not text",
     "sha256(c)"                                      -> "sha256() of a value that is not text",
     "length(c)"                                      -> "length() of a value that is not text",
-    "upper(c)"                                       -> "upper() of a value that is not text",
-    "left(c, 2)"                                     -> "left() of a value that is not text",
-    "trim(c)"                                        -> "trim() of a value that is not text",
-    "regexp_replace(c, 'a', 'b')"                    -> "regexp_replace() of a value",
+    "sha1(c)"                                        -> "sha1() of a value that is not text",
+    "md5(c[1])"                                      -> "md5() of a value that is not text",
+    "length(upper(c)[1])"                            -> "length() of a value that is not text",
+    "left(c, length(c::VARCHAR))"                    -> "not an integer constant",
+    "upper(c, 'x')"                                  -> "another number of arguments",
     "left(c::VARCHAR, length(c::VARCHAR))"           -> "not an integer constant",
     "lpad(c::VARCHAR, 5, c::VARCHAR)"                -> "not a string constant",
     "regexp_replace(c::VARCHAR, c::VARCHAR, 'y')"    -> "not a string constant",
@@ -95,7 +96,32 @@ class MaskAllowlistSpec extends AnyFlatSpec with Matchers:
     "current_date"                                   -> "time keyword",
     "INTERVAL 1 DAY"                                 -> "INTERVAL",
     "TRIM(BOTH 'x' FROM CAST(c AS VARCHAR))"         -> "TRIM(BOTH",
-    "c ->> '$.a'"                                    -> "expression"
+    "c ->> '$.a'"                                    -> "expression",
+    // A subscript, a slice or a nested access is judged with the mask: constant indexes only.
+    "c[CAST(c AS INTEGER)]"                        -> "a subscript or slice other than",
+    "c[c::INTEGER]"                                -> "a subscript or slice other than",
+    "c[error(c::VARCHAR)]"                         -> "a subscript or slice other than",
+    "c[1:strpos(c, '@')]"                          -> "a subscript or slice other than",
+    "c[json_extract_string(c, '$')]"               -> "a subscript or slice other than",
+    "c[strptime(c::VARCHAR, '%Y')]"                -> "a subscript or slice other than",
+    "c[1 / 0]"                                     -> "a subscript or slice other than",
+    "c[(c = 1)::INTEGER]"                          -> "a subscript or slice other than",
+    "c[getvariable('v')]"                          -> "a subscript or slice other than",
+    "c[read_csv('x')]"                             -> "a subscript or slice other than",
+    "c[query('select 1')]"                         -> "a subscript or slice other than",
+    "c[1:2:c::INTEGER]"                            -> "a subscript or slice other than",
+    "c[1.5]"                                       -> "a subscript or slice other than",
+    "c[NULL]"                                      -> "a subscript or slice other than",
+    "c[c::VARCHAR]"                                -> "a subscript or slice other than",
+    "c['a':'b']"                                   -> "a subscript or slice other than",
+    "c[1][c::INTEGER]"                             -> "a subscript or slice other than",
+    "upper(c)[CAST(c AS INTEGER)]"                 -> "a subscript or slice other than",
+    "(CAST(c AS INTEGER))[1]"                      -> "a cast other than",
+    "c[1].x"                                       -> "row get expression",
+    "list_transform([c], x -> CAST(x AS INTEGER))" -> "function 'list_transform'",
+    "md5(CAST(c AS VARCHAR) ORDER BY c)"           -> "written other than name(arguments)",
+    "count(c) FILTER (WHERE c IS NULL)"            -> "window or aggregate clause",
+    "upper(c) IN ('A')"                            -> "IN list"
   )
 
   "validate" should "admit every allowed form" in
@@ -113,6 +139,36 @@ class MaskAllowlistSpec extends AnyFlatSpec with Matchers:
           case other => fail(s"expected Invalid, got $other")
       }
     }
+
+  /** A denylisted call or a subquery in every child kind the validator's walk must descend into. */
+  private val HiddenInChildren = List(
+    "c[read_csv('x')]",
+    "c[1:read_csv('x')]",
+    "c[1:2:read_csv('x')]",
+    "c[1][read_csv('x')]",
+    "upper(c)[read_csv('x')]",
+    "list_transform([c], x -> read_csv('x'))",
+    "c IN (read_csv('x'))",
+    "CASE read_csv('x') WHEN 1 THEN c END",
+    "string_agg(c, ',' ORDER BY read_csv('x'))",
+    "count(c) FILTER (WHERE read_csv('x') IS NULL)",
+    "md5((read_csv('x')))",
+    "[c, read_csv('x')]",
+    "{'a': read_csv('x')}"
+  )
+
+  it should "see a denylisted call or a subquery in every child of the mask" in {
+    HiddenInChildren.foreach { mask =>
+      withClue(mask) {
+        validate(mask, "c") match
+          case Invalid(reason) => reason should include("function 'read_csv' is not allowed")
+          case other           => fail(s"expected Invalid, got $other")
+      }
+    }
+    validate("c[(SELECT 1)]", "c") match
+      case Invalid(reason) => reason should include("subqueries are not allowed")
+      case other           => fail(s"expected Invalid, got $other")
+  }
 
   /** The forms the first round refused for raising: still refused, by the allowlist now. */
   private val FirstRound = List(

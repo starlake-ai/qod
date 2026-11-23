@@ -118,7 +118,11 @@ class PolicyResultNameSpec extends AnyFlatSpec with Matchers:
       List("(SELECT max(id) FROM t)"),
     "SELECT id, (SELECT max(id) FROM t) AS mine FROM u"          -> List("id", "mine"),
     "SELECT id FROM t"                                           -> List("id"),
-    "SELECT d FROM (SELECT (SELECT max(id) FROM t) FROM u) AS d" -> List("d")
+    "SELECT d FROM (SELECT (SELECT max(id) FROM t) FROM u) AS d" -> List("d"),
+    // DISTINCT ON expressions are not result columns: they get no alias.
+    "SELECT DISTINCT ON ((SELECT max(id) FROM t)) id FROM u"                      -> List("id"),
+    "SELECT DISTINCT ON ((SELECT max(id) FROM t)) (SELECT min(id) FROM t) FROM u" ->
+      List("(SELECT min(id) FROM t)")
   )
 
   "a holder of a row policy alone" should "see no predicate in any result name" in

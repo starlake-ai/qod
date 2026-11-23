@@ -6,7 +6,6 @@ import net.sf.jsqlparser.expression.Expression
 import net.sf.jsqlparser.expression.{Function => SqlFunction}
 import net.sf.jsqlparser.statement.select.Select
 
-import scala.jdk.CollectionConverters._
 import scala.util.{Failure, Success, Try}
 
 /** Strict-containment validator for free-form transform expressions on column policies. Runs once
@@ -160,42 +159,10 @@ object TransformSqlValidator:
             case Left(reason) => List(reason)
         )
 
-  /** Walk reachable expression nodes depth-first.
-    *
-    * Covers the composite shapes that matter for validation: Function arguments, BinaryExpression,
-    * SignedExpression, Parenthesis, CaseExpression, CastExpression. Subquery nodes (Select
-    * subtypes) are flagged via the visitor and NOT recursed into so that we don't descend into
-    * their internals and produce spurious column violations.
+  /** Visits every node of `start`, at any depth: every child JSqlParser keeps
+    * ([[StarExpansion.nodes]], the shared reflective walk), so a subscript's or a slice's indexes,
+    * a COLLATE operand, a lambda's body, an IN list, a CASE operand, a call's ORDER BY or FILTER
+    * and a subquery's own nodes are all seen.
     */
-  // Parenthesis is deprecated in jsqlparser 5.x but kept defensively: dropping the
-  // case would skip traversal of a parenthesized subtree, and a missed subtree here
-  // is a CLS validation gap (an expression escaping the protected-column check).
-  @scala.annotation.nowarn("msg=class Parenthesis")
   private def walk(start: Expression)(visit: PartialFunction[Any, Unit]): Unit =
-    val stack = scala.collection.mutable.Stack[Any](start)
-    while stack.nonEmpty do
-      val node = stack.pop()
-      if visit.isDefinedAt(node) then visit(node)
-      node match
-        case fn: SqlFunction =>
-          if fn.getParameters != null then fn.getParameters.asScala.foreach(stack.push)
-        case b: net.sf.jsqlparser.expression.BinaryExpression =>
-          stack.push(b.getLeftExpression); stack.push(b.getRightExpression)
-        case u: net.sf.jsqlparser.expression.SignedExpression =>
-          stack.push(u.getExpression)
-        case p: net.sf.jsqlparser.expression.Parenthesis =>
-          stack.push(p.getExpression)
-        case c: net.sf.jsqlparser.expression.CaseExpression =>
-          if c.getSwitchExpression != null then stack.push(c.getSwitchExpression)
-          if c.getElseExpression != null then stack.push(c.getElseExpression)
-          if c.getWhenClauses != null then
-            c.getWhenClauses.asScala.foreach { w =>
-              stack.push(w.getWhenExpression)
-              stack.push(w.getThenExpression)
-            }
-        case cast: net.sf.jsqlparser.expression.CastExpression =>
-          stack.push(cast.getLeftExpression)
-        case _: Select =>
-          // Visited above; do NOT recurse - we reject subqueries wholesale.
-          ()
-        case _ => ()
+    StarExpansion.nodes(start).foreach(node => if visit.isDefinedAt(node) then visit(node))

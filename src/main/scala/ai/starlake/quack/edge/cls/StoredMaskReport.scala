@@ -31,8 +31,9 @@ object StoredMaskReport:
             else "no longer passes the checks a new mask meets"
           s"WARN: tenant ${quoted(r.tenantId)} role ${quoted(r.name)}: column policy ${p.id} on " +
             s"${p.catalogName}.${p.schemaName}.${p.tableName}.${p.columnName}: its mask $what. " +
-            "It keeps applying as stored; update it with the allowed forms (text functions over " +
-            "CAST(<column> AS VARCHAR), numbers over TRY_CAST(<column> AS DOUBLE))."
+            "It keeps applying as stored; update it with the allowed forms (md5, sha1, sha256 " +
+            "and length over CAST(<column> AS VARCHAR), numbers over TRY_CAST(<column> AS " +
+            "DOUBLE), constant subscripts)."
       }
       .sorted
 
