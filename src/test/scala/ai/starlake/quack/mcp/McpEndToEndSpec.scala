@@ -19,7 +19,7 @@ import ai.starlake.quack.ondemand.catalog.{
   TableHistoryFilter,
   TableHistoryPage
 }
-import ai.starlake.quack.ondemand.state.testkit.TestPostgres
+import ai.starlake.quack.ondemand.state.testkit.{PostgresFixture, TestPostgres}
 import ai.starlake.quack.ondemand.state.{
   LiquibaseRunner,
   PatStore,
@@ -46,7 +46,7 @@ import scala.util.Try
 /** Full-wire MCP contract: real HTTP against the harness-booted manager with a Postgres PAT store,
   * covering auth arms, tool tiering per principal, and the enabled=false unmount.
   */
-class McpEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
+class McpEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll with PostgresFixture:
 
   TestPostgres.dropStrayTestDatabases("qodmcpe2e")
 
@@ -317,6 +317,9 @@ class McpEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
       ): List[CatalogSnapshotEntry] =
         lastSnapshotWindow.set(limit)
         catalogSnapshots.take(limit)
+      override def listSnapshotsForMember(limit: Int): List[DuckLakeCatalogReader.MemberSnapshot] =
+        lastSnapshotWindow.set(limit)
+        catalogSnapshots.take(limit).map(DuckLakeCatalogReader.MemberSnapshot(_, accounted = true))
       private def entry(schema: String, table: String) =
         CatalogTableEntry(schema, table, 10L, 1, Some(s"s3://lake/$schema/$table/"))
       private val tables = Map(
@@ -707,6 +710,169 @@ class McpEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
       withClue(s"$two / $one") {
         parsedSnapshots(two)._1.keySet shouldBe Set(1L, 3L)
         parsedSnapshots(one)._1.keySet shouldBe Set(3L)
+        // A member's tags follow the page they get back.
+        parsedSnapshots(two)._2 shouldBe List("visible-tag")
+        parsedSnapshots(one)._2 shouldBe Nil
+      }
+    }
+
+  it should "read a limit below 1 as 1 for a member, as the handler does for an admin" in
+    withHarness(prepare = snapshotsForBob, catalogReader = Some(memberCatalog)) { h =>
+      val bob = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.BobUsername)
+      List(0, -5).foreach { limit =>
+        lastSnapshotWindow.set(-1)
+        val (err, text) =
+          callTool(h, bob, "list_snapshots", acmeMain, "limit" -> Json.fromInt(limit))
+        withClue(s"limit $limit: $text") {
+          err shouldBe false
+          parsedSnapshots(text)._1.keySet shouldBe Set(3L)
+          lastSnapshotWindow.get shouldBe 50
+        }
+      }
+    }
+
+  it should "list a member's snapshots newest first" in
+    withHarness(prepare = snapshotsForBob, catalogReader = Some(memberCatalog)) { h =>
+      val bob       = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.BobUsername)
+      val (_, text) = callTool(h, bob, "list_snapshots", acmeMain)
+      val ids       = parse(text).toOption.get.hcursor
+        .downField("snapshots")
+        .as[List[Json]]
+        .toOption
+        .get
+        .map(_.hcursor.get[Long]("snapshotId").toOption.get)
+      withClue(text)(ids shouldBe List(3L, 1L))
+    }
+
+  /** bob may connect to `sales` and reads only `hr.salaries`, which no snapshot touched. */
+  private def snapshotsForBobSalaries(fix: SecurityFixtures.Fixture): Unit =
+    duckLakeWithTags(fix)
+    fix.store.insertPoolPermission(
+      PoolPermission(
+        id = "pp-bob-sales",
+        tenantId = SecurityFixtures.TenantId,
+        poolId = Some(SecurityFixtures.PoolId),
+        userId = Some(fix.bobUserId)
+      )
+    )
+    fix.store.upsertRole(RbacRole("r-salaries", SecurityFixtures.TenantId, "salaries_reader"))
+    fix.store.insertRolePermission(
+      RolePermission("rp-salaries", "r-salaries", "*", "hr", "salaries", "RO")
+    )
+    fix.store.addUserRole(fix.bobUserId, "r-salaries")
+
+  it should "answer an empty list, not an error, when no snapshot touched a member's tables" in
+    withHarness(prepare = snapshotsForBobSalaries, catalogReader = Some(memberCatalog)) { h =>
+      val bob         = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.BobUsername)
+      val (err, text) = callTool(h, bob, "list_snapshots", acmeMain)
+      withClue(text) {
+        err shouldBe false
+        parsedSnapshots(text) shouldBe ((Map.empty[Long, Json], Nil))
+      }
+    }
+
+  /** What the engine writes: an inlined insert and delete on `sales.orders` (the sink's small
+    * batches), then one transaction that writes `sales.orders` to a data file and `sales.secret`
+    * inline, then a flush (it dates `sales.secret`'s file to that transaction's snapshot), then a
+    * transaction that writes `sales.orders` and creates a view, a verb no table resolves.
+    */
+  private val engineWrites =
+    """CREATE SCHEMA lake.sales;
+      |CREATE TABLE lake.sales.orders (id INTEGER, v VARCHAR);
+      |CREATE TABLE lake.sales.secret (id INTEGER, v VARCHAR);
+      |INSERT INTO lake.sales.orders VALUES (1, 'a'), (2, 'b');
+      |DELETE FROM lake.sales.orders WHERE id = 1;
+      |BEGIN;
+      |INSERT INTO lake.sales.orders SELECT range, 'bulk' FROM range(1000);
+      |INSERT INTO lake.sales.secret VALUES (1, 's'), (2, 't'), (3, 'u');
+      |COMMIT;
+      |CALL ducklake_flush_inlined_data('lake');
+      |BEGIN;
+      |INSERT INTO lake.sales.orders SELECT range, 'more' FROM range(1000);
+      |CREATE VIEW lake.sales.secret_v AS SELECT * FROM lake.sales.secret;
+      |COMMIT;
+      |INSERT INTO lake.sales.orders SELECT range, 'last' FROM range(1000);
+      |""".stripMargin
+
+  it should "list a member every commit table_history shows, and withhold counts shared with a hidden table (real DuckLake)" in
+    withCatalog("mcpsnaps", engineWrites) { (reader, _) =>
+      val history  = reader.listTableHistory("sales", "orders").get.commits.map(_.snapshotId)
+      val ordersId = reader.currentTableInfo("sales", "orders").get._1
+      val stored   = reader.listSnapshots(limit = 1000).map(s => s.snapshotId -> s).toMap
+      def namesOrders(entry: String): Boolean =
+        entry.endsWith(s":$ordersId") || entry.endsWith("\"sales\".\"orders\"")
+      def onlyOrders(id: Long): Boolean = stored(id).changes.split(",").forall(namesOrders)
+      val touchingOrders                =
+        stored.keySet.filter(id => stored(id).changes.split(",").exists(namesOrders))
+      val withView = stored.keySet.filter(id => stored(id).changes.contains("created_view:"))
+      withHarness(prepare = snapshotsForBob, catalogReader = Some((_, _) => reader)) { h =>
+        val bob         = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.BobUsername)
+        val (err, text) = callTool(h, bob, "list_snapshots", acmeMain)
+        val (snaps, _)  = parsedSnapshots(text)
+        withClue(s"history $history, stored ${stored.values.map(_.changes)}: $text") {
+          err shouldBe false
+          history.size should be >= 6
+          snaps.keySet should contain allElementsOf history
+          // Every snapshot that wrote sales.orders, and none other (the flush of both tables too).
+          snaps.keySet shouldBe touchingOrders
+          // The view no table resolves keeps the whole snapshot's counts back.
+          withView should have size 1
+          countsOf(snaps(withView.head)) shouldBe withheldCounts
+          text should not include "secret"
+          snaps.foreach { (id, s) =>
+            tablesOf(s) shouldBe List("sales" -> "orders")
+            if !onlyOrders(id) then countsOf(s) shouldBe withheldCounts
+            else
+              countsOf(s) shouldBe List(
+                stored(id).rowsAdded,
+                stored(id).filesAdded.toLong,
+                stored(id).filesRemoved.toLong
+              )
+          }
+        }
+      }
+    }
+
+  /** Maintenance on `sales.orders` alone: an inlined insert flushed on its own, then two data files
+    * merged into one.
+    */
+  private val ordersMaintenance =
+    """CREATE SCHEMA lake.sales;
+      |CREATE TABLE lake.sales.orders (id INTEGER, v VARCHAR);
+      |CREATE TABLE lake.sales.secret (id INTEGER, v VARCHAR);
+      |INSERT INTO lake.sales.orders VALUES (1, 'a');
+      |CALL ducklake_flush_inlined_data('lake');
+      |INSERT INTO lake.sales.orders SELECT range, 'x' FROM range(1000);
+      |INSERT INTO lake.sales.orders SELECT range, 'y' FROM range(1000);
+      |CALL ducklake_merge_adjacent_files('lake', 'orders', schema => 'sales');
+      |""".stripMargin
+
+  it should "list a member the flush and maintenance snapshots of their own table (real DuckLake)" in
+    withCatalog("mcpsnapsmaint", ordersMaintenance) { (reader, _) =>
+      val ordersId = reader.currentTableInfo("sales", "orders").get._1
+      val stored   = reader.listSnapshots(limit = 1000).map(s => s.snapshotId -> s).toMap
+      def onlyVerbOnOrders(verb: String): Set[Long] =
+        stored.keySet.filter(id => stored(id).changes.split(",").forall(_ == s"$verb:$ordersId"))
+      val flushes = onlyVerbOnOrders("inline_flush")
+      val merges  = onlyVerbOnOrders("merge_adjacent")
+      withHarness(prepare = snapshotsForBob, catalogReader = Some((_, _) => reader)) { h =>
+        val bob         = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.BobUsername)
+        val (err, text) = callTool(h, bob, "list_snapshots", acmeMain)
+        val (snaps, _)  = parsedSnapshots(text)
+        withClue(s"stored ${stored.values.map(s => s.snapshotId -> s.changes)}: $text") {
+          err shouldBe false
+          flushes should not be empty
+          merges should not be empty
+          (flushes ++ merges).foreach { id =>
+            snaps.keySet should contain(id)
+            tablesOf(snaps(id)) shouldBe List("sales" -> "orders")
+            countsOf(snaps(id)) shouldBe List(
+              stored(id).rowsAdded,
+              stored(id).filesAdded.toLong,
+              stored(id).filesRemoved.toLong
+            )
+          }
+        }
       }
     }
 
@@ -772,6 +938,8 @@ class McpEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
         tags.toSet shouldBe Set("visible-tag", "hidden-tag", "unresolved-tag")
         // An admin's limit still applies to the catalog's newest snapshots.
         parsedSnapshots(two)._1.keySet shouldBe Set(3L, 2L)
+        // ... but not to their tags, which a member's page narrows.
+        parsedSnapshots(two)._2.toSet shouldBe Set("visible-tag", "hidden-tag", "unresolved-tag")
       }
     }
 

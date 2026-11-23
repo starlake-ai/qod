@@ -13,6 +13,7 @@ import ai.starlake.quack.ondemand.api.{
   TenantDbGate
 }
 import ai.starlake.quack.ondemand.auth.SessionScope
+import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader.MemberSnapshot
 import ai.starlake.quack.ondemand.rbac.{Attenuation, EffectiveSet, HandshakeDenial}
 import io.circe.Json
 
@@ -165,17 +166,18 @@ object McpCatalogReach:
 
     /** A member's snapshots: those that touched a table they can see, naming only those tables and
       * no raw change text (it lists the whole database's activity). The counts are the whole
-      * snapshot's, so they are withheld when it also touched a table the member cannot see, and for
-      * a member who does not count rows.
+      * snapshot's, so they are withheld when it also touched a table the member cannot see, when
+      * some entry of its changes named no table the reader resolved (fail closed: that entry may be
+      * a hidden table's), and for a member who does not count rows.
       */
-    def snapshots(ss: List[CatalogSnapshotEntry]): List[CatalogSnapshotEntry] =
-      if !isMember then ss
+    def snapshots(ss: List[MemberSnapshot]): List[CatalogSnapshotEntry] =
+      if !isMember then ss.map(_.entry)
       else
-        ss.flatMap { s =>
+        ss.flatMap { case MemberSnapshot(s, accounted) =>
           val seen = s.affectedTables.filter(t => visible(t.schema, t.name))
           if seen.isEmpty then None
           else
-            val whole = countsRows && seen.size == s.affectedTables.size
+            val whole = countsRows && accounted && seen.size == s.affectedTables.size
             val named = s.copy(changes = "", affectedTables = seen)
             Some(
               if whole then named

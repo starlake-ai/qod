@@ -335,11 +335,13 @@
   admin gate, so a member got `tenant_forbidden` there too. A member now reaches the database as
   the four tools above do, and gets only the snapshots that touched a table their grants cover
   for reading, each naming only those tables, with `changes` empty (the raw text lists the whole
-  database's activity). `rowsAdded`, `filesAdded` and `filesRemoved` are `-1` when the snapshot
-  also touched a table they cannot read, and on every snapshot for a member holding a row policy.
-  Tags are kept only on a snapshot they see. `limit` applies after that filtering, over the newest
-  1000 snapshots at most, so a member may get fewer than `limit`. Author and commit message are
-  shown as `table_history` shows them. Admins get what they got.
+  database's activity). Inlined writes and maintenance (a flush, a merge) on a table they read
+  count as touching it. `rowsAdded`, `filesAdded` and `filesRemoved` are `-1` when the snapshot
+  also touched a table they cannot read or has a change that names no table (a view, a verb a
+  later version adds), and on every snapshot for a member holding a row policy. Tags are kept
+  only on a snapshot they see, after `limit` applies. `limit` applies after that filtering, over
+  the newest 50 times `limit` snapshots, 1000 at most, so a member may get fewer than `limit`.
+  Author and commit message are shown as `table_history` shows them. Admins get what they got.
 - **The Quack door serves clients that send each statement as `<alias>.query('<sql>')`** (#299),
   such as Columnar's `quack` ADBC driver: they signed in, then every statement failed with
   `Catalog Error: Table Function with name query does not exist!`. The DuckDB client binds that

@@ -547,7 +547,9 @@ final class McpDataTools(
         "Unless you are an admin, you see only the snapshots that touched a table you can read, " +
         "with only those tables named and no raw change text; rowsAdded, filesAdded and " +
         "filesRemoved are -1 (withheld) when a snapshot also touched a table you cannot read " +
-        "or while you hold a row policy. You may get fewer than limit.",
+        "or has a change that names no table, and while you hold a row policy. You may get " +
+        "fewer than limit: it applies to the newest 1000 snapshots at most, and your tags are " +
+        "those on the snapshots returned.",
     inputSchema = objectSchema(
       required = List("database"),
       props = "database" -> strProp("Database (tenant-db) name."),
@@ -569,34 +571,37 @@ final class McpDataTools(
           ).flatMap {
             case Left(err)    => IO.pure(Left(err))
             case Right(reach) =>
-              // A member's window is read wider than `limit`, as the per-table filter does, and
-              // cut to `limit` once the snapshots they cannot see are gone.
+              // A member's window is `limit * 50` snapshots, capped at the handler's 1000, cut to
+              // `limit` once the snapshots they cannot see are gone.
               val wanted = int(args, "limit").getOrElse(DefaultSnapshots).max(1).min(MaxSnapshots)
-              val window =
-                if reach.isMember then Some(wanted.toLong * SnapshotWindowFactor) else None
-              for
-                snaps <- IO.blocking(
-                  bridge(
-                    catalog.listSnapshots(
-                      tenant,
-                      database,
-                      window.fold(int(args, "limit"))(w => Some(w.min(MaxSnapshots).toInt)),
-                      None,
-                      None,
-                      key
-                    )(reach.scopeOf)
+              val window = (wanted.toLong * SnapshotWindowFactor).min(MaxSnapshots).toInt
+              val listed =
+                if reach.isMember then
+                  IO.blocking(
+                    bridge(
+                      catalog.listSnapshotsForMember(tenant, database, Some(window), key)(
+                        reach.scopeOf
+                      )
+                    ).map(ms => reach.snapshots(ms).take(wanted))
                   )
-                )
+                else
+                  IO.blocking(
+                    bridge(
+                      catalog.listSnapshots(tenant, database, int(args, "limit"), None, None, key)(
+                        reach.scopeOf
+                      )
+                    )
+                  )
+              for
+                snaps  <- listed
                 tagged <- tags.list(tenant, database, key)(reach.scopeOf).map(bridge)
               yield for
                 s <- snaps
                 t <- tagged
-              yield
-                val kept = reach.snapshots(s).take(wanted)
-                Json.obj(
-                  "snapshots" -> (if reach.isMember then kept else s).asJson,
-                  "tags"      -> reach.tags(t, kept.map(_.snapshotId).toSet).asJson
-                )
+              yield Json.obj(
+                "snapshots" -> s.asJson,
+                "tags"      -> reach.tags(t, s.map(_.snapshotId).toSet).asJson
+              )
           }
   )
 
@@ -636,7 +641,7 @@ object McpDataTools:
   private val DefaultSnapshots = 200
   private val MaxSnapshots     = 1000
 
-  /** A member's `list_snapshots` reads this many times `limit` snapshots before filtering, as the
-    * per-table filter of the catalog reader does.
+  /** A member's `list_snapshots` reads this many times `limit` snapshots before filtering, at most
+    * [[MaxSnapshots]] (the handler's ceiling): 50 times up to `limit` 20, fewer above.
     */
   private val SnapshotWindowFactor = 50L

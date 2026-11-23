@@ -129,6 +129,23 @@ final class CatalogHandlers(
       )
     }
 
+  /** The MCP `list_snapshots` page of a plain member
+    * (`DuckLakeCatalogReader.listSnapshotsForMember`): same gate and `limit` bounds as
+    * [[listSnapshots]], no REST route.
+    */
+  def listSnapshotsForMember(
+      tenant: String,
+      tenantDb: String,
+      limit: Option[Int],
+      apiKey: Option[String]
+  )(scopeOf: SessionScope.Resolver): Res[List[DuckLakeCatalogReader.MemberSnapshot]] =
+    gated("snapshots", tenant, tenantDb, apiKey)(scopeOf) { (tid, db) =>
+      Right(
+        if !isDuckLake(tid, db) then Nil
+        else resolveReader(tid, db).listSnapshotsForMember(limit.getOrElse(200).max(1).min(1000))
+      )
+    }
+
   /** Spec 00: at most one of asOf / asOfTag / asOfTs; a tag resolves to its snapshot id, asOfTs
     * resolves via timestamp lookup. A dangling tag/id (snapshot vacuumed) returns 410 expired; a
     * timestamp before first snapshot returns 422 invalid_snapshot.

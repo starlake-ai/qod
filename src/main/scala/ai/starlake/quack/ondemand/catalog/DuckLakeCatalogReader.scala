@@ -608,12 +608,34 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource)
       before: Option[Long] = None,
       table: Option[(String, String)] = None
   ): List[CatalogSnapshotEntry] =
-    val (whereClause, whereParams) = before match
-      case None    => ("", Nil)
-      case Some(n) => ("\n WHERE s.snapshot_id < ?", List(n))
     val fetchLimit = table match
       case None    => limit
       case Some(_) => math.min(limit.toLong * 50L, Int.MaxValue.toLong).toInt
+    val entries  = snapshotPage(before, fetchLimit, TableChangeVerbs).map(_.entry)
+    val filtered = table match
+      case None                    => entries
+      case Some((schema, tblName)) =>
+        entries.filter(_.affectedTables.exists(t => t.schema == schema && t.name == tblName))
+    filtered.take(limit)
+
+  /** The newest `limit` snapshots for a plain member's MCP `list_snapshots`, newest first. Unlike
+    * [[listSnapshots]], `affectedTables` also names the tables of inlined writes and of maintenance
+    * (`DuckLakeCatalogReader.SnapshotTableVerbs`, the vocabulary `table_history` reads), so a
+    * member's own inlined commits are not lost, and each snapshot says whether every entry of its
+    * `changes_made` named a table it resolved: the counts are the whole snapshot's, so an entry it
+    * could not attribute may hide a table the member cannot see.
+    */
+  def listSnapshotsForMember(limit: Int): List[DuckLakeCatalogReader.MemberSnapshot] =
+    snapshotPage(None, limit, DuckLakeCatalogReader.SnapshotTableVerbs)
+
+  private def snapshotPage(
+      before: Option[Long],
+      fetchLimit: Int,
+      verbs: Set[String]
+  ): List[DuckLakeCatalogReader.MemberSnapshot] =
+    val (whereClause, whereParams) = before match
+      case None    => ("", Nil)
+      case Some(n) => ("\n WHERE s.snapshot_id < ?", List(n))
     val snapSql =
       s"""SELECT s.snapshot_id,
          |       s.snapshot_time,
@@ -670,9 +692,10 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource)
         Option(rs.getObject("end_snapshot")).map(_ => rs.getLong("end_snapshot"))
       )
     }
-    val entries =
-      rows.map {
-        case (sid, at, ver, changes, author, commitMessage, rowsAdded, filesAdded, filesRemoved) =>
+    rows.map {
+      case (sid, at, ver, changes, author, commitMessage, rowsAdded, filesAdded, filesRemoved) =>
+        val (tables, accounted) = tableRefs(sid, changes, history, verbs)
+        DuckLakeCatalogReader.MemberSnapshot(
           CatalogSnapshotEntry(
             snapshotId = sid,
             committedAt = at,
@@ -681,16 +704,13 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource)
             rowsAdded = rowsAdded,
             filesAdded = filesAdded,
             filesRemoved = filesRemoved,
-            affectedTables = affectedTables(sid, changes, history),
+            affectedTables = tables,
             author = author,
             commitMessage = commitMessage
-          )
-      }
-    val filtered = table match
-      case None                    => entries
-      case Some((schema, tblName)) =>
-        entries.filter(_.affectedTables.exists(t => t.schema == schema && t.name == tblName))
-    filtered.take(limit)
+          ),
+          accounted
+        )
+    }
 
   /** Every `ducklake_table` row (all versions of every table, live or dropped), the raw material
     * for name<->id resolution at any snapshot. Small: one row per table version.
@@ -768,39 +788,46 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource)
     "compacted_table"
   )
 
-  /** Parses changes_made (comma-separated `verb:payload` entries) and resolves table references to
-    * names. Payloads are numeric table ids in older DuckLake versions and quoted qualified names
-    * ("schema"."table") in newer ones; both are handled. Unresolvable ids are skipped (the raw
-    * string still shows them).
+  /** Parses changes_made (comma-separated `verb:payload` entries) and resolves the table references
+    * of `verbs` to names. Payloads are numeric table ids in older DuckLake versions and quoted
+    * qualified names ("schema"."table") in newer ones; both are handled. Unresolvable ids and other
+    * verbs are skipped (the raw string still shows them); the flag says whether every entry was
+    * either a resolved table reference or a schema-only verb (`SchemaOnlyVerbs`).
     */
-  private def affectedTables(
+  private def tableRefs(
       sid: Long,
       changes: String,
-      history: List[TableVersion]
-  ): List[CatalogTableRef] =
-    val refs = changes.split(",").toList.map(_.trim).filter(_.nonEmpty).flatMap { entry =>
+      history: List[TableVersion],
+      verbs: Set[String]
+  ): (List[CatalogTableRef], Boolean) =
+    val entries = changes.split(",").toList.map(_.trim).filter(_.nonEmpty).map { entry =>
       val sep = entry.indexOf(':')
-      if sep <= 0 then Nil
+      if sep <= 0 then (entry, None)
       else
         val verb    = entry.substring(0, sep)
         val payload = entry.substring(sep + 1)
-        if !TableChangeVerbs.contains(verb) then Nil
+        if !verbs.contains(verb) then (verb, None)
         else
           payload.toLongOption match
             case Some(id) =>
               // Visible at sid; `end >= sid` (not `>`) so a table dropped AT
               // sid still resolves for its own drop entry.
-              history
-                .find(v => v.tableId == id && v.begin <= sid && v.end.forall(_ >= sid))
-                .map(v => CatalogTableRef(v.schema, v.name))
-                .toList
+              (
+                verb,
+                history
+                  .find(v => v.tableId == id && v.begin <= sid && v.end.forall(_ >= sid))
+                  .map(v => CatalogTableRef(v.schema, v.name))
+              )
             case None =>
               payload.split("\"\\.\"").toList match
                 case s :: t :: Nil =>
-                  List(CatalogTableRef(s.stripPrefix("\""), t.stripSuffix("\"")))
-                case _ => Nil
+                  (verb, Some(CatalogTableRef(s.stripPrefix("\""), t.stripSuffix("\""))))
+                case _ => (verb, None)
     }
-    refs.distinct
+    val accounted = entries.forall((verb, ref) =>
+      ref.isDefined || DuckLakeCatalogReader.SchemaOnlyVerbs.contains(verb)
+    )
+    (entries.flatMap(_._2).distinct, accounted)
 
   /** table_id of `(schema, table)` in the CURRENT catalog state. History identity: all history
     * predicates key on this id, so the timeline survives renames (a rename inserts a new
@@ -1253,6 +1280,21 @@ object DuckLakeCatalogReader:
       |  JOIN LATERAL (SELECT s.snapshot_id FROM ducklake_snapshot s
       |                 WHERE s.xmin = d.xmin AND s.snapshot_time >= d.schedule_start
       |                 ORDER BY s.snapshot_time, s.snapshot_id LIMIT 1) s2 ON true""".stripMargin
+
+  /** Every verb whose payload names a table: [[HistoryVerbs]], the maintenance verbs table history
+    * ignores, and the older `compacted_table`. A member's `list_snapshots` resolves these.
+    */
+  val SnapshotTableVerbs: Set[String] =
+    HistoryVerbs.toSet ++ (HistoryIgnoredVerbs - "created_schema") + "compacted_table"
+
+  /** Verbs that name no table and write no data file. */
+  val SchemaOnlyVerbs: Set[String] = Set("created_schema")
+
+  /** A snapshot for a member: `accounted` is false when some entry of its `changes_made` named no
+    * table the reader resolved (an unknown verb, an id with no table version), so its
+    * whole-snapshot counts may include a table that is not in `affectedTables`.
+    */
+  final case class MemberSnapshot(entry: CatalogSnapshotEntry, accounted: Boolean)
 
   /** Bound, in seconds, on [[DuckLakeCatalogReader.nameHistoryStable]] and
     * [[DuckLakeCatalogReader.maxSnapshotIdBounded]]. Both run on the statement path of every
