@@ -24,10 +24,10 @@ import java.util.Locale
   * it), a pool of the database the token's axes allow and the handshake admits, and then only the
   * tables their grants cover for reading, the rule of `SHOW TABLES` under filtered metadata. The
   * catalog readers query the DuckLake catalog directly, so the filter is applied here, on every
-  * name a reply carries, along with storage paths a member has no use for. So are row counts for a
-  * member holding a row policy: the catalog's counts are the table's, not the rows the policy lets
-  * them read, so they would tell how many rows it hides (the branch endpoints give such a viewer no
-  * counts either).
+  * name a reply carries, along with storage paths a member has no use for. So are row and file
+  * counts for a member holding a row policy: the catalog's counts are the table's, not the rows the
+  * policy lets them read, so they would tell how many rows it hides, and a table's file count grows
+  * with it (the branch endpoints give such a viewer no counts either).
   */
 private[mcp] final class McpCatalogReach(sup: PoolSupervisor, scopeOf: SessionScope.Resolver):
 
@@ -120,8 +120,12 @@ object McpCatalogReach:
   /** The row count a reply carries in place of one withheld: the catalog readers' own "unknown". */
   val Withheld: Long = -1L
 
+  /** The file count a reply carries in place of one withheld. */
+  val WithheldFiles: Int = -1
+
   /** What the catalog handlers are handed and what a reply may name. `sees` None: an admin, who
-    * sees every table. `countsRows` false: the reply carries [[Withheld]] for every row count.
+    * sees every table. `countsRows` false: the reply carries [[Withheld]] for every row count and
+    * [[WithheldFiles]] for every file count.
     */
   final case class Reach(
       scopeOf: SessionScope.Resolver,
@@ -133,7 +137,8 @@ object McpCatalogReach:
     def isMember: Boolean = sees.isDefined
 
     private def entry(t: CatalogTableEntry): CatalogTableEntry =
-      t.copy(folder = None, rowCount = if countsRows then t.rowCount else Withheld)
+      if countsRows then t.copy(folder = None)
+      else t.copy(folder = None, rowCount = Withheld, dataFileCount = WithheldFiles)
 
     def tables(ts: List[CatalogTableEntry]): List[CatalogTableEntry] =
       if !isMember then ts
@@ -144,7 +149,17 @@ object McpCatalogReach:
 
     def history(h: CatalogHistoryResponse): CatalogHistoryResponse =
       if countsRows then h
-      else h.copy(commits = h.commits.map(_.copy(rowsAdded = Withheld, rowsRemoved = Withheld)))
+      else
+        h.copy(commits =
+          h.commits.map(
+            _.copy(
+              rowsAdded = Withheld,
+              rowsRemoved = Withheld,
+              filesAdded = WithheldFiles,
+              filesRemoved = WithheldFiles
+            )
+          )
+        )
 
     /** The handlers' own answer for a table that does not exist, so a hidden one reads the same. */
     def notFound(schema: String, table: String): String =
