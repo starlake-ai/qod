@@ -1144,7 +1144,9 @@ final class FlightSqlRouter(
         durationMs: Long,
         status: String,
         error: Option[String],
-        prepMs: Option[Long] = prepareDurationMs
+        prepMs: Option[Long] = prepareDurationMs,
+        // Audit detail of this outcome only, beside the statement's own `detail`.
+        outcomeDetail: Map[String, String] = Map.empty
     ): Unit =
       if recordExecution then
         val realm = if effectiveSet.exists(_.user.tenant.isEmpty) then "system" else "tenant"
@@ -1162,7 +1164,7 @@ final class FlightSqlRouter(
           prepMs,
           patId,
           source,
-          detail
+          detail ++ outcomeDetail
         )
 
     // Table access, functions, settings, files and OPA are the node's to decide (spec decision 29).
@@ -1277,14 +1279,24 @@ final class FlightSqlRouter(
             val f = RouterFailure.AccessDenied(s"access denied: $reason")
             maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(f.reason))
             Left(f)
-          case ai.starlake.quack.edge.rls.RowPolicyRewriter.Failed(_) =>
+          case ai.starlake.quack.edge.rls.RowPolicyRewriter.Failed(reason, failure) =>
             // Fail closed: a stored row policy could not be applied to this statement, so
-            // forwarding it would return unfiltered rows. See RowPolicyRewriter.Failed.
+            // forwarding it would return unfiltered rows. See RowPolicyRewriter.Failed. The
+            // caller gets a reference and no more (the policy is the administrator's); the
+            // administrator finds the policy under it, in the log and the denial's audit event.
             stmtInstruments.recordRowPolicyRewrite(poolKey.tenant, poolKey.pool, "failed")
-            val f = RouterFailure.AccessDenied(
-              "row policy failed to apply - contact an administrator"
+            val ref = FlightSqlRouter.rowPolicyFailureRef()
+            FlightSqlRouter.rowPolicyFailureLog.error(
+              FlightSqlRouter.rowPolicyFailureLogLine(ref, poolKey, user, reason, failure)
             )
-            maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(f.reason))
+            val f = RouterFailure.AccessDenied(FlightSqlRouter.rowPolicyFailedMessage(ref))
+            maybeRecord(
+              nodeId = "-",
+              durationMs = 0,
+              status = "denied",
+              error = Some(f.reason),
+              outcomeDetail = FlightSqlRouter.rowPolicyFailureAudit(ref, reason, failure)
+            )
             Left(f)
 
     // System-catalog filtering runs LAST, on the CLS+RLS output: its substitutions inject
@@ -2184,6 +2196,55 @@ object FlightSqlRouter:
     * them.
     */
   val ReservedAuditKeys: Set[String] = Set("sql", "denied", "reason", "durationMs")
+
+  /** The logger of a row policy that failed to apply: ERROR, so a default install prints it. */
+  private[edge] val rowPolicyFailureLog =
+    com.typesafe.scalalogging.Logger("ai.starlake.quack.edge.rls.RowPolicyFailure")
+
+  /** A fresh reference for one row policy failure: 12 hex digits, unguessable, nothing else. */
+  private[edge] def rowPolicyFailureRef(): String =
+    java.util.UUID.randomUUID().toString.replace("-", "").take(12)
+
+  /** What the caller of a statement a row policy failed on is told: the reference only, as the
+    * policy and its predicate are the administrator's.
+    */
+  def rowPolicyFailedMessage(ref: String): String =
+    s"row policy failed to apply (ref $ref) - contact an administrator"
+
+  /** The administrator's line for `ref`: where, whose policies and why, never the predicate. */
+  private[edge] def rowPolicyFailureLogLine(
+      ref: String,
+      poolKey: PoolKey,
+      user: String,
+      reason: String,
+      failure: Option[ai.starlake.quack.edge.rls.RowPolicyRewriter.FailureDetail]
+  ): String =
+    val where = failure.fold("") { d =>
+      s" table=${d.table} roles=${d.roles.mkString(",")} policies=${d.policyIds.mkString(",")}" +
+        s" cause=${d.cause}" +
+        (if d.missingColumns.isEmpty then ""
+         else s" missingColumns=${d.missingColumns.mkString(",")}")
+    }
+    s"row policy failed to apply (ref $ref): tenant=${poolKey.tenant} pool=${poolKey.pool}" +
+      s" user=$user$where: $reason; the statement was denied. Fix or delete the policy."
+
+  /** The denial's audit detail for `ref`, which the tenant's admins read. */
+  private[edge] def rowPolicyFailureAudit(
+      ref: String,
+      reason: String,
+      failure: Option[ai.starlake.quack.edge.rls.RowPolicyRewriter.FailureDetail]
+  ): Map[String, String] =
+    Map("rowPolicyRef" -> ref, "rowPolicyFailure" -> reason) ++
+      failure.toList.flatMap { d =>
+        List(
+          "rowPolicyTable" -> d.table,
+          "rowPolicies"    -> d.policyIds.mkString(","),
+          "rowPolicyRoles" -> d.roles.mkString(","),
+          "rowPolicyCause" -> d.cause
+        ) ++ Option.when(d.missingColumns.nonEmpty)(
+          "rowPolicyMissingColumns" -> d.missingColumns.mkString(",")
+        )
+      }
 
   /** Why `sql` may not run for a principal whose catalog reads the edge metadata filter narrows
     * (`narrowed`, [[ai.starlake.quack.edge.meta.MetadataFilterRewriter.narrows]]), or None. The

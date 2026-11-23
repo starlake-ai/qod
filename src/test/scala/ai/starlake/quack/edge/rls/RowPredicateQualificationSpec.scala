@@ -112,8 +112,8 @@ class RowPredicateQualificationSpec extends AnyFlatSpec with Matchers:
     ).foreach { p =>
       withClue(p) {
         go("SELECT * FROM secret", policy(p)) match
-          case Failed(_) => succeed
-          case other     => fail(s"expected Failed, got $other")
+          case Failed(_, _) => succeed
+          case other        => fail(s"expected Failed, got $other")
       }
     }
     rewritten(
@@ -366,12 +366,60 @@ class RowPredicateQualificationSpec extends AnyFlatSpec with Matchers:
     Seq("region = 'eu'", "secret.region = 'eu'", "info.country = 'fr'").foreach { p =>
       withClue(p) {
         goWith(r, "SELECT s.id FROM (SELECT 'eu' AS region) v, secret s", policy(p)) match
-          case Failed(reason) =>
+          case Failed(reason, _) =>
             reason should not include "region"
             reason should not include p
           case other => fail(s"expected Failed, got $other")
       }
     }
+  }
+
+  it should "tell the administrator which policy, role, table and columns, and the caller nothing" in {
+    val r     = withCatalog(List("id", "other"))
+    val roles = List(ai.starlake.quack.ondemand.state.RbacRole("r-1", "acme", "eu_readers"))
+    val out   = r.rewrite(
+      "SELECT s.id FROM secret s",
+      StatementKind.Select,
+      EffectiveSet(user, roles, Nil, Nil, Nil, Nil, policy("region = 'eu' AND country = 'fr'")),
+      ctx
+    )
+    out match
+      case Failed(reason, Some(d)) =>
+        reason should not include "region"
+        d.table shouldBe "acme_tpch.tpch1.secret"
+        d.policyIds shouldBe List("rp-1")
+        d.roles shouldBe List("eu_readers")
+        d.cause shouldBe MissingColumnCause
+        d.missingColumns shouldBe List("country", "region")
+      case other => fail(s"expected Failed with a detail, got $other")
+  }
+
+  it should "name the cause of a predicate the rewrite cannot place" in {
+    // A subquery column qualified by neither its own FROM items nor the table's name.
+    goWith(
+      withCatalog(List("id", "region")),
+      "SELECT * FROM secret",
+      policy("region IN (SELECT code FROM codes)")
+    ) match
+      case Failed(_, Some(d)) =>
+        d.cause shouldBe UnqualifiableCause
+        d.missingColumns shouldBe Nil
+      case other => fail(s"expected Failed with a detail, got $other")
+  }
+
+  "predicateColumns" should "read the columns a stored predicate names, tokens as NULL" in {
+    predicateColumns("region = 'eu' AND owner = ${user}", "acme_tpch", "tpch1", "secret") shouldBe
+      Right(Set("region", "owner"))
+    predicateColumns("secret.Region = 'eu' AND rowid > 0", "acme_tpch", "tpch1", "secret") shouldBe
+      Right(Set("region"))
+    predicateColumns("owner = current_user", "acme_tpch", "tpch1", "secret") shouldBe
+      Right(Set("owner"))
+  }
+
+  it should "say why a predicate cannot be applied at all" in {
+    predicateColumns("region IN (SELECT code FROM codes)", "c", "s", "secret") shouldBe
+      Left(UnqualifiableCause)
+    predicateColumns("region = ", "c", "s", "secret") shouldBe Left(PredicateErrorCause)
   }
 
   "a table whose columns cannot be read" should "be judged as the column policy rewriter does" in {
