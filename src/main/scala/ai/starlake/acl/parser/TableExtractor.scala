@@ -379,22 +379,17 @@ object TableExtractor:
       placed: java.util.Set[Table]
   )
 
-  /** `placed`: by identity, every reference the walk read as a table (`tables`) or bound to a CTE
-    * whose spelling or its own it cannot read exactly (left out of `tables` and of
-    * `cteReferences`).
+  /** `placed`: by identity, every FROM-slot reference the walk reached, whatever it read it as (a
+    * table, a CTE, a file, a system view); one it never reached is not in it.
     */
   def extractWithCteReferences(select: Select): CteScoping =
     val visitor = new TableExtractorVisitor()
     visitor.process(select)
-    val placed =
-      java.util.Collections.newSetFromMap(new java.util.IdentityHashMap[Table, java.lang.Boolean]())
-    visitor.tables.foreach(placed.add)
-    placed.addAll(visitor.inexactCteReferences)
     CteScoping(
       visitor.result,
       java.util.Collections.unmodifiableSet(visitor.cteReferences),
       !visitor.unscopedWithItem,
-      java.util.Collections.unmodifiableSet(placed)
+      java.util.Collections.unmodifiableSet(visitor.reached)
     )
 
 private[parser] class TableExtractorVisitor:
@@ -402,9 +397,16 @@ private[parser] class TableExtractorVisitor:
   val unsupported: mutable.ListBuffer[String] = mutable.ListBuffer.empty
   private val cteNames: mutable.Set[CteName]  = mutable.Set.empty
 
-  /** References bound to a CTE by JSqlParser's reading only (not [[TableExtractor.exactName]]). */
-  val inexactCteReferences: java.util.Set[Table] =
+  /** Every FROM-slot table the walk reached, by identity. */
+  val reached: java.util.Set[Table] =
     java.util.Collections.newSetFromMap(new java.util.IdentityHashMap[Table, java.lang.Boolean]())
+
+  /** The recursive CTEs whose recursive term the walk is in: there DuckDB 2.0 binds
+    * `recurring.<name>` (any catalog, any quoting or case of `recurring`) to the CTE, at any depth,
+    * even beside a real table `recurring.<name>` (checked on the CLI, with and without USING KEY).
+    * The anchor, the body's own WITH clauses and everything outside the term read the table.
+    */
+  private val recurringNames: mutable.Set[CteName] = mutable.Set.empty
 
   /** True once a WITH item was walked with no CTE in scope (the `routeChild` fallback). */
   var unscopedWithItem: Boolean = false
@@ -502,7 +504,11 @@ private[parser] class TableExtractorVisitor:
             }
             anchor.foreach(visitSelect)
             cteNames += name
+            val recurringBefore = recurringNames.toSet
+            recurringNames += name
             term.foreach(visitSelect)
+            recurringNames.clear()
+            recurringNames ++= recurringBefore
             setScope(before)
             // What is left (the wrappers, the set operation's own clauses) without the name.
             visitSelect(s)
@@ -644,6 +650,7 @@ private[parser] class TableExtractorVisitor:
   private def matchFromItem(fromItem: FromItem): Unit =
     fromItem match
       case table: Table =>
+        reached.add(table): Unit
         val name = table.getUnquotedName
         if name != null then
           // Skip CTE self-references, but ONLY when the reference is unqualified:
@@ -659,6 +666,19 @@ private[parser] class TableExtractorVisitor:
               .exactName(table.getName)
               .map(IdentifierFold.fold)
               .exists(n => cteNames.exists(_.exact.contains(n)))
+          // `recurring.<name>` in the recursive term of <name>: the CTE ([[recurringNames]]). Kept
+          // in `tables` too, so the access checks read it as before, as a table.
+          val isRecurringReference = recurringNames.nonEmpty &&
+            TableExtractor
+              .exactName(table.getSchemaName)
+              .map(IdentifierFold.fold)
+              .contains(
+                "recurring"
+              ) &&
+            TableExtractor
+              .exactName(table.getName)
+              .map(IdentifierFold.fold)
+              .exists(n => recurringNames.exists(_.exact.contains(n)))
           val isFileRef = DuckDBDialectMapper.isFileReference(table)
           // `FROM sqlite_master`, `FROM pg_class`, `FROM duckdb_tables`: DuckDB resolves a bare
           // name to its default view in system.main / system.pg_catalog unless a table shadows
@@ -682,8 +702,10 @@ private[parser] class TableExtractorVisitor:
           else if isBareCatalogFn then
             unsupported += TableExtractor.bareSystemViewMarker(IdentifierFold.fold(name))
           else if isCteReference then cteReferences.add(table): Unit
-          else if isCteName then inexactCteReferences.add(table): Unit
-          else tables += table
+          else if isCteName then ()
+          else
+            tables += table
+            if isRecurringReference then cteReferences.add(table): Unit
       case ls: LateralSubSelect  => visitParenthesedSelect(ls)
       case ps: ParenthesedSelect => visitParenthesedSelect(ps)
       case tf: TableFunction     =>

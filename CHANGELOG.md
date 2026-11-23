@@ -90,10 +90,12 @@
   predicate. An unqualified reference is now left as written when a CTE of its name is in scope
   where it stands, as DuckDB 2.0 scopes CTEs (WITH RECURSIVE bodies included), and both the CTE's
   name and the reference are unquoted or quoted with nothing but double quotes or backticks
-  around a plain name. Every other reference to a row-policy table is filtered as before: a
-  qualified name, one no CTE of its name covers, and one whose spelling or whose CTE's spelling
-  holds a bracket or a quote inside the name. A statement reading a row-policy table where the
-  gateway cannot place a reference or a WITH clause in its scope is refused.
+  around a plain name; so is `recurring.<name>` anywhere in the recursive term of the recursive
+  CTE `<name>`, which DuckDB binds to that CTE. Every other reference to a row-policy table is
+  filtered as before: a qualified name (`recurring.<name>` outside that term included), one no
+  CTE of its name covers, and one whose spelling or whose CTE's spelling holds a bracket or a
+  quote inside the name. A statement reading a row-policy table where the gateway cannot place a
+  reference or a WITH clause in its scope is refused.
 - **Several column policies on one column: a deny wins, a policy naming the table beats a
   wildcard one, and two different masks are refused.** The policy applied used to depend on the
   order of roles and of the tables a statement named, so a weaker policy could apply in place of

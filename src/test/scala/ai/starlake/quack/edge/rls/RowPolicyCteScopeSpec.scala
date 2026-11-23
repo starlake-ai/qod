@@ -321,6 +321,65 @@ class RowPolicyCteScopeSpec extends AnyFlatSpec with Matchers:
     go("WITH `Secret` AS (SELECT 1 AS y) SELECT * FROM t, \"secret\" s") shouldBe Passthrough
   }
 
+  // ---------- `recurring.<name>` in a recursive term ----------
+
+  /** A row policy on `secret` in any schema, so `recurring.secret` matches it. */
+  private val anySchemaSecret = List(
+    RoleRowPolicy("rp-r", "r-1", "*", "*", "secret", "region = 'eu'")
+  )
+
+  "recurring.<name> in the recursive term of <name>" should "not be wrapped" in
+    Seq(
+      "WITH RECURSIVE secret(id, n) USING KEY (id) AS (SELECT 0, 0 UNION " +
+        "SELECT t.id + 10, 1 FROM t, recurring.secret r WHERE r.n < 1) SELECT * FROM secret",
+      "WITH RECURSIVE secret AS (SELECT 0 AS n UNION SELECT n + 1 FROM recurring.secret " +
+        "WHERE n < 3) SELECT * FROM secret",
+      "WITH RECURSIVE secret AS (SELECT 0 AS n UNION SELECT n + 1 FROM \"recurring\".secret " +
+        "WHERE n < 3) SELECT * FROM secret",
+      "WITH RECURSIVE secret AS (SELECT 0 AS n UNION SELECT n + 1 FROM RECURRING.\"Secret\" " +
+        "WHERE n < 3) SELECT * FROM secret",
+      "WITH RECURSIVE secret AS (SELECT 0 AS n UNION SELECT n + 1 FROM `recurring`.`secret` " +
+        "WHERE n < 3) SELECT * FROM secret",
+      "WITH RECURSIVE secret AS (SELECT 0 AS n UNION SELECT n + 1 FROM " +
+        "memory.recurring.secret WHERE n < 3) SELECT * FROM secret",
+      "WITH RECURSIVE secret AS (SELECT 0 AS n UNION SELECT n + 1 FROM " +
+        "(SELECT * FROM recurring.secret) s WHERE n < 3) SELECT * FROM secret",
+      "WITH RECURSIVE secret AS (SELECT 0 AS n UNION SELECT secret.n + 1 FROM secret, " +
+        "(WITH o AS (SELECT max(n) AS mm FROM recurring.secret) SELECT mm FROM o) q " +
+        "WHERE secret.n < 3 AND q.mm < 50) SELECT * FROM secret"
+    ).foreach(q => withClue(q)(go(q, anySchemaSecret) shouldBe Passthrough))
+
+  "recurring.<name> outside the recursive term of <name>" should "be wrapped" in
+    Seq(
+      // The anchor, the outer query, a later sibling, a plain clause, another CTE's term, the
+      // body's own WITH clause, a body DuckDB does not run as recursive.
+      "WITH RECURSIVE secret AS (SELECT id AS n FROM recurring.secret UNION " +
+        "SELECT n + 1 FROM secret WHERE n < 3) SELECT * FROM t",
+      "WITH RECURSIVE secret AS (SELECT 0 AS n UNION SELECT n + 1 FROM secret WHERE n < 3) " +
+        "SELECT * FROM recurring.secret",
+      "WITH RECURSIVE secret AS (SELECT 0 AS n UNION SELECT n + 1 FROM secret WHERE n < 3), " +
+        "b AS (SELECT * FROM recurring.secret) SELECT * FROM b",
+      "WITH secret AS (SELECT 0 AS n UNION SELECT id FROM recurring.secret) SELECT * FROM secret",
+      "WITH RECURSIVE other AS (SELECT 0 AS n UNION SELECT id FROM recurring.secret) " +
+        "SELECT * FROM other",
+      "WITH RECURSIVE secret AS (WITH z AS (SELECT count(*) AS q FROM recurring.secret) " +
+        "SELECT 0 AS n UNION SELECT n + q FROM secret, z WHERE n < 5) SELECT * FROM secret",
+      "WITH RECURSIVE secret AS (SELECT 0 AS id UNION SELECT id FROM recurring.secret " +
+        "EXCEPT SELECT 99) SELECT * FROM t"
+    ).foreach { q =>
+      withClue(q)(wraps(rewritten(go(q, anySchemaSecret)), "region = 'eu'") shouldBe 1)
+    }
+
+  // ---------- names DuckDB may read as a system view ----------
+
+  "a row-policy table named like a DuckDB system view" should "be wrapped, not refused" in {
+    val duckdbStuff = List(RoleRowPolicy("rp-d", "r-1", "*", "*", "duckdb_stuff", "v = 1"))
+    val pgClass     = List(RoleRowPolicy("rp-p", "r-1", "*", "*", "pg_class", "v = 1"))
+    wraps(rewritten(go("SELECT * FROM duckdb_stuff", duckdbStuff)), "v = 1") shouldBe 1
+    wraps(rewritten(go("SELECT * FROM main.duckdb_stuff", duckdbStuff)), "v = 1") shouldBe 1
+    wraps(rewritten(go("SELECT * FROM pg_class", pgClass)), "v = 1") shouldBe 1
+  }
+
   // ---------- executed in DuckDB ----------
 
   /** `t` with a column the policy names (`region`) and `secret`, the row-policy table. */
@@ -347,10 +406,11 @@ class RowPolicyCteScopeSpec extends AnyFlatSpec with Matchers:
       }
     }
 
-  private def shipped(sql: String): String = go(sql) match
-    case Rewritten(out) => out
-    case Passthrough    => sql
-    case other          => fail(s"expected Rewritten or Passthrough, got $other")
+  private def shipped(sql: String, policies: List[RoleRowPolicy] = List(secretPolicy)): String =
+    go(sql, policies) match
+      case Rewritten(out) => out
+      case Passthrough    => sql
+      case other          => fail(s"expected Rewritten or Passthrough, got $other")
 
   "a statement reading a CTE named like a row-policy table" should
     "return rows that do not depend on an earlier table's columns" in
@@ -387,4 +447,18 @@ class RowPolicyCteScopeSpec extends AnyFlatSpec with Matchers:
     Using.resource(database()) { conn =>
       val sql = "WITH \"[secret\" AS (SELECT 5 AS id, 'q' AS region) SELECT id FROM secret"
       rowsOf(conn, shipped(sql)) shouldBe List(List("10"))
+    }
+
+  "recurring.<name> in a recursive term" should
+    "return rows that do not depend on an earlier table's columns" in
+    Using.resource(database()) { conn =>
+      val sql =
+        "WITH RECURSIVE secret(id, n) USING KEY (id) AS (SELECT 0, 0 UNION " +
+          "SELECT t.id + 10, 1 FROM t, recurring.secret r WHERE r.n < 1) " +
+          "SELECT id FROM secret ORDER BY id"
+      val ship  = shipped(sql, anySchemaSecret)
+      val first = rowsOf(conn, ship)
+      first shouldBe List(List("0"), List("10"), List("11"), List("12"))
+      Using.resource(conn.createStatement())(_.execute("UPDATE t SET region = 'us'")): Unit
+      rowsOf(conn, ship) shouldBe first
     }
