@@ -26,13 +26,29 @@ object StatementExcerpt:
 
   /** `message` without any statement excerpt: from the blanks before each `LINE <n>:` (at the start
     * of the message or after a blank, as `NodeHandles.refusalText` matches it) to the end of that
-    * line, and the caret line after it when there is one. Text before and after is kept as is.
+    * line, and the caret line after it when there is one. A JSON error (`errors_as_json`, which
+    * DuckDB writes as `{"exception_type":...,"position":"<n>","location":"[<n>,<m>]",...}`) also
+    * loses its `position` and `location` members, offsets into the statement the node ran. Text
+    * before and after is kept as is.
     */
   def strip(message: String): String =
-    Excerpt.replaceAllIn(message, "")
+    JsonOffsets.replaceAllIn(Excerpt.replaceAllIn(message, ""), "")
+
+  /** The fixed text a policy holder is answered with in place of a node error the manager cannot
+    * read; the error itself goes to the manager's log.
+    */
+  val Unreadable: String = "the node's error could not be read (see the manager log)"
 
   /** `message` as a principal is shown it: [[strip]]ped when `withheld`, untouched otherwise. */
   def shownTo(withheld: Boolean, message: String): String =
     if withheld then strip(message) else message
 
   private val Excerpt = """\s*(?<!\S)LINE \d+:[^\n]*(?:\n[ \t]*\^+[^\n]*)?""".r
+
+  /** A JSON error's `position` or `location` member with the comma before it, or the run of them
+    * that opens the object, each with the comma after it. Inside a JSON string every quote is
+    * escaped, so a member can only start after an unescaped `{` or `,`.
+    */
+  private val JsonOffsets =
+    val member = """"(?:position|location)"\s*:\s*(?:"\d+"|\d+|"\[\d+,\s*\d+\]"|\[\d+,\s*\d+\])"""
+    raw"""\s*,\s*$member|(?<=\{)(?:\s*$member\s*,?)+""".r

@@ -901,6 +901,24 @@ final class QuackFrontDoor(
   // Statement lifecycle
   // -------------------------------------------------------------------------------------------
 
+  /** A node's answer to a policy holder's statement, which is the gateway's rewrite: an error goes
+    * back without DuckDB's excerpt of the statement (`StatementExcerpt.strip`), every other byte as
+    * the node sent it. An answer the manager cannot read is never relayed, since it may hold an
+    * error the strip never saw: the holder gets a fixed text and the manager's log at ERROR, the
+    * default level, gets the answer.
+    */
+  private def shownToHolder(resp: Array[Byte], st: QuackStatement): Array[Byte] =
+    QuackWire.mapErrorMessage(resp, ai.starlake.quack.edge.policy.StatementExcerpt.strip) match
+      case Right(out) => out
+      case Left(why)  =>
+        val text = new String(resp.take(4096), java.nio.charset.StandardCharsets.UTF_8)
+          .map(c => if c.isControl && c != '\n' && c != '\t' then '?' else c)
+        logger.error(
+          s"unreadable node answer to a policy holder's statement on ${st.nodeId} " +
+            s"(${why.getMessage}; ${resp.length} bytes, the first 4096 as text): $text"
+        )
+        encodeError(ai.starlake.quack.edge.policy.StatementExcerpt.Unreadable)
+
   private def forwardToCurrent(s: QuackSession, f: Frame, onNone: Array[Byte]): IO[Array[Byte]] =
     s.current.get() match
       case None     => IO.pure(onNone)
@@ -908,15 +926,7 @@ final class QuackFrontDoor(
         st.link.forward(f).flatMap {
           case Left(fail)   => IO.pure(encodeError(fail.message))
           case Right(resp0) =>
-            // A policy holder's statement is the gateway's rewrite: an error the node answers it
-            // with goes back without DuckDB's excerpt of it, every other byte as the node sent it.
-            val resp =
-              if st.excerptWithheld then
-                QuackWire.mapErrorMessage(
-                  resp0,
-                  ai.starlake.quack.edge.policy.StatementExcerpt.strip
-                )
-              else resp0
+            val resp    = if st.excerptWithheld then shownToHolder(resp0, st) else resp0
             val isFetch = f.header.msgType == Type.FetchRequest
             if isFetch && messageType(resp) == Type.FetchResponse && isTerminalFetch(resp) then
               // The client has the whole result. A pending stamping bracket commits now; the

@@ -285,9 +285,12 @@ under it, `policy.StatementExcerpt`, decided by `withheldFor` on the effective s
 strips it in `readNodeError` (first try and retry; both doors' prepare-time errors, MCP, REST, the
 FlightSQL prepare probe, history and audit read that text), the native front door strips it from an
 ERROR_RESPONSE it relays to a later FETCH or SEND_DATA (`QuackStatement.excerptWithheld`,
-`QuackWire.mapErrorMessage`, every other byte kept), and a `RewriteScope` refusal of the rewrite is
-answered without what it quotes of it (`RewriteScope.withoutDetail`). Principals without policies
-keep the excerpt. A bind-time slot in stored SQL is a residual (below).
+`QuackWire.mapErrorMessage`, every other byte kept; an answer it cannot read is replaced by
+`StatementExcerpt.Unreadable` and logged at ERROR), a JSON error (`errors_as_json`) loses its
+`position` and `location` members, and a `RewriteScope` refusal of the rewrite is answered without
+what it quotes of it (`RewriteScope.withoutDetail`; the full reason is logged at ERROR, the default
+level). Principals without policies keep the excerpt. A bind-time slot in stored SQL is a residual
+(below).
 `BootPreflight.checkRetiredSettings` (decision 28) judges the removed settings, from the variable or
 else its `quack-flightsql.acl.*` / `quack-flightsql.nodeLockdown` path: `QOD_ACL_ENABLED` and
 `QOD_NODE_LOCKDOWN` set to off (`false`/`no`/`off`) refuse boot, any other value boots with a stderr
@@ -646,7 +649,9 @@ slots too; SQL stored by others (view bodies, defaults) runs its bind-time slots
 statement-text function in such a slot of stored SQL (a view body's `unnest(...)`, `range(...)` or
 `json_each(...)` argument) holds no call in the plan, so the decider does not refuse it to a policy
 holder (the gateway's `StatementTextScreen` catches only the client's own text; the signed
-"holds policies" handle flag of the node-side enforcement work will close it); an
+"holds policies" handle flag of the node-side enforcement work will close it); a result column
+DuckDB names after an unaliased expression over a masked column is named after the rewrite, so it
+carries the mask's `transformSql` to the policy holder (a fix of its own is owed); an
 optimizer extension loaded after qod-node is not re-described; statements an extension runs on its own
 untagged connections (DuckLake metadata, Iceberg commits) are admitted as node-internal; under the
 FlightSQL prepare probe a computed location and a SUMMARIZE run twice, and a fresh FlightSQL query

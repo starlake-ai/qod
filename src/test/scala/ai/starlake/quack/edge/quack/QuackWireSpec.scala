@@ -170,7 +170,7 @@ class QuackWireSpec extends AnyFlatSpec with Matchers:
         "040001" +
         "ffff"
     )
-    val out = mapErrorMessage(v3, ai.starlake.quack.edge.policy.StatementExcerpt.strip)
+    val out = mapErrorMessage(v3, ai.starlake.quack.edge.policy.StatementExcerpt.strip).toOption.get
     toHex(out) shouldBe
       "0100640300ffffffffffffffffff01ffff" +
       "010004626f6f6d" +
@@ -180,14 +180,25 @@ class QuackWireSpec extends AnyFlatSpec with Matchers:
       "ffff"
     decodeErrorText(out) shouldBe Right("Catalog Error: boom")
 
-  it should "answer the same array when nothing changes or the bytes are no error" in:
+  it should "answer the same array when nothing changes or the bytes are another message" in:
     val err = encodeError("boom")
-    mapErrorMessage(err, identity) should be theSameInstanceAs err
-    mapErrorMessage(err, _ => "boom") should be theSameInstanceAs err
+    mapErrorMessage(err, identity).toOption.get should be theSameInstanceAs err
+    mapErrorMessage(err, _ => "boom").toOption.get should be theSameInstanceAs err
     val ok = encodeSuccess()
-    mapErrorMessage(ok, _ => "x") should be theSameInstanceAs ok
-    val junk = Array[Byte](1, 2, 3)
-    mapErrorMessage(junk, _ => "x") should be theSameInstanceAs junk
+    mapErrorMessage(ok, _ => "x").toOption.get should be theSameInstanceAs ok
+
+  it should "answer a DecodeError, never the bytes, for an error or a header it cannot read" in:
+    // An unreadable header may be an error's; an ERROR_RESPONSE with a field this build does not
+    // know may carry the statement excerpt where the strip never looks.
+    mapErrorMessage(Array[Byte](1, 2, 3), _ => "x") shouldBe a[Left[?, ?]]
+    val unknownField = hex(
+      "0100640300ffffffffffffffffff01ffff" +
+        "010004626f6f6d" +
+        "090004626f6f6d" +
+        "ffff"
+    )
+    decodeErrorText(unknownField) shouldBe a[Left[?, ?]]
+    mapErrorMessage(unknownField, _ => "x") shouldBe a[Left[?, ?]]
 
   "encodeSuccess" should "match the captured SUCCESS_RESPONSE" in:
     toHex(encodeSuccess()) shouldBe toHex(success)

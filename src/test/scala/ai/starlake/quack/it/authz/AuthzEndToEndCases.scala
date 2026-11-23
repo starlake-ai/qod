@@ -1785,6 +1785,51 @@ abstract class AuthzEndToEndCases(
       }
   }
 
+  it should "reach a policy holder through MCP without the excerpt, answer and history alike" in {
+    ready()
+    feedRange // feed_a, whose email column mona reads masked
+    // MCP's run_sql reaches the node through the manager's native client, which writes DuckDB's
+    // excerpt of the statement it sent (the rewrite, for a policy holder) into the error, and the
+    // router records that error in the statement history. quinn holds no policy, so the excerpt
+    // reaches quinn's answer and row: that shows this path writes one.
+    val cases = List(
+      (
+        "mona",
+        lake,
+        s"SELECT email FROM $lake.main.feed_a WHERE nonexist_stfix_mcp_m = 1",
+        "'***'"
+      ),
+      ("rhea", fed, "SELECT v FROM pgfed.e2e.orders WHERE nonexist_stfix_mcp_r = 1", "id = 1"),
+      ("quinn", lake, s"SELECT * FROM $lake.main.orders WHERE nonexist_stfix_mcp_q = 1", "")
+    )
+    for (user, database, sql, policyText) <- cases do
+      val pat = patOf(user, s"stfix-mcp-$user")
+      withClue(s"[mcp] $user: $sql -> ") {
+        stack.mcp(pat, sql, database) match
+          case Right(r)  => fail(s"expected a bind error, got $r")
+          case Left(err) =>
+            err should include(s"nonexist_stfix_mcp_${user.head}")
+            if policyText.isEmpty then err should include("LINE ")
+            else
+              err should not include "LINE "
+              err should not include policyText
+      }
+      val marker = s"nonexist_stfix_mcp_${user.head}"
+      val errors = inHistory("permanent", marker)
+        .filter(_.hcursor.get[String]("username").toOption.contains(user))
+        .map(_.hcursor.get[String]("error").getOrElse(""))
+      withClue(s"$user's history rows: $errors -> ") {
+        errors should not be empty
+        errors.foreach { e =>
+          e should include(marker)
+          if policyText.isEmpty then e should include("LINE ")
+          else
+            e should not include "LINE "
+            e should not include policyText
+        }
+      }
+  }
+
   "prepared statements" should "keep working for a principal with column or row policies" in {
     ready()
     // A PREPARE / EXECUTE batch: the node admits it (StatementTextFunctionsNodeSpec); the

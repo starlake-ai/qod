@@ -57,6 +57,40 @@ class StatementExcerptSpec extends AnyFlatSpec with Matchers:
       "Binder Error: column LINE1: not found"
   }
 
+  // As the DuckDB 2.0.0 CLI answers a bind error under `SET errors_as_json = true`.
+  private val jsonError =
+    """{"exception_type":"Binder","exception_message":"Referenced column \"nonexist\" not """ +
+      """found in FROM clause!\nCandidate bindings: \"email\"","error_subtype":""" +
+      """"COLUMN_NOT_FOUND","location":"[97,8]","position":"97","name":"nonexist"}"""
+  private val jsonStripped =
+    """{"exception_type":"Binder","exception_message":"Referenced column \"nonexist\" not """ +
+      """found in FROM clause!\nCandidate bindings: \"email\"","error_subtype":""" +
+      """"COLUMN_NOT_FOUND","name":"nonexist"}"""
+
+  it should "drop a JSON error's position and location, keeping every other member" in {
+    StatementExcerpt.strip(jsonError) shouldBe jsonStripped
+    StatementExcerpt.strip(s"Binder Error: $jsonError") shouldBe s"Binder Error: $jsonStripped"
+    StatementExcerpt.strip(
+      """{"exception_type":"Parser","exception_message":"syntax error at or near \"1\"",""" +
+        """"location":"[33,1]","position":"33","error_subtype":"SYNTAX_ERROR"}"""
+    ) shouldBe
+      """{"exception_type":"Parser","exception_message":"syntax error at or near \"1\"",""" +
+      """"error_subtype":"SYNTAX_ERROR"}"""
+    StatementExcerpt.strip("""{"position":"3","location":"[3,1]","exception_type":"X"}""") shouldBe
+      """{"exception_type":"X"}"""
+    // an excerpt after the JSON, as a client that adds one would write it
+    StatementExcerpt.strip(s"$jsonError\n\n$excerpt\n$carets") shouldBe jsonStripped
+  }
+
+  it should "leave position-like text inside a JSON string, and plain text, alone" in {
+    val inString =
+      """{"exception_type":"Binder","exception_message":"column \"a,\"position\":\"5\"\" """ +
+        """not found"}"""
+    StatementExcerpt.strip(inString) shouldBe inString
+    val plain = "Binder Error: no position 97 at location [97,8]"
+    StatementExcerpt.strip(plain) shouldBe plain
+  }
+
   "withheldFor" should "hold for a column or row policy holder only" in {
     val user  = RbacUser(id = "u-1", tenant = Some("acme"), username = "alice", kind = "user")
     val plain = EffectiveSet(user, Nil, Nil, Nil, Nil)

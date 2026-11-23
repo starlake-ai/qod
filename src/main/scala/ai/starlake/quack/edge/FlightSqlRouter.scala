@@ -1353,10 +1353,13 @@ final class FlightSqlRouter(
           case None         => Right(rewrittenSql)
           case Some(reason) =>
             // What the refusal quotes of the rewrite stays in the manager's log for a policy
-            // holder, whose answer and history leave it out.
+            // holder, whose answer and history leave it out. It is logged at ERROR, which the
+            // default log level keeps: the log is then the only place that names what the rewrite
+            // reached, and a row policy whose predicate reads another table is refused this way on
+            // every statement of its holders, so its author needs that list to see why.
             val shown =
               if excerptWithheld then
-                FlightSqlRouter.log.warn(s"policy rewrite refused for $user on $poolKey: $reason")
+                FlightSqlRouter.log.error(s"policy rewrite refused for $user on $poolKey: $reason")
                 ai.starlake.quack.edge.policy.RewriteScope.withoutDetail(reason)
               else reason
             val denial = s"policy rewrite: $shown"
