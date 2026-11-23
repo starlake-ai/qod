@@ -1921,7 +1921,8 @@ object FlightSqlRouter:
 
   /** The text the policy steps read for a statement: for a principal holding column or row
     * policies, `sql` with every word JSqlParser misreads where DuckDB reads a column quoted
-    * (`MisreadNames.normalize`, meaning-preserving on DuckDB), else `sql` as given. The guard, the
+    * (`MisreadNames.normalized`, meaning-preserving on DuckDB; for a column policy holder every
+    * method call written as the plain call DuckDB makes of it), else `sql` as given. The guard, the
     * column rewriter and the row rewriter are all handed this one text, and each normalizes again
     * on its own entry, which changes nothing, so a direct caller of one of them reads the same.
     */
@@ -1929,7 +1930,9 @@ object FlightSqlRouter:
     val holdsPolicies = effectiveSet.exists(e =>
       !e.user.isSuperuser && (e.columnPolicies.nonEmpty || e.rowPolicies.nonEmpty)
     )
-    if holdsPolicies then ai.starlake.quack.edge.cls.MisreadNames.normalize(sql) else sql
+    val columnPolicies = effectiveSet.exists(e => !e.user.isSuperuser && e.columnPolicies.nonEmpty)
+    if holdsPolicies then ai.starlake.quack.edge.cls.MisreadNames.normalized(sql, columnPolicies).text
+    else sql
 
   /** `UNDROP TABLE` inside a client transaction (review M5): refused on both doors, since its
     * recovery commits on a connection of its own and the client's ROLLBACK would not undo it.

@@ -175,10 +175,14 @@ class RowPolicyRewriter(enabled: Boolean = true) extends LazyLogging:
       // A time-travel clause is invisible to jsqlparser: carry it on its table reference, which
       // maybeWrap keeps as the BASE table inside the filtered view, and put it back afterwards
       // (TimeTravelCarrier). A Passthrough forwards the caller's original text, clause included.
-      // The text every policy step reads (MisreadNames.normalize): a word JSqlParser misreads
-      // where DuckDB reads a column is quoted, so the rewrite keeps that column.
+      // The text every policy step reads (MisreadNames.normalized): a word JSqlParser misreads
+      // where DuckDB reads a column is quoted, so the rewrite keeps that column, and for a column
+      // policy holder a method call is the plain call DuckDB makes of it.
+      val text = ai.starlake.quack.edge.cls.MisreadNames
+        .normalized(sql, columnPolicies = eff.columnPolicies.nonEmpty)
+        .text
       val parsed = ParserInput
-        .render(ai.starlake.quack.edge.cls.MisreadNames.normalize(sql))
+        .render(text)
         .toOption
         .flatMap { in =>
           TimeTravelCarrier.carry(in.text) match

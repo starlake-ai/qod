@@ -30,11 +30,11 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
       // A time keyword DuckDB binds to a column becomes that column's reference first, so that every
       // step below reads it as the column it is (SqlValueNames). Star modifiers become explicit
       // column lists next: the resolver drops them on the floor.
-      StarExpansion.expand(withTimeKeyColumns(sql, schema), schema, policies) match
-        case Left(reason)   => Denied(reason)
-        case Right(starSql) =>
-          rewriteWithPolicies(
-            starSql,
+      MisreadNames.normalized(sql, columnPolicies = true) match
+        case MethodCalls.Desugared(_, Some(reason)) => Denied(reason)
+        case MethodCalls.Desugared(text, None)      =>
+          rewriteNormalized(
+            text,
             schema,
             policies,
             defaultCatalog,
@@ -42,6 +42,28 @@ final class JsqltranspilerRewriter extends SchemaAwareSqlRewriter:
             unresolvedMode,
             homes
           )
+
+  private def rewriteNormalized(
+      sql: String,
+      schema: Map[String, List[String]],
+      policies: List[RoleColumnPolicy],
+      defaultCatalog: Option[String],
+      defaultSchema: Option[String],
+      unresolvedMode: UnresolvedMode,
+      homes: Map[String, (String, String)]
+  ): RewriteOutcome =
+    StarExpansion.expand(withTimeKeyColumns(sql, schema), schema, policies) match
+      case Left(reason)   => Denied(reason)
+      case Right(starSql) =>
+        rewriteWithPolicies(
+          starSql,
+          schema,
+          policies,
+          defaultCatalog,
+          defaultSchema,
+          unresolvedMode,
+          homes
+        )
 
   /** `sql` with each word JSqlParser misreads where DuckDB reads a column quoted
     * ([[MisreadNames.quoteWords]]), then printed with each time keyword and date part DuckDB may
@@ -1435,6 +1457,26 @@ private[quack] object ResidualColumns:
   def droppedArgument(text: String, roots: List[AnyRef]): Option[String] =
     MisreadNames.droppedArgument(text, roots.flatMap(r => scan(r).calls))
 
+  /** Some(refusal) when `root` still holds a call in method form (a function or analytic call whose
+    * dotted name is no function qualifier, [[MethodCalls.isQualifier]]): the method-call pass
+    * writes each one it can as a plain call, so one left here is read by nothing that masks.
+    */
+  def methodCallLeft(root: AnyRef): Option[String] =
+    scan(root).calls.iterator
+      .flatMap {
+        case f: net.sf.jsqlparser.expression.Function =>
+          Option(f.getMultipartName).map(_.asScala.toList).filter(_.size > 1).collect {
+            case parts if !MethodCalls.isQualifier(parts.init) => parts.mkString(".")
+          }
+        case a: net.sf.jsqlparser.expression.AnalyticExpression =>
+          Option(a.getName).filter(_.contains('.')).collect {
+            case n if !MethodCalls.isQualifier(n.split('.').toList.init) => n
+          }
+        case _ => None
+      }
+      .nextOption()
+      .map(n => MethodCalls.Refusal(s"$n(..)"))
+
   /** The receiver of the method call `f` as a column reference ([[receiverOf]]), placed in an
     * aggregate's arguments when `f` sits in one or names a method that is not a built-in scalar
     * function (`user.max()` is `max(user)`), as an ordinary argument would be.
@@ -1717,7 +1759,9 @@ private[quack] object ResidualColumns:
           "column policies; name the columns instead"
     }
     // A column reference JSqlParser holds as another node: nothing masks it, whatever it reads.
-    val opaqueRefusal = before.opaque.headOption.map(MisreadNames.refusal)
+    // A call left in method form after the method-call pass is one too.
+    val opaqueRefusal =
+      before.opaque.headOption.map(MisreadNames.refusal).orElse(methodCallLeft(sel))
     new Suspects(
       noted,
       before.unknown,

@@ -716,7 +716,7 @@ class JsqltranspilerRewriterSpec extends AnyFlatSpec with Matchers:
     )
     rewrittenTo(
       "SELECT c_email.lower().upper() FROM customer",
-      "SELECT lower('***').upper() FROM customer"
+      "SELECT upper(lower('***')) FROM customer"
     )
   }
 
@@ -835,7 +835,8 @@ class JsqltranspilerRewriterSpec extends AnyFlatSpec with Matchers:
     ).foreach(denied)
 
   it should "leave a method call on another table's binding alone" in {
-    outcome("SELECT o.to_json() FROM orders o") shouldBe RewriteOutcome.Passthrough
+    // Read as the plain call DuckDB makes of it (review round 4), so answered as that call is.
+    outcome("SELECT o.to_json() FROM orders o") shouldBe outcome("SELECT to_json(o) FROM orders o")
     outcome("SELECT c.c_name.lower() FROM customer c") shouldBe RewriteOutcome.Passthrough
   }
 

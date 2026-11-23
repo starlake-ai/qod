@@ -60,21 +60,47 @@ private[quack] object MisreadNames:
     */
   def normalize(sql: String): String = quoteWords(sql)
 
+  /** [[normalize]] for a principal holding column policies: also every method call written as the
+    * plain call DuckDB makes of it ([[MethodCalls.desugar]]), with the refusal of one that cannot
+    * be. Idempotent like [[normalize]].
+    */
+  def normalized(sql: String, columnPolicies: Boolean): MethodCalls.Desugared =
+    val quoted = quoteWords(sql)
+    if columnPolicies then MethodCalls.desugar(quoted) else MethodCalls.Desugared(quoted, None)
+
   /** `sql` with each unquoted occurrence of [[QuotedWords]] not followed by `(` (a call, or an
     * EXISTS subquery) nor following `$` or `:` (a named parameter) written as the quoted identifier
     * DuckDB reads it as, so that JSqlParser parses a column there. DuckDB binds the quoted word
     * exactly as the bare one.
     */
   def quoteWords(sql: String): String =
-    val view   = SqlLexer.engineView(sql)
-    val tokens = SqlLexer.tokens(sql)
-    val solid  = tokens.filterNot(_.isTrivia)
+    val view                  = SqlLexer.engineView(sql)
+    val tokens                = SqlLexer.tokens(sql)
+    val solid                 = tokens.filterNot(_.isTrivia)
+    def at(i: Int): String    = view.substring(solid(i).start, solid(i).end)
+    def ends(i: Int): Boolean =
+      i >= 0 && (solid(i).kind == SqlLexer.Kind.Word || solid(i).kind == SqlLexer.Kind.Literal ||
+        solid(i).kind == SqlLexer.Kind.Number || Set(")", "]", "}").contains(at(i)))
+    // `$key` is a named parameter; `:key` one too when the colon starts an expression. A colon
+    // after an expression or a name separates (a struct value, a lambda body, a slice bound), and
+    // `::` (one token) is a cast.
+    def afterParameterMark(i: Int): Boolean =
+      i > 0 && (at(i - 1) == "$" || at(i - 1) == "::" || (at(i - 1) == ":" && !ends(i - 2)))
+    // DDL's own uses: `PRIMARY KEY`, `FOREIGN KEY`, `IF [NOT] EXISTS`.
+    def keywordRole(i: Int): Boolean =
+      i > 0 && {
+        val prev = IdentifierFold.fold(at(i - 1))
+        IdentifierFold.fold(at(i)) match
+          case "key"    => prev == "primary" || prev == "foreign"
+          case "exists" => prev == "if" || prev == "not"
+          case _        => false
+      }
     val quoted = solid.indices.filter { i =>
       val t = solid(i)
       t.kind == SqlLexer.Kind.Word &&
       QuotedWords.contains(IdentifierFold.fold(view.substring(t.start, t.end))) &&
       !solid.lift(i + 1).exists(n => view.substring(n.start, n.end) == "(") &&
-      !(i > 0 && Set("$", ":").contains(view.substring(solid(i - 1).start, solid(i - 1).end)))
+      !afterParameterMark(i) && !keywordRole(i)
     }
     if quoted.isEmpty then sql
     else
@@ -132,44 +158,32 @@ private[quack] object MisreadNames:
         Some("a statement parameter")
       case _ => None
 
-  /** The number of arguments the text gives each call, by function name folded as DuckDB folds it,
-    * summed over the calls of that name: an argument list is counted by its top-level commas, up to
-    * an `ORDER BY`, `SEPARATOR` or `LIMIT` of its own, a lambda's parameter list (`lambda x, y:`)
-    * not counted. A name is a word or a quoted identifier right before `(`.
+  /** The number of arguments the text gives the call whose argument list opens at token `open` of
+    * `solid`: its top-level commas plus one (none for an empty list), up to the call's own
+    * `ORDER BY` (DuckDB's only clause there that holds commas; `SEPARATOR` and `LIMIT` are no
+    * clause of DuckDB's), a lambda's parameter list (`lambda x, y:`) not counted.
     */
-  def textArguments(text: String): Map[String, Int] =
-    val view               = SqlLexer.engineView(text)
-    val solid              = SqlLexer.tokens(text).filterNot(_.isTrivia)
-    def at(i: Int): String = view.substring(solid(i).start, solid(i).end)
-    val counts             = scala.collection.mutable.Map.empty[String, Int].withDefaultValue(0)
-    solid.indices.foreach { i =>
-      val t        = solid(i)
-      val nameText = at(i)
-      val isName   = t.kind == SqlLexer.Kind.Word ||
-        (t.kind == SqlLexer.Kind.Literal && nameText.startsWith("\""))
-      if isName && i + 1 < solid.size && at(i + 1) == "(" then
-        var j        = i + 2
-        var depth    = 0
-        var commas   = 0
-        var any      = false
-        var stopped  = false
-        var inLambda = false
-        while j < solid.size && !(depth == 0 && at(j) == ")") do
-          val s = at(j)
-          if s == "(" || s == "[" || s == "{" then depth += 1
-          else if s == ")" || s == "]" || s == "}" then depth -= 1
-          else if depth == 0 then
-            val w = IdentifierFold.fold(s)
-            if w == "order" || w == "separator" || w == "limit" then stopped = true
-            else if w == "lambda" then inLambda = true
-            else if s == ":" && inLambda then inLambda = false
-            else if s == "," && !stopped && !inLambda then commas += 1
-          any = true
-          j += 1
-        val name = IdentifierFold.fold(ai.starlake.sql.QuotedIdentifier.unquote(nameText))
-        counts(name) += (if any then commas + 1 else 0)
-    }
-    counts.toMap
+  private def writtenArguments(solid: Vector[SqlLexer.Token], at: Int => String, open: Int): Int =
+    var j        = open + 1
+    var depth    = 0
+    var commas   = 0
+    var any      = false
+    var stopped  = false
+    var inLambda = false
+    while j < solid.size && !(depth == 0 && at(j) == ")") do
+      val s = at(j)
+      if s == "(" || s == "[" || s == "{" then depth += 1
+      else if s == ")" || s == "]" || s == "}" then depth -= 1
+      else if depth == 0 then
+        val w = IdentifierFold.fold(s)
+        if w == "order" && j + 1 < solid.size && IdentifierFold.fold(at(j + 1)) == "by" then
+          stopped = true
+        else if w == "lambda" then inLambda = true
+        else if s == ":" && inLambda then inLambda = false
+        else if s == "," && !stopped && !inLambda then commas += 1
+      any = true
+      j += 1
+    if any then commas + 1 else 0
 
   /** The number of arguments JSqlParser kept for a call node, by its function name folded, None for
     * a node that is not a call.
@@ -196,16 +210,37 @@ private[quack] object MisreadNames:
         }
       case _ => None
 
-  /** Some(refusal) when JSqlParser kept fewer arguments for the calls of some name than the text
-    * gives them: a word it consumed, which DuckDB reads as a column, left no node to judge.
+  /** Some(refusal) when JSqlParser kept fewer arguments of some call than its text gives it, call
+    * by call: each call node is placed in `text` by the parser's own token position, and its
+    * argument list there is counted ([[writtenArguments]]). A word the parser consumed, which
+    * DuckDB reads as a column, left no node to judge; a call it cannot place is refused too.
     */
   def droppedArgument(text: String, calls: List[AnyRef]): Option[String] =
-    val parsed  = calls.flatMap(parsedArguments).groupMapReduce(_._1)(_._2)(_ + _)
-    val written = textArguments(text)
-    parsed.collectFirst {
-      case (name, kept) if written.getOrElse(name, 0) > kept =>
-        s"an argument of $name(..) is a word the column policy rewrite cannot read; quote it"
-    }
+    val view                  = SqlLexer.engineView(text)
+    val solid                 = SqlLexer.tokens(text).filterNot(_.isTrivia)
+    def at(i: Int): String    = view.substring(solid(i).start, solid(i).end)
+    def refusal(name: String) =
+      s"an argument of $name(..) is a word the column policy rewrite cannot read; quote it"
+    calls.iterator
+      .flatMap { node =>
+        parsedArguments(node).map { (name, kept) =>
+          firstOffset(node) match
+            case None        => Some(refusal(name))
+            case Some(start) =>
+              solid.indices.find(i => solid(i).start >= start && at(i) == "(") match
+                case None       => Some(refusal(name))
+                case Some(open) =>
+                  Option.when(writtenArguments(solid, at, open) > kept)(refusal(name))
+        }.flatten
+      }
+      .nextOption()
+
+  /** The 0-based offset in the parsed text of a node's first token, from the parser's own node. */
+  private def firstOffset(node: AnyRef): Option[Int] =
+    node match
+      case n: net.sf.jsqlparser.parser.ASTNodeAccess =>
+        Option(n.getASTNode).flatMap(a => Option(a.jjtGetFirstToken)).map(_.absoluteBegin - 1)
+      case _ => None
 
   /** Whether the method a call `x.f(..)` names is not a classified built-in scalar function, so
     * that its receiver `x` sits in an aggregate's arguments ([[aggregateContext]]).

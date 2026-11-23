@@ -113,6 +113,21 @@
   function, as DuckDB reads it, instead of a refusal. Under column policies, a statement using
   `@` (DuckDB's absolute value operator, which the rewriter read as no column) or a column named
   `interval` followed by another word is refused; write `abs(<column>)` or quote the name.
+- **Method-call syntax is read as DuckDB reads it under column policies.** DuckDB reads
+  `<expression>.f(args)` as `f(<expression>, args)`, chains included (`user.upper().max()`), and
+  the policy rewriter held such a call as a dotted name with no column in it: a chained method-call
+  aggregate in a subquery read the enclosing query's column, and `ssn.max() FILTER (WHERE true)`
+  read any masked or denied column raw, in the select list, as a `HAVING` test or inside an
+  `INSERT`. For a column policy holder, every method call is now written as the plain call DuckDB
+  makes of it before any policy step reads the statement, so its column's mask or deny applies. A
+  method call that cannot be written so with certainty is refused: one followed by `FILTER`,
+  `OVER` or `WITHIN GROUP`, one with `DISTINCT` or `ALL` in its arguments, one on a typed
+  literal, a cast, a `CASE` or a name of more than two parts. Write those as function calls. A
+  dotted call that is not a function qualified by `main`, `pg_catalog`, `information_schema`,
+  `system.main` or `temp.main` is read as a method call. A statement whose parse keeps fewer
+  arguments of a call than its text gives is refused, judged call by call. The words of the entry
+  above are no longer quoted in `PRIMARY KEY`, `FOREIGN KEY` and `IF [NOT] EXISTS`, nor after
+  `$` or `::`.
 - **A mask now reads the same column as the reference it replaces.** A mask names its column
   bare, and was spliced as stored, so in a subquery or beside another table holding a column of
   the same name it could read that other column, part of a denied one included, or fail as

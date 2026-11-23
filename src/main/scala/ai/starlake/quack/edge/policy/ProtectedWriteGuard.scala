@@ -75,11 +75,15 @@ final class ProtectedWriteGuard(
   ): GuardOutcome =
     // The text every policy step reads (MisreadNames.normalize): the column rewriter parses this
     // one, so this guard must too, or a word JSqlParser misreads would hide a read from it alone.
-    val sql         = ai.starlake.quack.edge.cls.MisreadNames.normalize(statement)
     val colPolicies = if clsEnabled then eff.columnPolicies else Nil
     val rowPolicies = if rlsEnabled then eff.rowPolicies else Nil
+    val normalized  = ai.starlake.quack.edge.cls.MisreadNames
+      .normalized(statement, columnPolicies = colPolicies.nonEmpty && !eff.user.isSuperuser)
+    val sql = normalized.text
     if eff.user.isSuperuser then Allow // superuser
     else if colPolicies.isEmpty && rowPolicies.isEmpty then Allow
+    // A method call the column rewriter could not write as a plain call: refused there too.
+    else if normalized.refusal.isDefined then Deny(s"access denied: ${normalized.refusal.get}")
     else
       // Every kind, a plain SELECT included: a table named in a string is invisible to the
       // rewriters, so the read would come back unfiltered and unmasked. A quoted name holding a
@@ -171,7 +175,7 @@ final class ProtectedWriteGuard(
         // A call JSqlParser kept fewer arguments of than the text gives drops a word DuckDB reads
         // as a column: nothing below would see that read.
         ai.starlake.sql.TooDeep.orElse(Some(ai.starlake.sql.TooDeep.Reason))(
-          ai.starlake.quack.edge.cls.ResidualColumns.droppedArgument(text, asts)
+          callRefusal(text, colPolicies.nonEmpty)
         ) match
           case Some(reason) => Deny(s"access denied: $reason")
           case None         =>
@@ -276,6 +280,30 @@ final class ProtectedWriteGuard(
     if outer.isEmpty then Some(sel)
     else if inner.nonEmpty then None
     else Some(sel.withWithItemsList(outer.asJava))
+
+  /** Some(refusal) when a statement of `text` holds a call JSqlParser kept fewer arguments of than
+    * its text gives (each statement parsed alone, so the parser's token positions are its own), or,
+    * under column policies, a call left in method form ([[ResidualColumns.methodCallLeft]]).
+    */
+  private def callRefusal(text: String, columnPolicies: Boolean): Option[String] =
+    ai.starlake.sql.SqlCommentStripper
+      .statementSpans(text)
+      .iterator
+      .flatMap { (from, until) =>
+        val one = text.substring(from, until)
+        scala.util.Try(CCJSqlParserUtil.parse(one)).toOption.flatMap { stmt =>
+          ai.starlake.quack.edge.cls.ResidualColumns
+            .droppedArgument(one, List(stmt))
+            .orElse(
+              Option
+                .when(columnPolicies)(
+                  ai.starlake.quack.edge.cls.ResidualColumns.methodCallLeft(stmt)
+                )
+                .flatten
+            )
+        }
+      }
+      .nextOption()
 
   /** Re-parse the whole (stripped, lexer-canonical: the input `SqlParser.extract` parses) input
     * into its statement list, or None on any rendering or parse failure.

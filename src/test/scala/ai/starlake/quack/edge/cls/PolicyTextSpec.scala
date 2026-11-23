@@ -142,7 +142,7 @@ class PolicyTextSpec extends AnyFlatSpec with Matchers:
 
   "the guard, the column rewriter and the row rewriter" should "read one text" in
     Statements.foreach { raw =>
-      val text = MisreadNames.normalize(raw)
+      val text = MisreadNames.normalized(raw, columnPolicies = true).text
       withClue(raw) {
         MisreadNames.normalize(text) shouldBe text
         val withPolicies = eff(List(mask("ssn")), List(rowPolicy))
