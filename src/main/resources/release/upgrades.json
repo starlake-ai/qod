@@ -133,6 +133,15 @@
         { "when": "during", "boot_refuses_until_done": false, "text": "Fleet: upgrade the servers (qod fleet join) with the manager and give every HA replica the same QOD_S3_*: a server on an earlier release does not read the store keys the manager now sends, and a server of this release takes none from an earlier manager. Set QOD_FLEET_NODE_S3_ENDPOINT where servers reach the store at another address than the manager." },
         { "when": "after", "boot_refuses_until_done": false, "text": "Remove QOD_S3_*, QOD_AZURE_* and QOD_GCS_* from every fleet server, which now ignores them, and restart every node so the proxy credential fix and the local pool sizes apply." }
       ]
+    },
+    {
+      "version": "0.14.3",
+      "changesets": [],
+      "min_from_version": "0.10.0",
+      "rollback_without_restore": true,
+      "rollback_blocked_by": [],
+      "notes": "https://github.com/starlake-ai/quack-on-demand/blob/v0.14.3/CHANGELOG.md",
+      "steps": []
     }
   ]
 }
