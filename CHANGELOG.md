@@ -113,6 +113,51 @@
   - An OPA tenant's input now carries catalog, schema, table, column and secure view names folded
     as DuckDB folds them (`"SECRET_ÉTÉ"` arrives as `secret_ÉtÉ`, formerly `secret_été`); a Rego
     rule written against the old lowercased form must be updated.
+- **A row policy no longer filters a reference that DuckDB binds to a CTE.** A statement whose
+  WITH clause declares a CTE named like a table the caller holds a row policy on had its
+  references to the CTE filtered as if they read that table. Inside the filter the name still
+  meant the CTE, so the policy's predicate was evaluated against another table of the statement
+  instead, which told the caller, row by row, whether that other table's values satisfied the
+  predicate. An unqualified reference is now left as written when a CTE of its name is in scope
+  where it stands, as DuckDB 2.0 scopes CTEs (WITH RECURSIVE bodies included), and both the CTE's
+  name and the reference are unquoted or quoted with nothing but double quotes or backticks
+  around a plain name; so is `recurring.<name>` anywhere in the recursive term of the recursive
+  CTE `<name>`, which DuckDB binds to that CTE. Every other reference to a row-policy table is
+  filtered as before: a qualified name (`recurring.<name>` outside that term included), one no
+  CTE of its name covers, and one whose spelling or whose CTE's spelling holds a bracket or a
+  quote inside the name. A statement reading a row-policy table where the gateway cannot place a
+  reference or a WITH clause in its scope is refused.
+- **A row predicate reads only its own table.** The filter wrapped around a row-policy table
+  named its columns bare, and DuckDB binds a name the table does not have to another FROM item
+  of the statement. A predicate naming a column the table no longer has (a column dropped or
+  renamed after the policy was written) therefore read a column of an item the caller placed
+  beside the table, and could admit every row. Two changes close it:
+  - Such a policy now fails to apply, and the statement is denied with `row policy failed to
+    apply - contact an administrator`, which names neither the predicate nor the column. The
+    gateway reads the table's columns from the catalog the column policies use. A time-travel
+    read `AT (VERSION => n)` is judged on the columns of snapshot `n`, any other clause on the
+    current columns. A table whose columns cannot be read is handled as
+    `quack-on-demand.cls.unresolvedTable` (`QOD_CLS_UNRESOLVED_TABLE`) says for column policies:
+    `pass` (the default) applies the predicate unchecked, `deny` refuses the statement.
+  - The filter reads its table under an alias drawn at random for each filtered table
+    (`__qod_rls_` and 32 hex digits), and each column of the predicate is qualified with it, so
+    a column the table lacks is a binder error on the node even where the gateway could not
+    check it. The alias is unpredictable and never shared, because DuckDB also looks an unbound
+    qualified name up as a struct column of the caller's other FROM items, and a caller can bring
+    in a column of any name without writing it (a view, a file's JSON keys, a PIVOT over data
+    values).
+
+  A column the predicate qualifies by its table's own name keeps working; another qualifier reads
+  as a struct field of the table; `rowid`, lambda parameters and `current_user`, `user`,
+  `current_role`, `session_user`, `current_schema`, `current_catalog`, `localtime` and
+  `localtimestamp` are left as written. A predicate holding a subquery whose columns are not all
+  qualified by the subquery's own FROM items or by the table's name fails to apply.
+- **Functions returning the statement's text are refused to principals with column or row
+  policies.** The node runs the statement as the gateway rewrote it, with every row filter and
+  mask in it, so `current_query()` (and `pg_catalog.current_query()`),
+  `duckdb_prepared_statements()` and `pg_catalog.pg_prepared_statements` showed such a principal
+  the administrator's predicates and the filters' aliases. A statement naming one of them is now
+  refused to such a principal, on every statement kind.
 - **Several column policies on one column: a deny wins, a policy naming the table beats a
   wildcard one, and two different masks are refused.** The policy applied used to depend on the
   order of roles and of the tables a statement named, so a weaker policy could apply in place of

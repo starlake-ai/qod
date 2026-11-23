@@ -3794,7 +3794,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       withClue(backtick) {
         val b = run(backtick)
         b.map(_.contains("`")) should not be Right(true)
-        b.map(_.toLowerCase) shouldBe run(twin).map(_.toLowerCase)
+        // Each rewrite draws its own row-policy alias, read as one name here.
+        def same(sql: String) = sql.toLowerCase.replaceAll("__qod_rls_[0-9a-f]{32}", "__qod_rls")
+        b.map(same) shouldBe run(twin).map(same)
         b.foreach { sent =>
           sent should include("c_region = 'X'")
           sent should not include "c_email LIKE"

@@ -62,6 +62,22 @@ object TimeTravelCarrier:
   def isPlaceholder(clause: String): Boolean =
     clause != null && PlaceholderIndex.findFirstMatchIn(clause).isDefined
 
+  /** The clause of the placeholder in `timeTravel` (a table's time-travel slot), from `clauses`. */
+  def clauseOf(timeTravel: String, clauses: Vector[String]): Option[String] =
+    Option(timeTravel)
+      .flatMap(PlaceholderIndex.findFirstMatchIn)
+      .map(_.group(1).toInt)
+      .filter(_ < clauses.size)
+      .map(clauses)
+
+  private val VersionClause = """(?is)\s*AT\s*\(\s*VERSION\s*=>\s*(\d{1,18})\s*\)\s*""".r
+
+  /** The snapshot `AT (VERSION => <integer literal>)` reads, None for any other clause. */
+  def pinnedVersion(clause: String): Option[Long] =
+    clause match
+      case VersionClause(v) => v.toLongOption
+      case _                => None
+
   def carry(sql: String): Carry =
     pin(sql) match
       case Pinned.Absent                   => Carry.Absent
