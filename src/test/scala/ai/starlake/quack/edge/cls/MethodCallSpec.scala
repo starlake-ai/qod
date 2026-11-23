@@ -187,6 +187,76 @@ class MethodCallSpec extends AnyFlatSpec with Matchers:
       )
     }
 
+  // ---- a method on a main-qualified table (review round 6, R4-C1) ------------------------------
+
+  private val mainQualified = List(
+    "SELECT main.kv.max() FILTER (WHERE true) AS m FROM kv",
+    "SELECT main.kv.list() FILTER (WHERE true) AS m FROM kv",
+    "SELECT main.kv.max() FILTER (WHERE true) AS m FROM main.kv",
+    "SELECT count(*) FROM kv HAVING main.kv.max() FILTER (WHERE true) IS NOT NULL",
+    "SELECT (SELECT main.kv.max() FILTER (WHERE true) FROM kv) AS r FROM o",
+    "SELECT system.main.kv.max() FILTER (WHERE true) AS m FROM kv",
+    "SELECT \"main\".kv.max() FILTER (WHERE true) AS m FROM kv",
+    "SELECT MAIN.kv.max() FILTER (WHERE true) AS m FROM kv",
+    "SELECT \"MAIN\".\"kv\".list() FILTER (WHERE true) AS m FROM kv",
+    s"SELECT $Catalog.main.kv.max() FILTER (WHERE true) AS m FROM kv"
+  )
+
+  "a method aggregate on a main-qualified table" should "be refused, under a deny and a mask" in {
+    for
+      sql    <- mainQualified
+      policy <- List(deny("kv", "ssn"), mask("kv", "ssn"))
+      r      <- List(rw, strict)
+    do withClue(s"$sql (${policy.action})")(refused(rewrite(sql, List(policy), r)) shouldBe true)
+    mainQualified.take(3).foreach { sql =>
+      val insert = s"INSERT INTO w SELECT 1, ${sql.stripPrefix("SELECT ").replace(" AS m", "")}"
+      withClue(insert)(
+        guard.check(insert, StatementKind.Dml, eff(List(deny("kv", "ssn"))), ctx) shouldBe
+          a[GuardOutcome.Deny]
+      )
+    }
+  }
+
+  /** Every qualifier depth from one to four parts, with and without a suffix: whether DuckDB reads
+    * its own or a user's function (`ok`) or a method on a receiver that reads a protected row.
+    */
+  private val depths: List[(String, MethodCalls.CallName, Boolean)] = List(
+    ("max(id)", MethodCalls.CallName.Plain, true),
+    ("max(id) FILTER (WHERE true)", MethodCalls.CallName.Plain, true),
+    ("main.max(id)", MethodCalls.CallName.Plain, true),
+    ("main.max(id) FILTER (WHERE true)", MethodCalls.CallName.Plain, true),
+    ("kv.max()", MethodCalls.CallName.Qualified, false),
+    ("kv.max() FILTER (WHERE true)", MethodCalls.CallName.Qualified, false),
+    ("myschema.max(id)", MethodCalls.CallName.Qualified, true),
+    ("myschema.max(id) FILTER (WHERE true)", MethodCalls.CallName.Qualified, true),
+    ("system.main.max(id)", MethodCalls.CallName.Plain, true),
+    ("system.main.max(id) FILTER (WHERE true)", MethodCalls.CallName.Plain, true),
+    ("main.kv.max()", MethodCalls.CallName.Method, false),
+    ("main.kv.max() FILTER (WHERE true)", MethodCalls.CallName.Method, false),
+    ("lake.myschema.f(id)", MethodCalls.CallName.Qualified, true),
+    ("lake.myschema.f(id) FILTER (WHERE true)", MethodCalls.CallName.Qualified, true),
+    ("x.kv.max() FILTER (WHERE true)", MethodCalls.CallName.Qualified, false),
+    ("system.main.kv.max()", MethodCalls.CallName.Method, false),
+    ("system.main.kv.max() FILTER (WHERE true)", MethodCalls.CallName.Method, false),
+    (s"$Catalog.main.kv.max()", MethodCalls.CallName.Method, false),
+    (s"$Catalog.main.kv.max() FILTER (WHERE true)", MethodCalls.CallName.Method, false)
+  )
+
+  "a dotted call name" should "be judged on the whole name at every qualifier depth" in {
+    for
+      (call, kind, ok) <- depths
+      policy           <- List(deny("kv", "ssn"), mask("kv", "ssn"))
+      r                <- List(rw, strict)
+    do
+      val name = call.takeWhile(_ != '(').split('.').toList
+      withClue(call)(MethodCalls.callName(name) shouldBe kind)
+      val outcome = rewrite(s"SELECT $call AS v FROM kv", List(policy), r)
+      withClue(s"$call (${policy.action}) -> $outcome") {
+        if ok then refused(outcome) shouldBe false
+        else refused(outcome) shouldBe true
+      }
+  }
+
   "a call qualified by a schema nothing in scope is named" should "ship as written (R3-m1)" in {
     val p = List(mask("kv", "ssn"))
     List(

@@ -39,6 +39,33 @@ private[quack] object MethodCalls:
       case "system" :: "main" :: Nil => true
       case _                         => false
 
+  /** What a call's dotted name is, judged on the whole name, never its head alone (review round 6).
+    */
+  enum CallName:
+    /** `<fn>`, `main.<fn>`, `system.main.<fn>`: DuckDB's function, whatever follows. */
+    case Plain
+
+    /** A method call on a receiver: a name with a part left over after `main` or `system.main`
+      * (`main.u.max` is `max` on the table `main.u`), or more parts than `catalog.schema.<fn>`.
+      */
+    case Method
+
+    /** `<schema>.<fn>` or `<catalog>.<schema>.<fn>`: a user function of that schema, or a method on
+      * a binding the qualifier names; only the bindings in scope can tell.
+      */
+    case Qualified
+
+  /** The [[CallName]] of the dotted call name `parts` (the function's own name last). */
+  def callName(parts: List[String]): CallName =
+    val qualifier = parts.init.map(p => IdentifierFold.fold(QuotedIdentifier.unquote(p)))
+    qualifier match
+      case Nil                     => CallName.Plain
+      case q if isQualifier(q)     => CallName.Plain
+      case "main" :: _             => CallName.Method
+      case "system" :: "main" :: _ => CallName.Method
+      case q if q.size > 2         => CallName.Method
+      case _                       => CallName.Qualified
+
   /** Words before a `<name>.<name>(` that make it a qualified object name, not an expression: a
     * table, a table function, a view, a macro, a statement target. `on` only before a one-part head
     * (`CREATE INDEX i ON s.t (c)`), as a join condition is an expression.
@@ -311,7 +338,9 @@ private[quack] object MethodCalls:
             else if parts.size > 2 then Left(Some("on a name of more than two parts"))
             else if isQualifier(parts) then Left(scala.None)
             else if prev >= 0 && at(prev) == "::" then Left(Some("after a cast"))
-            else if !nameReceivers then Left(scala.None)
+            // `main.u.f(`: a method on the table `main.u`, desugared or, after FILTER, refused.
+            else if !nameReceivers && callName(parts :+ "f") != CallName.Method then
+              Left(scala.None)
             else if isWord(prev) && ObjectContext.contains(word(prev)) then Left(scala.None)
             else if isWord(prev) && word(prev) == "on" && parts.size == 1 then Left(scala.None)
             else Right(start)

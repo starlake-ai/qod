@@ -1477,9 +1477,11 @@ private[quack] object ResidualColumns:
   /** The head of an analytic call's dotted name (`ssn` of `ssn.max`), None for a function qualifier
     * DuckDB resolves to its own functions ([[MethodCalls.isQualifier]]).
     */
-  private def methodHead(a: net.sf.jsqlparser.expression.AnalyticExpression): Option[String] =
+  private def methodName(
+      a: net.sf.jsqlparser.expression.AnalyticExpression
+  ): (MethodCalls.CallName, List[String]) =
     val parts = a.getName.split('.').toList
-    Option.when(!MethodCalls.isQualifier(parts.init))(lower(unquote(parts.head)))
+    MethodCalls.callName(parts) -> parts.init.map(p => lower(unquote(p)))
 
   /** Some(refusal) when `root` holds an aggregate, window or ordered-set call in method form
     * (`ssn.max() FILTER (..)`, JSqlParser's analytic call with a dotted name and no column node)
@@ -1488,7 +1490,8 @@ private[quack] object ResidualColumns:
     */
   def methodCallLeft(root: AnyRef): Option[String] =
     scan(root).analyticMethods.collectFirst {
-      case (a, _) if methodHead(a).isDefined => MethodCalls.Refusal(s"${a.getName}(..)")
+      case (a, _) if methodName(a)._1 != MethodCalls.CallName.Plain =>
+        MethodCalls.Refusal(s"${a.getName}(..)")
     }
 
   /** The receiver of the method call `f` as a column reference ([[receiverOf]]), placed in an
@@ -1644,7 +1647,7 @@ private[quack] object ResidualColumns:
       val parts  = f.getMultipartName.asScala.toList
       val column = receiverIn(before, f)
       // `main.f(..)` / `system.main.f(..)` is DuckDB's own function, never a method.
-      if MethodCalls.isQualifier(parts.init) then None
+      if MethodCalls.callName(parts) == MethodCalls.CallName.Plain then None
       else if !coverage.covered(column, scopes) then None
       else if f.getNamedParameters != null || f.getKeywordArguments != null || f.isDistinct ||
         f.isAllColumns || f.getChainedParameters != null || f.getExtraKeyword != null
@@ -1778,12 +1781,20 @@ private[quack] object ResidualColumns:
     // So is an analytic call in method form whose head may be a binding in scope: a column, a
     // table or an alias of the statement, or a source whose columns are unknown. A head nothing
     // binds is a qualifier of a user function, left as written (`myschema.agg(x) FILTER (..)`).
-    def headBindable(head: String, scopes: List[Scope]): Boolean =
-      before.aliasNames.contains(head) ||
-        scopes.flatten.exists(src => src.names.contains(head) || !has(src, head).contains(false))
+    // The qualifier `q` is shared by scope when its head is an alias, a source or a column a source
+    // has or may have, or a later part names a source (`s.t.f(..)`: the table `t` of schema `s`).
+    def qualifierShared(q: List[String], scopes: List[Scope]): Boolean =
+      val sources = scopes.flatten
+      before.aliasNames.contains(q.head) ||
+      sources.exists(src => src.names.contains(q.head) || !has(src, q.head).contains(false)) ||
+      q.tail.exists(p => sources.exists(_.names.contains(p)))
+    def methodRefused(a: net.sf.jsqlparser.expression.AnalyticExpression, scopes: List[Scope]) =
+      methodName(a) match
+        case (MethodCalls.CallName.Plain, _)     => false
+        case (MethodCalls.CallName.Method, _)    => true
+        case (MethodCalls.CallName.Qualified, q) => qualifierShared(q, scopes)
     val analyticMethodRefusal = before.analyticMethods.collectFirst {
-      case (a, scopes) if methodHead(a).exists(headBindable(_, scopes)) =>
-        MethodCalls.Refusal(s"${a.getName}(..)")
+      case (a, scopes) if methodRefused(a, scopes) => MethodCalls.Refusal(s"${a.getName}(..)")
     }
     val opaqueRefusal =
       before.opaque.headOption.map(MisreadNames.refusal).orElse(analyticMethodRefusal)

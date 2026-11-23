@@ -124,8 +124,10 @@
   written as the plain call DuckDB makes of it before any policy step reads the statement. A
   method call on a name is judged against the names in scope: its column's mask or deny applies
   when the name is a column, and an aggregate, window or ordered-set call in that form is refused
-  whenever its head may be a column, a table or an alias of the statement. Only `main` and
-  `system.main` are taken as qualifiers of DuckDB's own functions. A call qualified by another
+  whenever its qualifier may name a column, a table or an alias of the statement. A call's
+  dotted name is judged whole: only `<fn>`, `main.<fn>` and `system.main.<fn>` are DuckDB's own
+  functions, and a name with a part left over after `main` or `system.main` (`main.t.max()`, the
+  table `main.t`) is a method call, refused with `FILTER`, `OVER` or `WITHIN GROUP` after it. A call qualified by another
   schema or catalog that nothing in scope is named after (a function of the tenant's own) is left
   as written. Also refused: a method call followed by `FILTER`, `OVER` or `WITHIN GROUP` on
   anything but a name, and one with `DISTINCT` or `ALL` in its arguments or on a typed literal, a
