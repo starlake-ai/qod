@@ -90,6 +90,38 @@
   so one that reads a protected table is refused like any other read into a write (DuckDB 2.0
   refuses a subquery there too).
 
+### Fixed
+
+- **`branch_changes` (and `GET .../changes`) no longer show missing or stale row conflicts as
+  current** (#298). Only a proposal computes row conflicts, so before one the reply had no
+  `rowConflicts` although main changed the same cell, and after an early one it kept that
+  proposal's numbers once main moved (the merge itself was refused, `409 conflicts_changed`). The
+  reply now carries `rowConflictsStatus`: `current` (the open proposal's, main and the branch
+  where it read them), `stale` (either moved since: the numbers are left out, propose again) or
+  `not_computed` (no open proposal). It also carries `countsAre: change_events`: its
+  `inserted` / `deleted` / `updated` count one event per snapshot a row changed in (a row set
+  back to its fork value still counts), where a proposal's counts are net. The `branch_changes`
+  and `diff` tool descriptions say so.
+- **The MCP discovery tools answer a plain tenant member** (#297). `list_databases`,
+  `list_tables`, `describe_table` and `table_history` read through the catalog handlers' admin
+  gate, so every member who was not an admin got `tenant_forbidden: session has no admin grant on
+  tenant '...'` while `run_sql` worked with the same token. A member now gets the databases of
+  their tenant with a pool they may connect to (name, kind and those pools, within the token's
+  axes), and the schemas and tables their grants cover for reading (`RO`, `RW` or `ALL`, what
+  their `SHOW TABLES` lists). A table outside them answers `not_found` like one that does not
+  exist, and storage paths (`folder`, data files) are left out of a member's replies. A member
+  holding any row policy gets `-1` for every row and file count (`rowCount` and `dataFileCount`,
+  and a commit's `rowsAdded`, `rowsRemoved`, `filesAdded` and `filesRemoved`): the catalog counts
+  the whole table, so the numbers would tell how many rows the policy hides. Admins get what they got. `list_snapshots` and the `iceberg` arguments still need
+  an admin.
+- **The Quack door serves clients that send each statement as `<alias>.query('<sql>')`** (#299),
+  such as Columnar's `quack` ADBC driver: they signed in, then every statement failed with
+  `Catalog Error: Table Function with name query does not exist!`. The DuckDB client binds that
+  macro through the attached catalog's `main` schema, which it builds from `duckdb_schemas()`, and
+  the metadata filter hid `main` from a principal holding no grant in it (an admin's attach
+  worked). The filtered `duckdb_schemas()` now always keeps the session catalog's `main` row; the
+  tables in it stay filtered.
+
 ## 0.14.2
 
 ### Upgrading
@@ -342,35 +374,6 @@
   the Java runtime and DuckDB. The file replaces the default CAs, so it must hold the public ones
   too, and must be readable by the service user; `deploy/host/README.md`, "What needs the
   network", says which download reads what.
-- **`branch_changes` (and `GET .../changes`) no longer show missing or stale row conflicts as
-  current** (#298). Only a proposal computes row conflicts, so before one the reply had no
-  `rowConflicts` although main changed the same cell, and after an early one it kept that
-  proposal's numbers once main moved (the merge itself was refused, `409 conflicts_changed`). The
-  reply now carries `rowConflictsStatus`: `current` (the open proposal's, main and the branch
-  where it read them), `stale` (either moved since: the numbers are left out, propose again) or
-  `not_computed` (no open proposal). It also carries `countsAre: change_events`: its
-  `inserted` / `deleted` / `updated` count one event per snapshot a row changed in (a row set
-  back to its fork value still counts), where a proposal's counts are net. The `branch_changes`
-  and `diff` tool descriptions say so.
-- **The MCP discovery tools answer a plain tenant member** (#297). `list_databases`,
-  `list_tables`, `describe_table` and `table_history` read through the catalog handlers' admin
-  gate, so every member who was not an admin got `tenant_forbidden: session has no admin grant on
-  tenant '...'` while `run_sql` worked with the same token. A member now gets the databases of
-  their tenant with a pool they may connect to (name, kind and those pools, within the token's
-  axes), and the schemas and tables their grants cover for reading (`RO`, `RW` or `ALL`, what
-  their `SHOW TABLES` lists). A table outside them answers `not_found` like one that does not
-  exist, and storage paths (`folder`, data files) are left out of a member's replies. A member
-  holding any row policy gets `-1` for every row count (`rowCount`, and a commit's `rowsAdded` /
-  `rowsRemoved`): the catalog counts the whole table, so the number would tell how many rows the
-  policy hides. Admins get what they got. `list_snapshots` and the `iceberg` arguments still need
-  an admin.
-- **The Quack door serves clients that send each statement as `<alias>.query('<sql>')`** (#299),
-  such as Columnar's `quack` ADBC driver: they signed in, then every statement failed with
-  `Catalog Error: Table Function with name query does not exist!`. The DuckDB client binds that
-  macro through the attached catalog's `main` schema, which it builds from `duckdb_schemas()`, and
-  the metadata filter hid `main` from a principal holding no grant in it (an admin's attach
-  worked). The filtered `duckdb_schemas()` now always keeps the session catalog's `main` row; the
-  tables in it stay filtered.
 
 ## 0.14.1
 
