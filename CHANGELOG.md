@@ -259,8 +259,11 @@
   their tenant with a pool they may connect to (name, kind and those pools, within the token's
   axes), and the schemas and tables their grants cover for reading (`RO`, `RW` or `ALL`, what
   their `SHOW TABLES` lists). A table outside them answers `not_found` like one that does not
-  exist, and storage paths (`folder`, data files) are left out of a member's replies. Admins get
-  what they got. `list_snapshots` and the `iceberg` arguments still need an admin.
+  exist, and storage paths (`folder`, data files) are left out of a member's replies. A member
+  holding any row policy gets `-1` for every row count (`rowCount`, and a commit's `rowsAdded` /
+  `rowsRemoved`): the catalog counts the whole table, so the number would tell how many rows the
+  policy hides. Admins get what they got. `list_snapshots` and the `iceberg` arguments still need
+  an admin.
 - **The Quack door serves clients that send each statement as `<alias>.query('<sql>')`** (#299),
   such as Columnar's `quack` ADBC driver: they signed in, then every statement failed with
   `Catalog Error: Table Function with name query does not exist!`. The DuckDB client binds that

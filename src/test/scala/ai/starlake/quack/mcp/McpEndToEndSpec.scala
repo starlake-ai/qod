@@ -4,6 +4,7 @@ package ai.starlake.quack.mcp
 import ai.starlake.quack.ondemand.api.{
   CatalogColumnEntry,
   CatalogDataFileEntry,
+  CatalogHistoryCommit,
   CatalogSchemaEntry,
   CatalogTableDetailResponse,
   CatalogTableEntry
@@ -11,6 +12,7 @@ import ai.starlake.quack.ondemand.api.{
 import ai.starlake.quack.ondemand.auth.{PatAuthenticator, TokenRestriction}
 import ai.starlake.quack.ondemand.catalog.{
   DuckLakeCatalogReader,
+  HistoryOperation,
   TableHistoryFilter,
   TableHistoryPage
 }
@@ -21,6 +23,7 @@ import ai.starlake.quack.ondemand.state.{
   PoolPermission,
   RbacRole,
   RolePermission,
+  RoleRowPolicy,
   UserGrant,
   UserStore
 }
@@ -300,7 +303,27 @@ class McpEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
           limit: Int,
           before: Option[Long]
       ): Option[TableHistoryPage] =
-        getTable(schema, table).map(_ => TableHistoryPage(7L, Nil, hasMore = false))
+        getTable(schema, table).map(_ =>
+          TableHistoryPage(
+            7L,
+            List(
+              CatalogHistoryCommit(
+                snapshotId = 3L,
+                committedAt = "2026-11-23T00:00:00Z",
+                operation = HistoryOperation.Insert,
+                author = None,
+                commitMessage = None,
+                schemaChanged = false,
+                schemaVersion = 1L,
+                rowsAdded = 10L,
+                rowsRemoved = 2L,
+                filesAdded = 1,
+                filesRemoved = 0
+              )
+            ),
+            hasMore = false
+          )
+        )
 
   /** bob, a plain member, may connect to `sales` and reads `sales.orders` through a role. */
   private def grantBobOrders(fix: SecurityFixtures.Fixture): Unit =
@@ -337,7 +360,50 @@ class McpEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
   private def tableArgs(schema: String, table: String): Seq[(String, Json)] =
     Seq(acmeMain, "schema" -> Json.fromString(schema), "table" -> Json.fromString(table))
 
-  "mcp discovery tools" should "answer a plain member within their grants" in
+  /** bob's grant, plus a row policy on `sales.orders` through the same role. */
+  private def grantBobOrdersFiltered(fix: SecurityFixtures.Fixture): Unit =
+    grantBobOrders(fix)
+    fix.store.insertRowPolicy(
+      RoleRowPolicy("rrp-orders", "r-orders", "*", "sales", "orders", "id > 5")
+    )
+
+  /** The numbers named `field` anywhere in `json`. */
+  private def numbersOf(json: String, field: String): List[Long] =
+    s"\"$field\"\\s*:\\s*(-?[0-9]+)".r.findAllMatchIn(json).map(_.group(1).toLong).toList
+
+  "mcp discovery tools" should "give a member holding no row policy the catalog's row counts" in
+    withHarness(prepare = grantBobOrders, catalogReader = Some(memberCatalog)) { h =>
+      val bob          = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.BobUsername)
+      val (_, tables)  = callTool(h, bob, "list_tables", acmeMain)
+      val (_, detail)  = callTool(h, bob, "describe_table", tableArgs("sales", "orders")*)
+      val (_, history) = callTool(h, bob, "table_history", tableArgs("sales", "orders")*)
+      withClue(s"$tables / $detail / $history") {
+        numbersOf(tables, "rowCount") shouldBe List(10L)
+        numbersOf(detail, "rowCount") shouldBe List(10L)
+        numbersOf(history, "rowsAdded") shouldBe List(10L)
+        numbersOf(history, "rowsRemoved") shouldBe List(2L)
+      }
+    }
+
+  it should "withhold every row count from a member holding a row policy" in
+    withHarness(prepare = grantBobOrdersFiltered, catalogReader = Some(memberCatalog)) { h =>
+      // The catalog's counts are the table's, not the rows the policy lets bob read: shown, they
+      // would tell him how many rows it hides.
+      val bob             = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.BobUsername)
+      val (tErr, tables)  = callTool(h, bob, "list_tables", acmeMain)
+      val (dErr, detail)  = callTool(h, bob, "describe_table", tableArgs("sales", "orders")*)
+      val (hErr, history) = callTool(h, bob, "table_history", tableArgs("sales", "orders")*)
+      withClue(s"$tables / $detail / $history") {
+        List(tErr, dErr, hErr) shouldBe List(false, false, false)
+        tables should include("orders")
+        numbersOf(tables, "rowCount") shouldBe List(-1L)
+        numbersOf(detail, "rowCount") shouldBe List(-1L)
+        numbersOf(history, "rowsAdded") shouldBe List(-1L)
+        numbersOf(history, "rowsRemoved") shouldBe List(-1L)
+      }
+    }
+
+  it should "answer a plain member within their grants" in
     withHarness(prepare = grantBobOrders, catalogReader = Some(memberCatalog)) { h =>
       val bob = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.BobUsername)
 

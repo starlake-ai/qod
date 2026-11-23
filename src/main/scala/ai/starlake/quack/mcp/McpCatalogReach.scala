@@ -4,6 +4,7 @@ import ai.starlake.quack.model.TenantDb
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.api.{
   BranchHandlers,
+  CatalogHistoryResponse,
   CatalogTableDetailResponse,
   CatalogTableEntry,
   ExecCaller,
@@ -23,7 +24,10 @@ import java.util.Locale
   * it), a pool of the database the token's axes allow and the handshake admits, and then only the
   * tables their grants cover for reading, the rule of `SHOW TABLES` under filtered metadata. The
   * catalog readers query the DuckLake catalog directly, so the filter is applied here, on every
-  * name a reply carries, along with storage paths a member has no use for.
+  * name a reply carries, along with storage paths a member has no use for. So are row counts for a
+  * member holding a row policy: the catalog's counts are the table's, not the rows the policy lets
+  * them read, so they would tell how many rows it hides (the branch endpoints give such a viewer no
+  * counts either).
   */
 private[mcp] final class McpCatalogReach(sup: PoolSupervisor, scopeOf: SessionScope.Resolver):
 
@@ -45,14 +49,20 @@ private[mcp] final class McpCatalogReach(sup: PoolSupervisor, scopeOf: SessionSc
       tenant: String,
       database: String
   ): Either[String, Reach] =
-    if asAdmin(apiKey, tenant) then Right(Reach(scopeOf, None))
+    if asAdmin(apiKey, tenant) then Right(Reach(scopeOf, None, countsRows = true))
     else
       val tid = tenantId(tenant)
       // The one spelling pool keys and `findTenantDb` hold.
       val db = database.toLowerCase(Locale.ROOT)
       connectable(caller, tid, db).map { eff =>
         val alias = TenantDb.catalogAlias(sup.effectiveMetastoreFor(tid, db), db)
-        Reach(decided(tid), Some(BranchHandlers.seenBy(eff, alias)))
+        Reach(
+          decided(tid),
+          Some(BranchHandlers.seenBy(eff, alias)),
+          // Fail closed: any row policy withholds counts on every table, rather than matching
+          // each policy's table (wildcards, name folding) here a second time.
+          countsRows = eff.rowPolicies.isEmpty
+        )
       }
 
   /** A member's `list_databases`: the databases of their tenant with a pool they may connect to,
@@ -107,23 +117,34 @@ private[mcp] final class McpCatalogReach(sup: PoolSupervisor, scopeOf: SessionSc
 
 object McpCatalogReach:
 
+  /** The row count a reply carries in place of one withheld: the catalog readers' own "unknown". */
+  val Withheld: Long = -1L
+
   /** What the catalog handlers are handed and what a reply may name. `sees` None: an admin, who
-    * sees every table.
+    * sees every table. `countsRows` false: the reply carries [[Withheld]] for every row count.
     */
   final case class Reach(
       scopeOf: SessionScope.Resolver,
-      sees: Option[(String, String) => Boolean]
+      sees: Option[(String, String) => Boolean],
+      countsRows: Boolean
   ):
     def visible(schema: String, table: String): Boolean = sees.forall(_(schema, table))
 
     def isMember: Boolean = sees.isDefined
 
+    private def entry(t: CatalogTableEntry): CatalogTableEntry =
+      t.copy(folder = None, rowCount = if countsRows then t.rowCount else Withheld)
+
     def tables(ts: List[CatalogTableEntry]): List[CatalogTableEntry] =
       if !isMember then ts
-      else ts.filter(t => visible(t.schema, t.name)).map(_.copy(folder = None))
+      else ts.filter(t => visible(t.schema, t.name)).map(entry)
 
     def detail(d: CatalogTableDetailResponse): CatalogTableDetailResponse =
-      if !isMember then d else d.copy(table = d.table.copy(folder = None), dataFiles = Nil)
+      if !isMember then d else d.copy(table = entry(d.table), dataFiles = Nil)
+
+    def history(h: CatalogHistoryResponse): CatalogHistoryResponse =
+      if countsRows then h
+      else h.copy(commits = h.commits.map(_.copy(rowsAdded = Withheld, rowsRemoved = Withheld)))
 
     /** The handlers' own answer for a table that does not exist, so a hidden one reads the same. */
     def notFound(schema: String, table: String): String =

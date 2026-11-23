@@ -276,7 +276,10 @@ final class McpDataTools(
 
   private val listTablesTool = McpToolDef(
     name = "list_tables",
-    description = "List schemas and tables of a database. Pass 'schema' to restrict to one schema.",
+    description =
+      "List schemas and tables of a database. Pass 'schema' to restrict to one schema. Unless " +
+        "you are an admin, only the tables you hold a read grant on are listed, and under a row " +
+        "policy every rowCount is -1 (withheld).",
     inputSchema = objectSchema(
       required = List("database"),
       props = "database" -> strProp("Database (tenant-db) name."),
@@ -329,7 +332,8 @@ final class McpDataTools(
     name = "describe_table",
     description =
       "Columns, types and a small data sample for one table. Call this before writing SQL " +
-        "against a table you have not seen.",
+        "against a table you have not seen. Unless you are an admin, a rowCount of -1 means " +
+        "withheld: you hold a row policy, so count the rows you may read with run_sql.",
     inputSchema = objectSchema(
       required = List("database", "schema", "table"),
       props = "database" -> strProp("Database (tenant-db) name."),
@@ -460,7 +464,9 @@ final class McpDataTools(
   private val tableHistoryTool = McpToolDef(
     name = "table_history",
     description =
-      "Snapshot history of one table: who changed it, when, and how (change verbs). Use the " +
+      "Snapshot history of one table: who changed it, when, and how (change verbs). Unless you " +
+        "are an admin and while you hold a row policy, rowsAdded and rowsRemoved are -1 " +
+        "(withheld). Use the " +
         "snapshot ids with run_sql time travel: AT (VERSION => n). For an iceberg source, " +
         "snapshot ids are strings; time travel with run_sql AT (VERSION => <id>).",
     inputSchema = objectSchema(
@@ -525,7 +531,7 @@ final class McpDataTools(
                           None,
                           principal.rawToken
                         )(reach.scopeOf)
-                      ).map(_.asJson)
+                      ).map(reach.history).map(_.asJson)
                   }
               )
   )
