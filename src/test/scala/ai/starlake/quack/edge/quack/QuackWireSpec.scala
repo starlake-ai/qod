@@ -1,6 +1,7 @@
 package ai.starlake.quack.edge.quack
 
 import ai.starlake.quack.edge.adapter.{QuackNativeBridge, QuackTestFixtures}
+import ai.starlake.quack.edge.policy.StatementExcerpt
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -170,7 +171,7 @@ class QuackWireSpec extends AnyFlatSpec with Matchers:
         "040001" +
         "ffff"
     )
-    val out = mapErrorMessage(v3, ai.starlake.quack.edge.policy.StatementExcerpt.strip).toOption.get
+    val out = mapErrorMessage(v3, StatementExcerpt.strip, StatementExcerpt.OffsetKeys).toOption.get
     toHex(out) shouldBe
       "0100640300ffffffffffffffffff01ffff" +
       "010004626f6f6d" +
@@ -180,17 +181,40 @@ class QuackWireSpec extends AnyFlatSpec with Matchers:
       "ffff"
     decodeErrorText(out) shouldBe Right("Catalog Error: boom")
 
+  it should "leave out the extra info entries it is told to, every other entry as sent" in:
+    // DuckDB's extra info under errors_as_json: offsets into the statement beside other entries
+    def entry(k: String, v: String) =
+      "0000" + f"${k.length}%02x" + toHex(k.getBytes("UTF-8")) +
+        "0100" + f"${v.length}%02x" + toHex(v.getBytes("UTF-8")) + "ffff"
+    val head    = "0100640300ffffffffffffffffff01ffff" + "010004626f6f6d" + "02000642696e646572"
+    val subtype = entry("error_subtype", "COLUMN_NOT_FOUND")
+    val name    = entry("name", "location")
+    val err     = hex(
+      head + "030004" + entry("location", "[97,8]") + subtype + entry("position", "97") + name +
+        "040001" + "ffff"
+    )
+    val out = mapErrorMessage(err, identity, StatementExcerpt.OffsetKeys).toOption.get
+    toHex(out) shouldBe head + "030002" + subtype + name + "040001" + "ffff"
+    decodeErrorText(out) shouldBe Right("Binder Error: boom")
+    // told nothing, the same array
+    mapErrorMessage(err, identity, Set.empty).toOption.get should be theSameInstanceAs err
+    // every entry left out: an empty map
+    val only = hex(head + "030001" + entry("position", "7") + "ffff")
+    toHex(mapErrorMessage(only, identity, StatementExcerpt.OffsetKeys).toOption.get) shouldBe
+      head + "030000" + "ffff"
+
   it should "answer the same array when nothing changes or the bytes are another message" in:
-    val err = encodeError("boom")
-    mapErrorMessage(err, identity).toOption.get should be theSameInstanceAs err
-    mapErrorMessage(err, _ => "boom").toOption.get should be theSameInstanceAs err
+    val keys = StatementExcerpt.OffsetKeys
+    val err  = encodeError("boom")
+    mapErrorMessage(err, identity, keys).toOption.get should be theSameInstanceAs err
+    mapErrorMessage(err, _ => "boom", keys).toOption.get should be theSameInstanceAs err
     val ok = encodeSuccess()
-    mapErrorMessage(ok, _ => "x").toOption.get should be theSameInstanceAs ok
+    mapErrorMessage(ok, _ => "x", keys).toOption.get should be theSameInstanceAs ok
 
   it should "answer a DecodeError, never the bytes, for an error or a header it cannot read" in:
     // An unreadable header may be an error's; an ERROR_RESPONSE with a field this build does not
     // know may carry the statement excerpt where the strip never looks.
-    mapErrorMessage(Array[Byte](1, 2, 3), _ => "x") shouldBe a[Left[?, ?]]
+    mapErrorMessage(Array[Byte](1, 2, 3), _ => "x", Set.empty) shouldBe a[Left[?, ?]]
     val unknownField = hex(
       "0100640300ffffffffffffffffff01ffff" +
         "010004626f6f6d" +
@@ -198,7 +222,7 @@ class QuackWireSpec extends AnyFlatSpec with Matchers:
         "ffff"
     )
     decodeErrorText(unknownField) shouldBe a[Left[?, ?]]
-    mapErrorMessage(unknownField, _ => "x") shouldBe a[Left[?, ?]]
+    mapErrorMessage(unknownField, _ => "x", Set.empty) shouldBe a[Left[?, ?]]
 
   "encodeSuccess" should "match the captured SUCCESS_RESPONSE" in:
     toHex(encodeSuccess()) shouldBe toHex(success)

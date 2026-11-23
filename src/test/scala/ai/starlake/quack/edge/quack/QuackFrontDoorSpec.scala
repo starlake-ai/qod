@@ -538,6 +538,37 @@ class QuackFrontDoorSpec extends AnyFlatSpec with Matchers:
     errorText(fetched(List(mask))) shouldBe head
     fetched(Nil) shouldBe err
 
+  it should "reach a policy holder without the offsets its extra info carries, others as sent" in:
+    // Under errors_as_json a node's error keeps `position` and `location`, offsets into the
+    // rewrite, in its extra info (field 3), which the fetch relay copies.
+    val mask = RoleColumnPolicy("cp-1", "r-1", "*", "*", "t", "email", "mask", Some("'***'"))
+    def str(v: String): Array[Byte] =
+      val b = v.getBytes("UTF-8")
+      b.length.toByte +: b
+    def entry(k: String, v: String): Array[Byte] =
+      Array[Byte](0, 0) ++ str(k) ++ Array[Byte](1, 0) ++ str(v) ++ Array[Byte](-1, -1)
+    def withExtraInfo(entries: List[Array[Byte]]): Array[Byte] =
+      encodeHeader(Header(Type.ErrorResponse, "", InvalidIndex)) ++
+        Array[Byte](1, 0) ++ str("Referenced column \"nonexist\" not found") ++
+        Array[Byte](2, 0) ++ str("Binder") ++
+        Array[Byte](3, 0, entries.length.toByte) ++ entries.flatten ++ Array[Byte](-1, -1)
+    val subtype = entry("error_subtype", "COLUMN_NOT_FOUND")
+    val err     = withExtraInfo(
+      List(entry("location", "[97,8]"), subtype, entry("position", "97"), entry("name", "nonexist"))
+    )
+    def fetched(policies: List[RoleColumnPolicy]): Array[Byte] =
+      val fx = setup(columnPolicies = policies)
+      fx.transport.prepareNeedsMore = true
+      val connId = connect(fx)
+      prepare(fx, connId, "SELECT 1") shouldBe prepareResp(true)
+      fx.transport.fetchReply = Some(err)
+      val resp = fetch(fx, connId)
+      fx.sessions.get(connId).get.current.get() shouldBe None
+      resp
+    fetched(List(mask)).toList shouldBe
+      withExtraInfo(List(subtype, entry("name", "nonexist"))).toList
+    fetched(Nil) shouldBe err
+
   it should "answer a policy holder a fixed text, never the bytes, when it cannot read them" in:
     val mask = RoleColumnPolicy("cp-1", "r-1", "*", "*", "t", "email", "mask", Some("'***'"))
     // An ERROR_RESPONSE whose field 9, unknown to this build, holds the statement's text.

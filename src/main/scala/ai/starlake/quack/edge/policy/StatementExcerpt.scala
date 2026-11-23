@@ -34,6 +34,12 @@ object StatementExcerpt:
   def strip(message: String): String =
     JsonOffsets.replaceAllIn(Excerpt.replaceAllIn(message, ""), "")
 
+  /** The keys of an error's extra info that hold offsets into the statement the node ran
+    * (`Exception::SetQueryLocation`), left out of what a policy holder is answered, as [[strip]]
+    * leaves them out of a JSON message.
+    */
+  val OffsetKeys: Set[String] = Set("position", "location")
+
   /** The fixed text a policy holder is answered with in place of a node error the manager cannot
     * read; the error itself goes to the manager's log.
     */

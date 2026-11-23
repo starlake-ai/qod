@@ -44,10 +44,10 @@
   `localtimestamp` are left as written. A predicate holding a subquery whose columns are not all
   qualified by the subquery's own FROM items or by the table's name fails to apply.
 - **Functions that return the statement's text are refused to principals with column or row
-  policies, and error messages answered to them no longer quote the rewritten statement.** The
-  gateway applies such a principal's masks and row filters by rewriting the statement, and the node
-  runs the rewrite, so these functions and the excerpt in an error showed the policies' expressions
-  (a mask's salt, a row filter's predicate and its alias). Two changes:
+  policies, and error messages answered to them no longer carry DuckDB's excerpt of the rewritten
+  statement.** The gateway applies such a principal's masks and row filters by rewriting the
+  statement, and the node runs the rewrite, so these functions and the excerpt in an error showed
+  the policies' expressions (a mask's salt, a row filter's predicate and its alias). Two changes:
   - The functions that return the running statement's text, `current_query()`, its
     `pg_catalog.current_query()` macro, `duckdb_prepared_statements()` and the
     `pg_catalog.pg_prepared_statements` view, are refused to any principal holding at least one
@@ -59,13 +59,15 @@
     not available to principals with column or row policies` (`view <name>` for the view), is
     permanent and is booked as a denial. Some arguments DuckDB evaluates while binding, in a view
     body or other stored SQL, are not covered yet.
-  - Error messages answered to such a principal no longer quote the statement: DuckDB's excerpt of
-    it around the error position (the `LINE <n>:` line and the caret line under it) is left out of
-    every node error on FlightSQL, the native Quack front door, MCP `run_sql` and the REST APIs,
-    and out of the statement history and audit, and so are a JSON error's (`errors_as_json`)
-    `position` and `location`, offsets into the rewrite, and what a refusal of the rewrite would
-    quote of it. The manager logs such a refusal in full at ERROR, and answers a node error it
-    cannot read with a fixed text, the error itself in its log.
+  - Error messages answered to such a principal no longer carry DuckDB's excerpt of the rewritten
+    statement: the excerpt around the error position (the `LINE <n>:` line and the caret line under
+    it) is left out of every node error on FlightSQL, the native Quack front door, MCP `run_sql` and
+    the REST APIs, and out of the statement history and audit, and so are an error's `position`
+    and `location`, offsets into the rewrite, both in a JSON message (`errors_as_json`) and in the
+    extra info the native Quack front door relays, and what a refusal of the rewrite would quote of
+    it. The manager logs such a refusal in full at ERROR, on one line, and the native Quack front
+    door answers a node error it cannot read with a fixed text, the error itself in the manager's
+    log.
   - Principals without policies keep `current_query()`, `duckdb_prepared_statements()` and the
     excerpt; superusers keep all four functions and the excerpt. Prepared statements themselves are
     unaffected: FlightSQL prepared statements keep working for policy holders, masks and row

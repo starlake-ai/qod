@@ -285,11 +285,12 @@ under it, `policy.StatementExcerpt`, decided by `withheldFor` on the effective s
 strips it in `readNodeError` (first try and retry; both doors' prepare-time errors, MCP, REST, the
 FlightSQL prepare probe, history and audit read that text), the native front door strips it from an
 ERROR_RESPONSE it relays to a later FETCH or SEND_DATA (`QuackStatement.excerptWithheld`,
-`QuackWire.mapErrorMessage`, every other byte kept; an answer it cannot read is replaced by
+`QuackWire.mapErrorMessage`, which also drops the `position` and `location` entries of its extra
+info, `StatementExcerpt.OffsetKeys`, every other byte kept; an answer it cannot read is replaced by
 `StatementExcerpt.Unreadable` and logged at ERROR), a JSON error (`errors_as_json`) loses its
 `position` and `location` members, and a `RewriteScope` refusal of the rewrite is answered without
 what it quotes of it (`RewriteScope.withoutDetail`; the full reason is logged at ERROR, the default
-level). Principals without policies keep the excerpt. A bind-time slot in stored SQL is a residual
+level, as one line, control characters shown as `?`). Principals without policies keep the excerpt. A bind-time slot in stored SQL is a residual
 (below).
 `BootPreflight.checkRetiredSettings` (decision 28) judges the removed settings, from the variable or
 else its `quack-flightsql.acl.*` / `quack-flightsql.nodeLockdown` path: `QOD_ACL_ENABLED` and

@@ -159,6 +159,29 @@ object QuackWire:
               case other      => throw DecodeError(s"unknown field $other in map entry")
           i += 1
 
+    /** Read an `unordered_map<string, string>` as [[skipStringMap]] does, answering each entry's
+      * key (empty when absent) with the offsets where its object starts and ends, in wire order.
+      */
+    def stringMapEntries(): Vector[(String, Int, Int)] =
+      val count = varintU()
+      if count < 0 || count > remaining then throw DecodeError("truncated map")
+      else
+        val entries = Vector.newBuilder[(String, Int, Int)]
+        var i       = 0L
+        while i < count do
+          val start = pos
+          var key   = ""
+          var done  = false
+          while !done do
+            u16() match
+              case Terminator => done = true
+              case 0          => key = string()
+              case 1          => string()
+              case other      => throw DecodeError(s"unknown field $other in map entry")
+          entries += ((key, start, pos))
+          i += 1
+        entries.result()
+
     def remaining: Int = bytes.length - pos
 
   private final class Writer:
@@ -365,13 +388,18 @@ object QuackWire:
       }
     }
 
-  /** `bytes`, an ERROR_RESPONSE, with its message (field 1) replaced by `f` of it: the header and
-    * every other field are copied byte for byte, in their order. The same array when `f` leaves the
-    * message as it is and when `bytes` is a readable message of another type; a `DecodeError` when
+  /** `bytes`, an ERROR_RESPONSE, with its message (field 1) replaced by `f` of it and every entry
+    * of its extra info (field 3) whose key is in `dropExtraInfo` left out: the header, every other
+    * field and every other entry are copied byte for byte, in their order. The same array when
+    * nothing changes and when `bytes` is a readable message of another type; a `DecodeError` when
     * the header cannot be read, or the message is an ERROR_RESPONSE whose body cannot be, since
     * either may hold an error `f` never saw. The caller decides what to answer then.
     */
-  def mapErrorMessage(bytes: Array[Byte], f: String => String): Either[DecodeError, Array[Byte]] =
+  def mapErrorMessage(
+      bytes: Array[Byte],
+      f: String => String,
+      dropExtraInfo: Set[String]
+  ): Either[DecodeError, Array[Byte]] =
     frame(bytes).flatMap { fr =>
       if fr.header.msgType != Type.ErrorResponse then Right(bytes)
       else
@@ -393,8 +421,13 @@ object QuackWire:
                 r.string()
                 w.raw(bytes.slice(start, r.pos), 0)
               case 3 =>
-                r.skipStringMap()
-                w.raw(bytes.slice(start, r.pos), 0)
+                val entries = r.stringMapEntries()
+                val kept    = entries.filterNot((key, _, _) => dropExtraInfo.contains(key))
+                if kept.length == entries.length then w.raw(bytes.slice(start, r.pos), 0)
+                else
+                  changed = true
+                  w.u16(3).varintU(kept.length.toLong)
+                  kept.foreach((_, from, until) => w.raw(bytes.slice(from, until), 0))
               case 4 =>
                 r.bool()
                 w.raw(bytes.slice(start, r.pos), 0)

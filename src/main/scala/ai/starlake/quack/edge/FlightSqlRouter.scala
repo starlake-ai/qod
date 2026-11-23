@@ -1356,10 +1356,15 @@ final class FlightSqlRouter(
             // holder, whose answer and history leave it out. It is logged at ERROR, which the
             // default log level keeps: the log is then the only place that names what the rewrite
             // reached, and a row policy whose predicate reads another table is refused this way on
-            // every statement of its holders, so its author needs that list to see why.
+            // every statement of its holders, so its author needs that list to see why. The
+            // reason can quote the caller's text, so the line has no control character.
             val shown =
               if excerptWithheld then
-                FlightSqlRouter.log.error(s"policy rewrite refused for $user on $poolKey: $reason")
+                FlightSqlRouter.log.error(
+                  FlightSqlRouter.oneLogLine(
+                    s"policy rewrite refused for $user on $poolKey: $reason"
+                  )
+                )
                 ai.starlake.quack.edge.policy.RewriteScope.withoutDetail(reason)
               else reason
             val denial = s"policy rewrite: $shown"
@@ -1939,6 +1944,12 @@ final class FlightSqlRouter(
 object FlightSqlRouter:
 
   private val log = org.slf4j.LoggerFactory.getLogger(classOf[FlightSqlRouter])
+
+  /** `text` as one log line: every control character, line breaks and tabs included, shown as `?`,
+    * so text a caller wrote (a refusal can quote it) cannot start a line of its own in the log.
+    */
+  private[edge] def oneLogLine(text: String): String =
+    text.map(c => if c.isControl then '?' else c)
 
   /** `UNDROP TABLE` inside a client transaction (review M5): refused on both doors, since its
     * recovery commits on a connection of its own and the client's ROLLBACK would not undo it.

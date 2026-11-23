@@ -1615,6 +1615,30 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     router.history.snapshot(1).head.error.getOrElse("") should not include "memory.main.secret"
     capturedSql() shouldBe ""
 
+  it should "log its refusal for a policy holder as one line, whatever the reason quotes" in:
+    // The reason quotes the parser's message about the rewrite, which can hold the caller's text.
+    val (router, _, _) = setupWithRewriter(
+      qualifyingRewriter("SELECT c_id FROM customer WHERE c_email = 'x\nFORGED: line' AND (((")
+    )
+    val (out, events) =
+      ai.starlake.quack.ondemand.runtime.testkit.LogCapture
+        .logged("ai.starlake.quack.edge.FlightSqlRouter") {
+          router
+            .execute(
+              "cls-log-1",
+              "alice",
+              poolKey,
+              "SELECT c_id FROM customer WHERE c_email = 'x'",
+              Some(effWithPolicies(List(maskCustomerEmailCls)))
+            )
+            .unsafeRunSync()
+        }
+    out.left.get.reason should include(ai.starlake.quack.edge.policy.RewriteScope.CannotAuthorize)
+    val lines = events.map(_.getFormattedMessage).filter(_.startsWith("policy rewrite refused"))
+    lines should have size 1
+    lines.head should include(ai.starlake.quack.edge.policy.RewriteScope.CannotAuthorize)
+    lines.head.exists(_.isControl) shouldBe false
+
   it should "run an ordinary CTE query of a policy holder, the CTE reference left unqualified" in:
     val (router, capturedSql, _) = setupWithRewriter(
       new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(

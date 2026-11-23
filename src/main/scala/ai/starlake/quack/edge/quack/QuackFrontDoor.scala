@@ -902,13 +902,18 @@ final class QuackFrontDoor(
   // -------------------------------------------------------------------------------------------
 
   /** A node's answer to a policy holder's statement, which is the gateway's rewrite: an error goes
-    * back without DuckDB's excerpt of the statement (`StatementExcerpt.strip`), every other byte as
+    * back without DuckDB's excerpt of the statement (`StatementExcerpt.strip`) and without the
+    * offsets into it its extra info may carry (`StatementExcerpt.OffsetKeys`), every other byte as
     * the node sent it. An answer the manager cannot read is never relayed, since it may hold an
     * error the strip never saw: the holder gets a fixed text and the manager's log at ERROR, the
     * default level, gets the answer.
     */
   private def shownToHolder(resp: Array[Byte], st: QuackStatement): Array[Byte] =
-    QuackWire.mapErrorMessage(resp, ai.starlake.quack.edge.policy.StatementExcerpt.strip) match
+    QuackWire.mapErrorMessage(
+      resp,
+      ai.starlake.quack.edge.policy.StatementExcerpt.strip,
+      ai.starlake.quack.edge.policy.StatementExcerpt.OffsetKeys
+    ) match
       case Right(out) => out
       case Left(why)  =>
         val text = new String(resp.take(4096), java.nio.charset.StandardCharsets.UTF_8)
