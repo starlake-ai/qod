@@ -1,5 +1,7 @@
 import { ApiError } from './client';
-import type { BranchConflictEntry, BranchMergeEntry, BranchRowConflicts, BranchTableChange } from './types';
+import type {
+  BranchChangesResponse, BranchConflictEntry, BranchMergeEntry, BranchRowConflicts, BranchTableChange,
+} from './types';
 
 /** A branch change-set count cell. The server flags `countsUnavailable` when the counts were asked
   * for and the node refused the viewer the table (no read grant) or the count failed: its zeros are
@@ -11,6 +13,42 @@ export const CountsUnavailableTitle =
   * the branch created reads 0 inserted whatever it holds. Those are no counts either. */
 export const NotCountedTitle =
   'Rows are counted only for a table the branch modified, not one it created, dropped, recreated or altered';
+
+/** The tooltip of the Inserted / Deleted / Updated headers when the server says what they count. */
+export const ChangeEventsTitle =
+  'Change events: one per snapshot a row changed in; a proposal counts net changes.';
+
+/** The note under the change set when the tables' row conflicts are not the open proposal's: the
+  * reply leaves them out, so without it the row conflicts section would just not be there. */
+export const RowConflictsStaleNote =
+  'Row conflicts are out of date: main or the branch moved since the proposal. Propose again to recompute them.';
+export const RowConflictsNotComputedNote = 'Row conflicts are computed when the merge is proposed.';
+
+/** The note for a status this console does not know (one the server gained later), which is named,
+  * never read as `current`. */
+export const RowConflictsUnknownNote = (status: string): string =>
+  `Row conflicts: the server says '${status}', a status this console does not know.`;
+
+/** The note for a change set's `rowConflictsStatus`; `null` for `current` or a server that omits it,
+  * whose row conflicts show as they are, and for a change set with no table (`tables` empty), which
+  * has no row conflict to speak of. A status this console does not know is named, never read as
+  * `current`. */
+export function rowConflictsNote(
+  status: BranchChangesResponse['rowConflictsStatus'],
+  tables: readonly unknown[],
+): string | null {
+  if (tables.length === 0) return null;
+  if (status === 'stale') return RowConflictsStaleNote;
+  if (status === 'not_computed') return RowConflictsNotComputedNote;
+  if (status === undefined || status === 'current') return null;
+  return RowConflictsUnknownNote(status);
+}
+
+/** The title of the count column headers, `undefined` unless the server says the counts are change
+  * events. */
+export function countsTitle(countsAre: BranchChangesResponse['countsAre']): string | undefined {
+  return countsAre === 'change_events' ? ChangeEventsTitle : undefined;
+}
 
 export interface BranchCounts {
   kind: string;
