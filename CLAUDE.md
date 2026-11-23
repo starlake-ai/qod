@@ -42,15 +42,16 @@ cannot load refuses to boot, naming `os.name`/`os.arch`, the expected
 Each libquackwire binary embeds `quackwire-build-info:protocol=..;duckdb=..;duckdb_source=..;quack=..`
 (set by `native/quackwire/CMakeLists.txt`, which probes the linked libduckdb); `bootCheck` compares it
 with `/native/VERSION` and the loaded libduckdb and refuses a stale native, and
-`scripts/release/quackwire-build-info.sh` checks the same marker on the files. Until DuckDB v2.0.0
-ships only osx-aarch64 is a 2.0 build: the other four vendored natives are refused at boot, so this
-branch runs only on Apple Silicon. `scripts/release/check-release-pins.sh` (workflow `release pins`)
+`scripts/release/quackwire-build-info.sh` checks the same marker on the files. A DuckDB pin bump
+therefore needs every vendored native rebuilt (the host's locally, the others from the
+`quackwire.yml` and `qod-node.yml` runs of the bump's commit) before it boots anywhere but the
+host. `scripts/release/check-release-pins.sh` (workflow `release pins`)
 keeps the pre-release JDBC and `mavenLocal` off main. The qod CLI caches DuckDB per release
 (`<user cache>/qod/duckdb/<version>/{bin,lib}`, the `DUCKDB_CACHE_DIR` layout) and exports
 `DUCKDB_CACHE_DIR` to the manager JVM on every launcher path, so the preload never depends on
 `DYLD_*` (stripped by SIP from `/usr/bin/java`) or a baked rpath.
 
-**DuckDB 2.0.** The engine is the v2.0.0 release and the JDBC is `org.duckdb:duckdb_jdbc:2.0.0.0` from Maven Central. `run-jar.sh` and the qod CLI provision the CLI and libduckdb from the release's `duckdb-cli-<platform>.tar.gz` / `duckdb-shared-libs-<platform>.tar.gz` (2.x asset names; 1.x shipped `.zip`s). `scripts/dev/build-duckdb-prerelease.sh` is obsolete: it deletes the cache it writes to, the release's included, so never run it.
+**DuckDB 2.0.** The engine is the v2.0.1 release and the JDBC is `org.duckdb:duckdb_jdbc:2.0.1.0` from Maven Central. `run-jar.sh` and the qod CLI provision the CLI and libduckdb from the release's `duckdb-cli-<platform>.tar.gz` / `duckdb-shared-libs-<platform>.tar.gz` (2.x asset names; 1.x shipped `.zip`s). `scripts/dev/build-duckdb-prerelease.sh` is obsolete: it deletes the cache it writes to, the release's included, so never run it.
 
 **Boot problems are reported, never only logged.** A tenant-db whose DuckLake init is refused
 for good (`PreInitMismatchException`: a dataPath or encryption disagreement with the catalog) is
@@ -1343,7 +1344,7 @@ Every scalar in [src/main/resources/application.conf](src/main/resources/applica
   when a setting of the tenant initSql allowlist changes class. The classifier makes a built-in
   scalar macro whose body reaches a catalog listing superuser-class (`pg_get_viewdef`: with the
   gateway screens gone it would print every view's SQL); that rule reads scalar macros only, so
-  review any new built-in table macro that reads a listing by hand (DuckDB 2.0.0 has none).
+  review any new built-in table macro that reads a listing by hand (DuckDB 2.0.1 has none).
 - **Add every new RBAC table to the policy-version trigger.** `qod_bump_policy_version()` (Liquibase
   `0050`, extended by `0051` and `0052`) bumps `qodstate_tenant.policy_version` on writes to the
   tables it is attached to, and `qod_bump_every_policy_version()` (`0054`) bumps every tenant on a

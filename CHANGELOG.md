@@ -4,6 +4,10 @@
 
 ### Upgrading
 
+- **Restart every node after upgrading** so it runs DuckDB 2.0.1 (see Changed): a node an
+  earlier release started keeps running DuckDB 2.0.0 until it restarts. On Kubernetes that means
+  the new node image; fleet servers need this release's `qod fleet join`, which bundles the 2.0.1
+  qod-node. No catalog migrates, so this upgrade rolls back without a restore.
 - **Check the boot output for row policies that name a column their table no longer has.** From
   this release such a policy denies every statement reading its table under its role (see the
   second Security entry), where it used to apply unchecked. At each boot the manager prints one
@@ -169,6 +173,28 @@
 - A write's RETURNING and ON CONFLICT clauses now count as reads for the protected-write guard,
   so one that reads a protected table is refused like any other read into a write (DuckDB 2.0
   refuses a subquery there too).
+
+### Changed
+
+- **DuckDB 2.0.1.** Engine, nodes and JDBC move to DuckDB v2.0.1 (`org.duckdb:duckdb_jdbc:2.0.1.0`)
+  and duckdb-quack to `3bc63c01`, the commit the v2.0.1 quack extension ships. The Quack protocol
+  stays 3, so DuckDB 2.0.0 and 2.0.1 clients both reach the native front door. DuckLake catalogs
+  stay at version 1.1 and DuckDB's storage version is unchanged: nothing migrates. Every
+  libquackwire and qod-node native is rebuilt against the release. What the release changes for
+  QoD users:
+  - The 2.0.1 quack client extension refuses `READ_ONLY` and every ATTACH option but `token`,
+    `secret`, `disable_ssl`, `ssl_fingerprint`, `client_id` and `heartbeat_timeout`, so a
+    2.0.1 client's `ATTACH 'quack:host:9494' (TYPE quack, READ_ONLY, ...)` now fails on the
+    client: drop `READ_ONLY` and grant the user read-only access instead.
+  - The functions and settings 2.0.1's extensions add (the aws extension's S3, S3 Tables and
+    CloudFormation table functions, `iceberg_partitions`, `iceberg_schemas`,
+    `iceberg_expire_snapshots`, `parquet_page_index`, `duckdb_live_query_metrics`,
+    `s3_use_global_endpoint`, `parquet_use_page_index` and others) are superuser-only on nodes.
+  - A subquery as a COPY option value now parses; the node refuses it to non-superusers as a
+    computed option (`needs one literal string`) instead of as a parse error.
+  - The iceberg extension now needs avro loaded first. Nodes install avro before any Iceberg
+    source's setup SQL runs, and autoloading loads it, so Iceberg sources are unaffected; an
+    initSql that loads iceberg on a node without avro installed fails.
 
 ### Fixed
 

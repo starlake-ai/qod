@@ -95,7 +95,7 @@ def docsTarget(docs: File, relative: String): String = {
 // Example:         2.0.0-974927a394b1-1-SNAPSHOT
 //
 //   duckdb-abi              the DuckDB libduckdb release the C++ shim
-//                           links against (2.0.0)
+//                           links against (2.0.1)
 //   duckdb-quack-short-sha  the pinned `native/quackwire/thirdparty/
 //                           duckdb-quack` commit
 //   rev                     monotonic patch number; bumps each time we
@@ -115,7 +115,7 @@ def docsTarget(docs: File, relative: String): String = {
 // etc.) copied from the pinned DuckDB source. A DuckDB bump can change those
 // values or introduce new unresolved symbols on the Windows link. See that
 // file's header for how to re-derive them.
-val libquackwireVersion = "2.0.0-f96420ed46ae-1"
+val libquackwireVersion = "2.0.1-3bc63c01f80a-1"
 
 lazy val root = (project in file("."))
   .settings(UiBuild.settings)

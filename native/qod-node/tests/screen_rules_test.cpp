@@ -218,8 +218,10 @@ int main() {
 	                      "FILENAME_PATTERN system.main.concat('x_', '{i}'))"}) {
 		Refused(to_out + computed, "needs one literal string", std::string("a computed option: ") + computed);
 	}
-	Refused(to_out + "FILENAME_PATTERN (SELECT 'x_{i}'))", "QoD: the statement does not parse",
-	        "a subquery as an option value (DuckDB 2.0's parser refuses it)");
+	// DuckDB 2.0.0's parser refused a subquery as an option value; 2.0.1's takes it, so the screen
+	// refuses it as a computed value.
+	Refused(to_out + "FILENAME_PATTERN (SELECT 'x_{i}'))", "needs one literal string",
+	        "a subquery as an option value");
 	Refused("COPY t TO 's3://acme-etl/o.csv' (FORMAT csv, NO_SUCH_OPTION concat('..', '/', 'x_{i}'))",
 	        "QoD: COPY option no_such_option is computed, so QoD cannot check that it names no path",
 	        "the refusal names the option");

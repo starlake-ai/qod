@@ -141,7 +141,9 @@
       "rollback_without_restore": true,
       "rollback_blocked_by": [],
       "notes": "https://github.com/starlake-ai/quack-on-demand/blob/v0.14.3/CHANGELOG.md",
-      "steps": []
+      "steps": [
+        { "when": "after", "boot_refuses_until_done": false, "text": "Restart every node so it runs DuckDB 2.0.1: a node an earlier release started keeps running DuckDB 2.0.0 until it restarts. On Kubernetes that means the new node image; fleet servers need this release's qod fleet join." }
+      ]
     }
   ]
 }
