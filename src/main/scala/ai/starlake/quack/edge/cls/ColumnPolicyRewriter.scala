@@ -354,15 +354,23 @@ final class ColumnPolicyRewriter(
   * `#n` after the walk (an ORDER BY term, a position the walk did not reach) trips the textual
   * count. A statement without any `#n` is returned untouched, so nothing else is reshaped.
   */
-private[cls] object PositionalReferences:
+private[edge] object PositionalReferences:
 
   private val PositionalRe = """^#(\d+)$""".r
+
+  /** The 1-based position a column named `#n` stands for, or None for any other name; a `#n`
+    * whose number does not fit an Int reads as position 0, which no column has.
+    */
+  def position(columnName: String): Option[Int] =
+    columnName match
+      case PositionalRe(digits) => Some(Try(digits.toInt).getOrElse(0))
+      case _                    => None
 
   /** `#n` outside single-quoted literals and quoted identifiers (`'#1'` is text, `"#1"` a name). */
   private val TextualRe = """(?<!["\w])#\d+""".r
   private val LiteralRe = """'(?:[^']|'')*'""".r
 
-  private def textualCount(sql: String): Int =
+  def textualCount(sql: String): Int =
     TextualRe.findAllMatchIn(LiteralRe.replaceAllIn(sql, "''")).size
 
   private val UnsupportedShape =

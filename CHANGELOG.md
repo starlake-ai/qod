@@ -6,19 +6,31 @@
 
 - **A row-policy holder's UPDATE, DELETE and MERGE on a table their policy covers are now
   refused.** Neither policy rewriter reads a write, so such a write reached every row of the
-  table, the rows the policy hides included, and its WHERE or RETURNING read them. The
-  protected-write guard now refuses, for a principal holding a row policy on the target table:
-  UPDATE (with or without WHERE, FROM or RETURNING), DELETE (with or without WHERE, USING or
-  RETURNING), MERGE INTO it, TRUNCATE, an upsert (`ON CONFLICT DO UPDATE`, `INSERT OR REPLACE`)
-  and an INSERT with RETURNING, with `<table> is protected by a row policy, and writes to a
-  row-policy table are refused`. A plain INSERT of new rows (VALUES, or a SELECT over tables
-  with no policy) is allowed as before.
-- **A column-policy holder's write can no longer read a masked or denied column of its target.**
-  An UPDATE, DELETE, MERGE or INSERT whose WHERE, SET value, ON clause, ON CONFLICT clause or
-  RETURNING names such a column of the table it writes (or the whole row, a star or
-  `COLUMNS(...)` over it) read the column's true value; it is now refused with `<table> is
-  protected by a column policy, and a write to it cannot read a masked or denied column`. A
-  write that assigns that column without reading it stays allowed.
+  table, the rows the policy hides included, and its WHERE or RETURNING read them. For a
+  principal holding a row policy on the table a statement writes, the protected-write guard now
+  refuses UPDATE (with or without WHERE, FROM or RETURNING), DELETE (with or without WHERE, USING
+  or RETURNING), MERGE INTO it, TRUNCATE, an upsert (`ON CONFLICT DO UPDATE`, `INSERT OR
+  REPLACE`) and an INSERT with RETURNING, with `<table> is protected by a row policy, and writes
+  to a row-policy table are refused`. A plain INSERT of new rows (VALUES, or a SELECT over tables
+  with no policy) is allowed as before, including rows the holder's predicate would not show.
+- **A column-policy holder's write to a table their column policy covers can no longer read a
+  masked or denied column of it.** An UPDATE, DELETE, MERGE or INSERT that read such a column of
+  the table it writes, in its WHERE, ON or SET clauses, its RETURNING or its ON CONFLICT clause,
+  read the column's true value. It is now refused with `<table> is protected by a column policy,
+  and a write to it cannot read a masked or denied column`. This covers the column by name,
+  qualified by the table, its schema or its catalog; by its position (`#n`); and through the
+  table's whole row, a star or `COLUMNS(...)`. A write that assigns that column without reading
+  it stays allowed, and so does one that reads only the table's other columns or the columns of
+  other tables.
+- **A policy holder can no longer alter, drop or replace a table their own row or column
+  policies cover.** A rename of the table or of a column moved it out from under its policies,
+  `ALTER COLUMN ... TYPE ... USING` copied a protected value into another column, and DROP or
+  `CREATE OR REPLACE` (CTAS included) removed the rows a row policy hides. Every ALTER TABLE
+  form, DROP and `CREATE OR REPLACE` (of a table or a view) of such a table is now refused, with
+  `<table> is protected by a column/row policy, and altering, dropping or replacing it is
+  refused`. A CREATE that replaces nothing is allowed. COMMENT ON and CREATE INDEX on such a
+  table were already refused to policy holders, as statements the guard cannot analyse.
+  Principals with no policy on the table are unaffected.
 - A write's RETURNING and ON CONFLICT clauses now count as reads for the protected-write guard,
   so one that reads a protected table is refused like any other read into a write (DuckDB 2.0
   refuses a subquery there too).

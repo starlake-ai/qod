@@ -35,7 +35,8 @@ enum GuardOutcome:
   * A write aimed at a protected table is judged too (owner ruling D27), since neither rewriter
   * reads a write ([[DirectWrites]]): for a row-policy table only a plain INSERT of new rows is
   * allowed, and a write to a column-policy table may not read a masked or denied column of it. A
-  * write's RETURNING and ON CONFLICT clauses count as reads.
+  * write's RETURNING and ON CONFLICT clauses count as reads. ALTER, DROP and CREATE OR REPLACE of a
+  * table the principal's own row or column policies cover are refused (owner ruling D29).
   *
   * On EVERY statement kind, a plain SELECT included, it also denies what the rewriters cannot read
   * as DuckDB does (spec decision 27): a quoted name holding a dot ([[DottedIdentifierScreen]]), a
@@ -237,7 +238,20 @@ final class ProtectedWriteGuard(
           case Some(clauseTables) =>
             val reads =
               e.accesses.filter(_.verb == Verb.Read).map(_.table).toSet ++ clauseTables
-            val writes = e.accesses.filter(_.verb == Verb.Write).map(_.table).toSet
+            val writes = e.accesses.filter(_.verb == Verb.Write).map(_.table).toList.sortBy(names)
+            // Owner ruling D29: ALTER (a rename moves the table or a column out from under its
+            // policies, ALTER ... USING copies a protected value into another column), DROP and
+            // CREATE OR REPLACE of a table the principal's own policies cover. A CREATE that
+            // replaces nothing leaves the table as it is.
+            val ddlTarget =
+              if DirectWrites.createsWithoutReplacing(ast) then None
+              else
+                e.accesses
+                  .filter(_.verb == Verb.Ddl)
+                  .map(_.table)
+                  .toList
+                  .sortBy(names)
+                  .find(t => covers(rowKeys, t) || covers(colKeys, t))
             // Owner ruling D27: the row rewriter never sees a write, so a write aimed at a table
             // the principal's row policy covers would reach the rows the policy hides. Only a
             // plain INSERT of new rows is let through.
@@ -264,12 +278,28 @@ final class ProtectedWriteGuard(
               .map(_.columnName)
             val rowHit = reads.exists(t => covers(rowKeys, t))
             val colHit = reads.exists(t => covers(colKeys, t))
-            rowTarget match
-              case Some(t) => GuardOutcome.Deny(rowWriteDeny(t.table))
-              case None    =>
+            // `#n` numbers the target's columns: those of the one column-policy target, read
+            // only when a positional reference needs them (none known reads as a refusal).
+            def targetColumns(): List[String] =
+              colTarget match
+                case List(t) =>
+                  catalog
+                    .columnsOf(
+                      eff.user.tenant.getOrElse(""),
+                      ctx.pool,
+                      t.database,
+                      t.schema,
+                      t.table
+                    )
+                    .unsafeRunSync()
+                case _ => Nil
+            (ddlTarget, rowTarget) match
+              case (Some(t), _) => GuardOutcome.Deny(ddlDeny(t.table))
+              case (_, Some(t)) => GuardOutcome.Deny(rowWriteDeny(t.table))
+              case _            =>
                 if rowHit then GuardOutcome.Deny(deny(firstCovered(reads, rowKeys)))
                 else if colTarget.nonEmpty &&
-                  DirectWrites.readsProtectedColumn(ast, protectedColumns)
+                  DirectWrites.readsProtectedColumn(ast, protectedColumns, () => targetColumns())
                 then GuardOutcome.Deny(colWriteDeny(colTarget.head.table))
                 else if colHit then preciseCls(ast, eff, ctx, firstCovered(reads, colKeys), deny)
                 else extractedRest(e, clientDataScans)
@@ -378,7 +408,17 @@ final class ProtectedWriteGuard(
 
   private def colWriteDeny(table: String): String =
     s"access denied: $table is protected by a column policy, and a write to it cannot read a " +
-      "masked or denied column of it in a WHERE, a SET value, RETURNING or ON CONFLICT"
+      "masked or denied column of it (by name, by position, through its whole row, a star or " +
+      "COLUMNS(...)) in any clause: WHERE, ON, SET values, RETURNING or ON CONFLICT"
+
+  private def ddlDeny(table: String): String =
+    s"access denied: $table is protected by a column/row policy, and altering, dropping or " +
+      "replacing it is refused: ALTER, DROP and CREATE OR REPLACE of a table your own policies " +
+      "cover"
+
+  /** A stable order over tables, so a refusal naming one of several names the same one each time.
+    */
+  private def names(t: TableRef): (String, String, String) = (t.database, t.schema, t.table)
 
   private def batchDeny(table: String): String =
     s"access denied: $table is protected by a column/row policy and cannot be read in a multi-statement batch; send that query on its own"

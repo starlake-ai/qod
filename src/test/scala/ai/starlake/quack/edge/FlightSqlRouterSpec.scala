@@ -1842,6 +1842,47 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       }
     }
 
+  it should "refuse a column-policy holder's positional or qualified read of the masked column" in:
+    List(
+      "UPDATE main.customer SET c_id = c_id RETURNING #2",
+      "DELETE FROM main.customer WHERE #2 LIKE 'a%'",
+      "UPDATE main.customer SET c_id = 0 FROM main.scratch AS main " +
+        "WHERE main.customer.c_email = 'x'"
+    ).foreach { sql =>
+      val (router, capturedSql, _) =
+        setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)
+      val out = router
+        .execute("pw-r2-c", "alice", poolKey, sql, Some(effWithPolicies(List(maskCustomerEmail))))
+        .unsafeRunSync()
+      withClue(sql) {
+        out.left.toOption.get.reason should include("cannot read a masked or denied column")
+        capturedSql() shouldBe ""
+      }
+    }
+
+  it should "refuse a policy holder's ALTER, DROP and CREATE OR REPLACE of its table (D29)" in:
+    for
+      eff <- List(
+        effWithPolicies(List(maskCustomerEmail)),
+        effWithRowPolicies(List(rowPolicyCustomer))
+      )
+      sql <- List(
+        "ALTER TABLE main.customer RENAME TO c2",
+        "ALTER TABLE main.customer RENAME COLUMN c_email TO e2",
+        "DROP TABLE main.customer",
+        "CREATE OR REPLACE TABLE main.customer AS SELECT 1 AS c_id"
+      )
+    do
+      val (router, capturedSql, _) =
+        setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)
+      val out = router.execute("pw-d29", "alice", poolKey, sql, Some(eff)).unsafeRunSync()
+      withClue(sql) {
+        out.left.toOption.get.reason should include(
+          "customer is protected by a column/row policy, and altering, dropping or replacing it"
+        )
+        capturedSql() shouldBe ""
+      }
+
   it should "still route a column-policy holder's write that only assigns the masked column" in:
     val (router, capturedSql, _) =
       setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)

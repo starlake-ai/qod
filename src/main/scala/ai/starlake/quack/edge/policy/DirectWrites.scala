@@ -1,10 +1,13 @@
 package ai.starlake.quack.edge.policy
 
 import ai.starlake.acl.parser.AstChildren
+import ai.starlake.quack.edge.cls.PositionalReferences
 import ai.starlake.sql.{IdentifierFold, QuotedIdentifier}
 import net.sf.jsqlparser.expression.{Expression, Function}
 import net.sf.jsqlparser.schema.{Column, Table}
 import net.sf.jsqlparser.statement.Statement
+import net.sf.jsqlparser.statement.create.table.CreateTable
+import net.sf.jsqlparser.statement.create.view.CreateView
 import net.sf.jsqlparser.statement.delete.Delete
 import net.sf.jsqlparser.statement.insert.{ConflictActionType, Insert, InsertConflictAlgorithm}
 import net.sf.jsqlparser.statement.merge.{Merge, MergeInsert, MergeUpdate}
@@ -97,19 +100,47 @@ private[policy] object DirectWrites:
     if withs != null && !withs.isEmpty then ps.setWithItemsList(withs)
     ps
 
-  /** Whether `ast`, a write whose target carries column policies on `protectedColumns`, reads one
-    * of those columns of its target: a column reference naming one (bare, qualified by the target
-    * or by anything that is not another table of the statement, or as a struct field head), the
-    * target's whole row, or a star or COLUMNS(...) over the target. The SET left sides and an
-    * INSERT's column list are assignments, not reads, and an INSERT's source query is the read
-    * extraction's to judge. TRUNCATE reads nothing; any other shape counts as a read.
+  /** DDL that leaves an existing table of that name as it is: a CREATE TABLE or CREATE VIEW with no
+    * OR REPLACE (DuckDB refuses it, or does nothing under IF NOT EXISTS, when the name is taken).
+    * Any other DDL aimed at a table the principal's policies cover is refused (owner ruling D29).
     */
-  def readsProtectedColumn(ast: Statement, protectedColumns: List[String]): Boolean =
+  def createsWithoutReplacing(ast: Statement): Boolean =
+    def replaces(options: java.util.List[String]): Boolean =
+      Option(options).exists(_.asScala.exists(o => o != null && o.toUpperCase.contains("REPLACE")))
+    ast match
+      case ct: CreateTable => !ct.isOrReplace && !replaces(ct.getCreateOptionsStrings)
+      case cv: CreateView  => !cv.isOrReplace
+      case _               => false
+
+  /** Whether `ast`, a write whose target carries column policies on `protectedColumns`, may read
+    * one of those columns of its target. A reference counts as such a read whenever DuckDB may bind
+    * it there:
+    *   - a bare name that is a protected column, or the target itself (its whole row);
+    *   - `a.c` where `a` is a protected column (a struct field of it), `c` names the target (a
+    *     schema- or catalog-qualified whole row), or `a` names the target and `c` is protected;
+    *   - three parts or more where any part is a protected column or the last one names the target
+    *     (DuckDB tries `catalog.schema.table.column` and `schema.table.column` before an alias,
+    *     whatever alias the statement declares);
+    *   - a positional `#n` at the write's own level, which DuckDB numbers over the target's columns
+    *     in RETURNING (and an upsert's clauses), and over the target and the write's sources
+    *     together elsewhere: it counts unless the write has no other source (or it sits in
+    *     RETURNING or ON CONFLICT) and `targetColumns` names its column, unprotected; inside a
+    *     subquery it numbers that subquery's own FROM, and counts when there is none;
+    *   - a top-level star, a `t.*` over the target or a protected struct, or `COLUMNS(...)`.
+    * The SET left sides and an INSERT's column list are assignments, not reads, and an INSERT's
+    * source query is the read extraction's to judge. TRUNCATE reads nothing; any other shape, a
+    * value the walk cannot follow, or a `#n` in the text the parse did not keep as a column counts
+    * as a read.
+    */
+  def readsProtectedColumn(
+      ast: Statement,
+      protectedColumns: List[String],
+      targetColumns: () => List[String]
+  ): Boolean =
     ast match
       case _: Truncate => false
       case i: Insert   =>
-        val targets = targetNames(i.getTable)
-        val scan    = new Scan(protectedColumns, targets, heads(i, targets) + "excluded")
+        val scan = new Scan(protectedColumns, targetNames(i.getTable), targetColumns, true)
         Option(i.getConflictTarget).foreach { t =>
           nonEmpty(t.getIndexColumnNames).foreach(_.asScala.foreach(scan.name))
           scan.walk(t.getIndexExpression)
@@ -123,30 +154,34 @@ private[policy] object DirectWrites:
         nonEmpty(i.getDuplicateUpdateSets).foreach(_.asScala.foreach(us => scan.walk(us.getValues)))
         scan.walk(i.getReturningClause)
         scan.walk(i.getOutputClause)
-        scan.hit
+        scan.hit || unkeptPositional(ast)
       case u: Update =>
-        val targets = targetNames(u.getTable)
-        val scan    = new Scan(protectedColumns, targets, heads(u, targets))
+        val sources = u.getFromItem != null || nonEmpty(u.getJoins).isDefined ||
+          nonEmpty(u.getStartJoins).isDefined
+        val scan = new Scan(protectedColumns, targetNames(u.getTable), targetColumns, !sources)
         scan.skipNode(u.getTable)
         nonEmpty(u.getUpdateSets).foreach(_.asScala.foreach(us => scan.skipAll(us.getColumns)))
         nonEmpty(u.getWithItemsList).foreach(scan.skipAll)
         scan.skipSource(u.getFromItem)
+        scan.returning(u.getReturningClause)
         scan.walk(u)
-        scan.hit
+        scan.hit || unkeptPositional(ast)
       case d: Delete =>
         val targets = (Option(d.getTable).toList ++ nonEmpty(d.getTables).toList.flatMap(_.asScala))
           .flatMap(targetNames)
           .toSet
-        val scan = new Scan(protectedColumns, targets, heads(d, targets))
+        val sources = nonEmpty(d.getUsingFromItemList).isDefined ||
+          nonEmpty(d.getJoins).isDefined || nonEmpty(d.getUsingJoins).isDefined
+        val scan = new Scan(protectedColumns, targets, targetColumns, !sources)
         scan.skipNode(d.getTable)
         nonEmpty(d.getTables).foreach(scan.skipAll)
         nonEmpty(d.getWithItemsList).foreach(scan.skipAll)
         nonEmpty(d.getUsingFromItemList).foreach(_.asScala.foreach(scan.skipSource))
+        scan.returning(d.getReturningClause)
         scan.walk(d)
-        scan.hit
+        scan.hit || unkeptPositional(ast)
       case m: Merge =>
-        val targets = targetNames(m.getTable)
-        val scan    = new Scan(protectedColumns, targets, heads(m, targets))
+        val scan = new Scan(protectedColumns, targetNames(m.getTable), targetColumns, false)
         scan.skipNode(m.getTable)
         nonEmpty(m.getWithItemsList).foreach(scan.skipAll)
         scan.skipSource(m.getFromItem)
@@ -157,8 +192,9 @@ private[policy] object DirectWrites:
           case mi: MergeInsert => scan.skipAll(mi.getColumns)
           case _               => ()
         })
+        scan.returning(m.getReturningClause)
         scan.walk(m)
-        scan.hit
+        scan.hit || unkeptPositional(ast)
       case _ => true
 
   private def nonEmpty[A <: java.util.Collection[?]](c: A): Option[A] =
@@ -173,36 +209,15 @@ private[policy] object DirectWrites:
         Option(tb.getAlias).flatMap(a => Option(a.getName)).map(unquote)
     }
 
-  /** The names that stand for another table of the statement: every FROM item's alias, and a base
-    * table's own name, wherever it appears, the targets' names left out. A column qualified by one
-    * of them reads that table, not the target.
+  /** A `#n` in the statement's text that the parse did not keep as a column reference: a position
+    * the walk cannot judge, so it counts as a read.
     */
-  private def heads(root: AnyRef, targets: Set[String]): Set[String] =
-    val out                     = scala.collection.mutable.Set.empty[String]
-    def add(fi: FromItem): Unit =
-      if fi != null then
-        Option(fi.getAlias).flatMap(a => Option(a.getName)).map(unquote).foreach(out += _)
-        fi match
-          case t: Table if t.getAlias == null => Option(t.getName).map(unquote).foreach(out += _)
-          case _                              => ()
-    root match
-      case u: Update =>
-        add(u.getFromItem)
-      case d: Delete =>
-        nonEmpty(d.getUsingFromItemList).foreach(_.asScala.foreach(add))
-      case m: Merge =>
-        add(m.getFromItem)
-        add(m.getUsingTable)
-        Option(m.getUsingAlias).flatMap(a => Option(a.getName)).map(unquote).foreach(out += _)
-      case _ => ()
-    nodes(root).foreach {
-      case ps: PlainSelect =>
-        add(ps.getFromItem)
-        nonEmpty(ps.getJoins).foreach(_.asScala.foreach(j => add(j.getFromItem)))
-      case j: Join => add(j.getFromItem)
-      case _       => ()
+  private def unkeptPositional(ast: Statement): Boolean =
+    val kept = nodes(ast).count {
+      case c: Column => Option(c.getColumnName).flatMap(PositionalReferences.position).isDefined
+      case _         => false
     }
-    out.filterNot(h => targets.exists(IdentifierFold.same(_, h))).toSet
+    PositionalReferences.textualCount(ast.toString) > kept
 
   private def nodes(root: AnyRef): List[AnyRef] =
     val seen = java.util.Collections.newSetFromMap(
@@ -223,13 +238,23 @@ private[policy] object DirectWrites:
     walk(root)
     out.toList
 
+  /** Where a reference sits: at the write's own level (`returning` inside its RETURNING), or in a
+    * subquery, which has a FROM or not.
+    */
+  private enum Level:
+    case Write(returning: Boolean)
+    case Subquery(hasFrom: Boolean)
+
   /** The reflective walk of one write's read positions. `hit` turns true on the first reference
     * that may read a protected column of the target, and on any value the walk cannot follow.
+    * `numbersTargetOnly`: outside RETURNING, the write's own `#n` numbers the target's columns
+    * alone (no other source).
     */
   private final class Scan(
       protectedColumns: List[String],
       targets: Set[String],
-      heads: Set[String]
+      targetColumns: () => List[String],
+      numbersTargetOnly: Boolean
   ):
     var hit: Boolean = false
 
@@ -243,7 +268,6 @@ private[policy] object DirectWrites:
     private def isProtected(n: String): Boolean =
       protectedColumns.exists(IdentifierFold.same(_, n))
     private def isTarget(n: String): Boolean = targets.exists(IdentifierFold.same(_, n))
-    private def isHead(n: String): Boolean   = heads.exists(IdentifierFold.same(_, n))
 
     def skipNode(n: AnyRef): Unit = if n != null then skipped.add(n): Unit
 
@@ -259,67 +283,95 @@ private[policy] object DirectWrites:
         case null                => ()
         case other               => skipNode(other)
 
+    /** The write's RETURNING, judged now with its own numbering, and left out of the later walk. */
+    def returning(rc: AnyRef): Unit =
+      if rc != null then
+        route(rc, Level.Write(returning = true))
+        skipNode(rc)
+
     /** A bare name in a column position, such as an ON CONFLICT target column. */
     def name(n: String): Unit = if n != null && isProtected(unquote(n)) then hit = true
 
-    def walk(value: Any): Unit = route(value, nested = false)
+    def walk(value: Any): Unit = route(value, Level.Write(returning = false))
 
-    private def route(value: Any, nested: Boolean): Unit =
+    private def route(value: Any, level: Level): Unit =
       if !hit then
         value match
-          case null                         => ()
-          case it: java.lang.Iterable[?]    => it.forEach(route(_, nested))
-          case arr: Array[?]                => arr.foreach(route(_, nested))
-          case e: java.util.Map.Entry[?, ?] => route(e.getKey, nested); route(e.getValue, nested)
-          case m: java.util.Map[?, ?]       => m.entrySet.forEach(route(_, nested))
-          case n: AnyRef if AstChildren.isAstNode(n) =>
-            if !skipped.contains(n) && seen.add(n) then node(n, nested)
-          case leaf if AstChildren.isLeaf(leaf) => ()
-          case _                                => hit = true
+          case null                             => ()
+          case n: AnyRef if skipped.contains(n) => ()
+          case it: java.lang.Iterable[?]        => it.forEach(route(_, level))
+          case arr: Array[?]                    => arr.foreach(route(_, level))
+          case e: java.util.Map.Entry[?, ?]     => route(e.getKey, level); route(e.getValue, level)
+          case m: java.util.Map[?, ?]           => m.entrySet.forEach(route(_, level))
+          case n: AnyRef if AstChildren.isAstNode(n) => if seen.add(n) then node(n, level)
+          case leaf if AstChildren.isLeaf(leaf)      => ()
+          case _                                     => hit = true
 
-    private def children(n: AnyRef, nested: Boolean): Unit =
-      AstChildren.accessors(n.getClass).foreach(m => route(AstChildren.read(m, n), nested))
+    private def children(n: AnyRef, level: Level): Unit =
+      AstChildren.accessors(n.getClass).foreach(m => route(AstChildren.read(m, n), level))
 
-    private def node(n: AnyRef, nested: Boolean): Unit =
+    private def topLevel(level: Level): Boolean = level.isInstanceOf[Level.Write]
+
+    private def node(n: AnyRef, level: Level): Unit =
       n match
         case c: Column =>
-          column(c)
-          route(c.getArrayConstructor, nested)
+          column(c, level)
+          route(c.getArrayConstructor, level)
         case a: AllTableColumns =>
-          val t = Option(a.getTable).flatMap(t => Option(t.getName)).map(unquote)
-          if t.forall(n => isTarget(n) || !isHead(n)) then hit = true
-          children(a, nested)
+          val parts =
+            Option(a.getTable).toList.flatMap(t => Option(t.getNameParts).toList.flatMap(_.asScala))
+          val named = parts.filter(_ != null).map(unquote)
+          if named.isEmpty || named.exists(isProtected) || named.exists(isTarget) then hit = true
+          children(a, level)
         case a: AllColumns =>
-          if !nested then hit = true
-          children(a, nested)
+          if topLevel(level) then hit = true
+          children(a, level)
         case f: Function =>
           val name = Option(f.getName).map(unquote).getOrElse("")
-          if !nested && (f.isAllColumns || IdentifierFold.same(name, "columns") ||
+          if topLevel(level) && (f.isAllColumns || IdentifierFold.same(name, "columns") ||
               IdentifierFold.same(name, "*columns"))
           then hit = true
-          children(f, nested)
+          children(f, level)
         case j: Join =>
           // The joined item is a source like the FROM one; its ON and USING are read positions.
           j.getFromItem match
-            case l: LateralSubSelect => route(l, nested = true)
+            case l: LateralSubSelect => route(l, Level.Subquery(hasFrom = true))
             case _                   => ()
-          route(j.getOnExpressions, nested)
-          route(j.getUsingColumns, nested)
-        case s: Select => children(s, nested = true)
-        case other     => children(other, nested)
+          route(j.getOnExpressions, level)
+          route(j.getUsingColumns, level)
+        case ps: PlainSelect => children(ps, Level.Subquery(hasFrom = ps.getFromItem != null))
+        case s: Select       =>
+          val inner = level match
+            case sub: Level.Subquery => sub
+            case _                   => Level.Subquery(hasFrom = false)
+          children(s, inner)
+        case other => children(other, level)
 
-    /** A column reference reads the target's protected column unless it is qualified by another
-      * table of the statement (whose name is neither the target's nor a protected column's); bare,
-      * qualified by the target or by an unknown head (a struct field of the target), it does when
-      * any of its parts is a protected column or when it names the target itself (its whole row).
-      */
-    private def column(c: Column): Unit =
+    /** Whether `c` may read a protected column of the target (see `readsProtectedColumn`). */
+    private def column(c: Column, level: Level): Unit =
       val qualifier =
         Option(c.getTable).toList.flatMap(t => Option(t.getNameParts).toList.flatMap(_.asScala))
       val parts =
         (qualifier.reverse ++ Option(c.getColumnName).toList).filter(_ != null).map(unquote)
-      val other = parts.lengthCompare(2) >= 0 && {
-        val head = parts.head
-        isHead(head) && !isTarget(head) && !isProtected(head)
-      }
-      if !other && (parts.exists(isProtected) || parts.lastOption.exists(isTarget)) then hit = true
+      val positional =
+        if qualifier.isEmpty then Option(c.getColumnName).flatMap(PositionalReferences.position)
+        else None
+      positional match
+        case Some(n) => if positionalReads(n, level) then hit = true
+        case None    =>
+          val reads = parts match
+            case Nil           => true
+            case List(one)     => isProtected(one) || isTarget(one)
+            case List(head, c) =>
+              isProtected(head) || isTarget(c) || (isTarget(head) && isProtected(c))
+            case many => many.exists(isProtected) || isTarget(many.last)
+          if reads then hit = true
+
+    private def positionalReads(n: Int, level: Level): Boolean =
+      level match
+        case Level.Subquery(hasFrom)  => !hasFrom
+        case Level.Write(inReturning) =>
+          if !(inReturning || numbersTargetOnly) then true
+          else
+            val cols = targetColumns()
+            n < 1 || n > cols.size || isProtected(cols(n - 1))

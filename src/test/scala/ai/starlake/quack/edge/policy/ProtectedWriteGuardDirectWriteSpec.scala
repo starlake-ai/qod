@@ -42,9 +42,11 @@ class ProtectedWriteGuardDirectWriteSpec extends AnyFlatSpec with Matchers:
     List(RoleColumnPolicy("cd", "r", "*", "main", "secret", "email", "deny", None))
   )
 
-  private val RowWrite = "writes to a row-policy table are refused"
-  private val ColWrite = "cannot read a masked or denied column"
-  private val ReadInto = "cannot be read into a write statement"
+  private val RowWrite   = "writes to a row-policy table are refused"
+  private val ColWrite   = "cannot read a masked or denied column"
+  private val ReadInto   = "cannot be read into a write statement"
+  private val DdlRefusal =
+    "is protected by a column/row policy, and altering, dropping or replacing it is refused"
 
   // ---- forms ----
 
@@ -218,6 +220,101 @@ class ProtectedWriteGuardDirectWriteSpec extends AnyFlatSpec with Matchers:
       ReadInto,
       leaks = false
     )
+  ) ++ positionalRefused ++ qualifiedRefused
+
+  /** Review round 2, C1: DuckDB numbers `#n` over the target's columns (and, outside RETURNING,
+    * over the target and the write's sources together), so `#5` here is `email`.
+    */
+  private def positionalRefused = List(
+    Refused("UPDATE secret SET a = a RETURNING #5", ColWrite, leaks = true),
+    Refused("UPDATE secret SET a = a WHERE #5 = 'bob@x' RETURNING id", ColWrite, leaks = true),
+    Refused("UPDATE secret SET owner = #5", ColWrite, leaks = true),
+    Refused("DELETE FROM secret WHERE #5 LIKE 'bob%'", ColWrite, leaks = true),
+    Refused(
+      "INSERT INTO secret VALUES (2, 'bob', 0, 0, 'z') ON CONFLICT (id) DO UPDATE SET a = 1 " +
+        "RETURNING #5",
+      ColWrite,
+      leaks = true
+    ),
+    Refused(
+      "MERGE INTO secret t USING other o ON t.id = o.id WHEN MATCHED THEN UPDATE SET a = 2 " +
+        "RETURNING #5",
+      ColWrite,
+      leaks = true
+    ),
+    Refused(
+      "UPDATE secret SET a = a FROM other o WHERE o.id = secret.id AND #5 = 'bob@x' " +
+        "RETURNING secret.id",
+      ColWrite,
+      leaks = true
+    ),
+    Refused(
+      "DELETE FROM secret USING other o WHERE o.id = secret.id AND #5 LIKE 'b%'",
+      ColWrite,
+      leaks = true
+    ),
+    Refused(
+      "MERGE INTO secret t USING other o ON t.id = o.id AND #9 = 'bob@x' " +
+        "WHEN MATCHED THEN UPDATE SET a = 3",
+      ColWrite,
+      leaks = true
+    ),
+    // `#5` there is the proposed row's value; refused all the same, as it names the column.
+    Refused(
+      "INSERT INTO secret VALUES (2, 'bob', 0, 0, 'z') ON CONFLICT (id) DO UPDATE SET a = length(#5)",
+      ColWrite,
+      leaks = false
+    ),
+    Refused(
+      "UPDATE secret SET a = 0 WHERE EXISTS (SELECT 1 WHERE #5 = 'bob@x')",
+      ColWrite,
+      leaks = false
+    )
+  )
+
+  /** Review round 2, C2: DuckDB reads `main.secret.email` as schema, table and column, whatever
+    * alias `main` stands for elsewhere in the statement.
+    */
+  private def qualifiedRefused = List(
+    Refused(
+      "UPDATE secret SET a = 0 FROM other AS main WHERE main.secret.email = 'bob@x' " +
+        "AND main.id = secret.id",
+      ColWrite,
+      leaks = true
+    ),
+    Refused(
+      "DELETE FROM secret USING other AS main WHERE main.secret.email = 'bob@x'",
+      ColWrite,
+      leaks = true
+    ),
+    Refused(
+      "MERGE INTO secret USING (SELECT 1 AS id) AS main ON main.secret.email = 'bob@x' " +
+        "WHEN MATCHED THEN UPDATE SET a = 0",
+      ColWrite,
+      leaks = true
+    ),
+    Refused(
+      "UPDATE secret SET a = 0 FROM other AS memory WHERE memory.main.secret.email = 'bob@x'",
+      ColWrite,
+      leaks = true
+    ),
+    Refused(
+      "UPDATE secret SET a = a WHERE EXISTS (SELECT 1 FROM other AS main) " +
+        "RETURNING main.secret.email",
+      ColWrite,
+      leaks = true
+    ),
+    Refused(
+      "UPDATE secret SET a = a WHERE EXISTS (SELECT 1 FROM other AS main) RETURNING main.secret",
+      ColWrite,
+      leaks = true
+    ),
+    Refused(
+      "INSERT INTO secret SELECT 2, 'bob', 0, 0, 'z' FROM other AS main WHERE main.id = 1 " +
+        "ON CONFLICT (id) DO UPDATE SET a = length(main.secret.email)",
+      ColWrite,
+      leaks = true
+    )
   )
 
   /** Writes to the column-policy table that read no protected column of it stay allowed. */
@@ -241,7 +338,82 @@ class ProtectedWriteGuardDirectWriteSpec extends AnyFlatSpec with Matchers:
     "WITH s AS (SELECT id, email FROM other) UPDATE secret SET email = s.email FROM s " +
       "WHERE s.id = secret.id",
     "DELETE FROM secret USING (SELECT id, email FROM other) o WHERE o.id = secret.id " +
-      "AND o.email = 'y@o'"
+      "AND o.email = 'y@o'",
+    // A positional reference that names an unprotected column, or a column of another table.
+    "UPDATE secret SET a = #3 WHERE id = 1",
+    "UPDATE secret SET a = 0 WHERE id = 2 RETURNING #1",
+    "DELETE FROM secret WHERE #1 = 2",
+    "UPDATE secret SET a = 0 WHERE id IN (SELECT #1 FROM other)",
+    // Qualified names that cannot be the protected column.
+    "UPDATE secret SET a = 0 WHERE main.secret.id = 2",
+    "UPDATE secret SET a = o.v FROM other AS o WHERE o.email = 'y@o' AND o.id = secret.id"
+  )
+
+  /** Owner ruling D29: DDL on a table the principal's own policies cover. Each form, run as is, and
+    * a statement that shows what it did to the protected data; `leaks` says whether that statement
+    * shows raw protected values or hidden rows gone.
+    */
+  private final case class Ddl(sql: String, after: String, leaks: Boolean)
+
+  private val ddlRefused = List(
+    Ddl("ALTER TABLE secret RENAME TO s2", "SELECT email FROM main.s2", leaks = true),
+    Ddl("ALTER TABLE secret RENAME COLUMN email TO e2", "SELECT e2 FROM main.secret", true),
+    Ddl(
+      "ALTER TABLE secret ALTER COLUMN owner TYPE VARCHAR USING email",
+      "SELECT owner FROM main.secret",
+      leaks = true
+    ),
+    Ddl(
+      "ALTER TABLE secret ALTER COLUMN email SET DATA TYPE VARCHAR USING upper(email)",
+      "SELECT lower(email) FROM main.secret",
+      leaks = true
+    ),
+    Ddl(
+      "ALTER TABLE secret DROP COLUMN b",
+      "SELECT count(*) FROM duckdb_columns() WHERE table_name = 'secret' AND column_name = 'b'",
+      leaks = true
+    ),
+    Ddl(
+      "ALTER TABLE secret ADD COLUMN z VARCHAR DEFAULT 'q'",
+      "SELECT count(*) FROM main.secret WHERE owner = 'bob'",
+      leaks = false
+    ),
+    Ddl("ALTER TABLE secret ALTER COLUMN a SET DEFAULT 0", "SELECT 1", leaks = false),
+    Ddl("ALTER TABLE main.secret RENAME TO s2", "SELECT email FROM main.s2", leaks = true),
+    Ddl(
+      "DROP TABLE secret",
+      "SELECT count(*) FROM duckdb_tables() WHERE table_name = 'secret'",
+      leaks = true
+    ),
+    Ddl(
+      "DROP TABLE IF EXISTS memory.main.secret",
+      "SELECT count(*) FROM duckdb_tables() WHERE table_name = 'secret'",
+      leaks = true
+    ),
+    Ddl(
+      "CREATE OR REPLACE TABLE secret AS SELECT * FROM other",
+      "SELECT count(*) FROM main.secret WHERE email = 'bob@x'",
+      leaks = true
+    ),
+    Ddl(
+      "CREATE OR REPLACE TABLE secret (id INTEGER)",
+      "SELECT count(*) FROM main.secret",
+      leaks = true
+    )
+  )
+
+  /** DDL refused before this round already, as forms the guard cannot analyse. */
+  private val ddlUnanalysed = List(
+    "COMMENT ON TABLE secret IS 'x'",
+    "COMMENT ON COLUMN secret.email IS 'x'",
+    "CREATE INDEX i ON secret (email)"
+  )
+
+  private val ddlAllowed = List(
+    "CREATE TABLE secret2 AS SELECT * FROM other",
+    "ALTER TABLE other ADD COLUMN z INTEGER",
+    "DROP TABLE other",
+    "CREATE TABLE IF NOT EXISTS secret (id INTEGER)"
   )
 
   // ---- DuckDB ----
@@ -410,6 +582,45 @@ class ProtectedWriteGuardDirectWriteSpec extends AnyFlatSpec with Matchers:
       ) match
         case GuardOutcome.Deny(reason) => reason should include(ColWrite)
         case other                     => fail(s"expected a refusal, got $other")
+  }
+
+  "DDL on a policy table" should "be refused to a holder of a row or column policy on it" in {
+    for e <- List(rowEff, maskEff, denyEff); d <- ddlRefused do
+      withClue(s"${e.rowPolicies.size}/${e.columnPolicies.size}: ${d.sql}") {
+        guarded(d.sql, e) match
+          case GuardOutcome.Deny(reason) => reason should include(DdlRefusal)
+          case other                     => fail(s"expected a refusal, got $other")
+        piped(d.sql, e) match
+          case Left(RouterFailure.AccessDenied(reason)) =>
+            reason should include(DdlRefusal)
+            reason should include("secret")
+          case other => fail(s"expected a refusal, got $other")
+      }
+    for e <- List(rowEff, maskEff, denyEff); sql <- ddlUnanalysed do
+      withClue(sql)(guarded(sql, e) shouldBe a[GuardOutcome.Deny])
+  }
+
+  it should "reach the protected data on DuckDB, which is what the refusal stops" in
+    ddlRefused.foreach { d =>
+      val shown = withDuckDb("memory") { conn =>
+        seed(conn, maskedEmail = false, rowFiltered = false)
+        exec(conn, d.sql)
+        query(conn, d.after).flatten
+      }
+      withClue(s"${d.sql} -> $shown") {
+        (shown.exists(v => v != null && v.toLowerCase.contains("bob@x")) || shown == List(
+          "0"
+        )) shouldBe
+          d.leaks
+      }
+    }
+
+  it should "leave other tables' DDL, and a create that replaces nothing, alone" in {
+    for e <- List(rowEff, maskEff, denyEff); sql <- ddlAllowed do
+      withClue(sql)(guarded(sql, e) shouldBe GuardOutcome.Allow)
+    (ddlRefused.map(_.sql) ++ ddlUnanalysed).foreach { sql =>
+      withClue(sql)(guarded(sql, effWith()) shouldBe GuardOutcome.Allow)
+    }
   }
 
   "a write on a policy table" should "be left to the node for a principal with no policy" in
