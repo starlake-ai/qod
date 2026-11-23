@@ -43,30 +43,30 @@
   `current_role`, `session_user`, `current_schema`, `current_catalog`, `localtime` and
   `localtimestamp` are left as written. A predicate holding a subquery whose columns are not all
   qualified by the subquery's own FROM items or by the table's name fails to apply.
-- **Functions returning the statement's text are refused to principals with column or row
-  policies.** The node runs the statement as the gateway rewrote it, with every row filter and
-  mask in it, so `current_query()` (and `pg_catalog.current_query()`),
-  `duckdb_prepared_statements()` and `pg_catalog.pg_prepared_statements` showed such a principal
-  the administrator's predicates and the filters' aliases. A statement naming one of them is now
-  refused to such a principal, on every statement kind.
-- **The functions that show the running statement's text are refused to principals holding column
-  or row policies, wherever a plan reaches them.** The gateway applies such a principal's masks and
-  row filters by rewriting the statement, so `current_query()`, its `pg_catalog.current_query()`
-  macro, `duckdb_prepared_statements()` and the `pg_catalog.pg_prepared_statements` view would show
-  the policies' expressions (a mask's salt, a row filter's predicate). The gateway's statement-text
-  screen already refused a statement whose own text names one of them; the node's decision now also
-  refuses them to any principal holding at least one column or row policy, whatever table the
-  policy names, when the plan reaches them: a direct call, a view or a secure view (one another
-  user created included), a generated column, a default, a CHECK constraint, a `query()` literal, a
-  `SET VARIABLE` value, a `LIMIT` or `OFFSET`. The refusal reads `QoD: function <name> is not
-  available to principals with column or row policies`, is permanent and is booked as a denial.
-  Principals without policies and superusers keep them.
-  - Not covered yet: an argument a table function evaluates while binding (`unnest(...)`,
-    `range(...)`, `json_each(...)` and the like) holds no call in the plan, so a view body or other
-    stored SQL calling one of these functions there is not refused. In the client's own statement
-    the gateway's statement-text screen refuses it.
-  - Prepared statements themselves are unaffected: FlightSQL prepared statements keep working for
-    policy holders, masks and row filters applying as before.
+- **The statement's text no longer reaches principals with column or row policies.** The gateway
+  applies such a principal's masks and row filters by rewriting the statement, and the node runs the
+  rewrite, so what shows that text showed the policies' expressions (a mask's salt, a row filter's
+  predicate and its alias). Two changes:
+  - The functions that return the running statement's text, `current_query()`, its
+    `pg_catalog.current_query()` macro, `duckdb_prepared_statements()` and the
+    `pg_catalog.pg_prepared_statements` view, are refused to any principal holding at least one
+    column or row policy, whatever table the policy names, on every statement kind. The gateway
+    refuses a statement whose own text names one of them; the node's decision refuses them wherever
+    the plan reaches them: a direct call, a view or a secure view (one another user created
+    included), a generated column, a default, a CHECK constraint, a `query()` literal, a
+    `SET VARIABLE` value, a `LIMIT` or `OFFSET`. The node's refusal reads `QoD: function <name> is
+    not available to principals with column or row policies`, is permanent and is booked as a
+    denial. Some arguments DuckDB evaluates while binding, in a view body or other stored SQL, are
+    not covered yet.
+  - Error messages answered to such a principal no longer quote the statement: DuckDB's excerpt of
+    it around the error position (the `LINE <n>:` line and the caret line under it) is left out of
+    every node error on FlightSQL, the native Quack front door, MCP `run_sql` and the REST APIs,
+    and out of the statement history and audit, and so is what a refusal of the rewrite would
+    quote of it.
+  - Principals without policies keep `current_query()`, `duckdb_prepared_statements()` and the
+    excerpt; superusers keep all four functions and the excerpt. Prepared statements themselves are
+    unaffected: FlightSQL prepared statements keep working for policy holders, masks and row
+    filters applying as before.
 
 ### Fixed
 

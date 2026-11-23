@@ -236,22 +236,25 @@ final class AuthzDecider(
     * row policy, whatever table the policies name and wherever the plan reaches the function (a
     * view's or a secure view's body, a macro, a generated column, a default, a CHECK, a `query()`
     * literal). `pg_catalog.pg_prepared_statements` is a view the binder inlines as a call of
-    * `duckdb_prepared_statements()`; its name is matched too should a description ever list it. A
-    * call DuckDB evaluates while binding (a table function's argument, an EXECUTE parameter) is not
-    * in the plan, so no description lists it.
+    * `duckdb_prepared_statements()`; its name is matched too should a description ever list it, and
+    * it is then reported as the view it is. A call DuckDB evaluates while binding (a table
+    * function's argument other than a subquery, an EXECUTE parameter) is not in the plan, so no
+    * description lists it.
     */
   private def statementTextUnderPolicies(ctx: DecideContext, d: Description): Step =
     val eff = ctx.effective
     if eff.columnPolicies.isEmpty && eff.rowPolicies.isEmpty then Pass
     else
       val named =
-        d.functions.filter(f => showsStatementText(f.catalog, f.name)).map(_.name) ++
-          d.objects.filter(o => showsStatementText(o.catalog, o.name)).map(_.name)
+        d.functions.filter(f => showsStatementText(f.catalog, f.name)).map("function" -> _.name) ++
+          d.objects
+            .filter(o => showsStatementText(o.catalog, o.name))
+            .map(o => (if o.kind.contains("view") then "view" else "function") -> o.name)
       named.headOption match
-        case Some(name) =>
+        case Some((what, name)) =>
           refuse(
-            s"function ${IdentifierFold.fold(name)} is not available to principals with column " +
-              "or row policies"
+            s"$what ${IdentifierFold.fold(name)} is not available to principals with column or " +
+              "row policies"
           )
         case None => Pass
 

@@ -365,6 +365,44 @@ object QuackWire:
       }
     }
 
+  /** `bytes`, an ERROR_RESPONSE, with its message (field 1) replaced by `f` of it: the header and
+    * every other field are copied byte for byte, in their order. The same array when `f` leaves the
+    * message as it is, and when `bytes` is no ERROR_RESPONSE or cannot be read (nothing is changed
+    * in what cannot be read).
+    */
+  def mapErrorMessage(bytes: Array[Byte], f: String => String): Array[Byte] =
+    frame(bytes)
+      .filterOrElse(_.header.msgType == Type.ErrorResponse, DecodeError("not an ERROR_RESPONSE"))
+      .flatMap { fr =>
+        attempt("ERROR_RESPONSE") {
+          val r       = bodyReader(fr)
+          val w       = new Writer().raw(bytes.take(fr.bodyStart), 0)
+          var changed = false
+          var done    = false
+          while !done do
+            val start = r.pos
+            r.u16() match
+              case Terminator => done = true
+              case 1          =>
+                val msg = r.string()
+                val out = f(msg)
+                if out != msg then changed = true
+                w.u16(1).string(out)
+              case 2 =>
+                r.string()
+                w.raw(bytes.slice(start, r.pos), 0)
+              case 3 =>
+                r.skipStringMap()
+                w.raw(bytes.slice(start, r.pos), 0)
+              case 4 =>
+                r.bool()
+                w.raw(bytes.slice(start, r.pos), 0)
+              case other => throw DecodeError(s"unknown field $other in ERROR_RESPONSE")
+          if changed then w.end().raw(bytes, r.pos).bytes else bytes
+        }
+      }
+      .getOrElse(bytes)
+
   def decodeConnectionResponse(
       bytes: Array[Byte]
   ): Either[DecodeError, (String, ConnectionResponse)] =

@@ -1090,7 +1090,8 @@ class AuthzDeciderSpec extends AnyFlatSpec with Matchers:
   private val TextRow = RoleRowPolicy("rp-9", "r-1", "*", "*", "customers", "region = 'X'")
 
   private def textRefusal(name: String) =
-    s"function $name is not available to principals with column or row policies"
+    val what = if name == "pg_prepared_statements" then "view" else "function"
+    s"$what $name is not available to principals with column or row policies"
 
   /** Each of the four as qod-node describes it: `current_query()` (the `pg_catalog` macro binds to
     * the same call), `duckdb_prepared_statements()` (the `pg_catalog.pg_prepared_statements` view

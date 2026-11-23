@@ -1724,6 +1724,65 @@ abstract class AuthzEndToEndCases(
     }
     // mona and rhea hold RO on the view: the grant passes, the function in its body does not.
     List("mona", "rhea").foreach(u => refused(u, "lake", s"SELECT q FROM $view", TextRefusal))
+    // The node's refusal is booked as a denial, for each of them.
+    val booked = deniedInHistory("stmt_text_v").filter(
+      _.hcursor.get[String]("error").exists(_.contains(TextRefusal))
+    )
+    booked.flatMap(_.hcursor.get[String]("username").toOption) should contain allOf ("mona", "rhea")
+  }
+
+  "a node error" should "reach a policy holder without DuckDB's excerpt of the rewritten statement" in {
+    ready()
+    feedRange // feed_a, whose email column mona reads masked
+    // Each statement fails at bind on a column named after the policy table, so DuckDB's excerpt
+    // (60 columns on each side of the error) would quote the rewrite: mona's mask expression,
+    // rhea's row predicate.
+    val cases = List(
+      ("mona", "lake", s"SELECT email FROM $lake.main.feed_a WHERE nonexist_stfix_m = 1", "'***'"),
+      ("rhea", "fed", "SELECT v FROM pgfed.e2e.orders WHERE nonexist_stfix_r = 1", "id = 1"),
+      ("quinn", "lake", s"SELECT * FROM $lake.main.orders WHERE nonexist_stfix_q = 1", "")
+    )
+    for (user, pool, sql, policyText) <- cases; d <- doors do
+      withClue(s"[$d] $user: $sql -> ") {
+        as(d, user, pool, sql) match
+          case Right(r)  => fail(s"expected a bind error, got rows $r")
+          case Left(err) =>
+            err should include("nonexist_stfix_")
+            // The DuckDB client the native door's test drives adds an excerpt of its own
+            // statement (the `quack_query(...)` call it sent); only the node's are in question.
+            // On FlightSQL the manager's native client writes the node's excerpt, of the statement
+            // it sent; the native door answers the node's message, which holds none.
+            val nodeExcerpts = err.linesIterator
+              .filter(_.trim.startsWith("LINE "))
+              .filterNot(l => d == Door.Native && l.contains("quack_query("))
+              .toList
+            withClue(s"$err -> ") {
+              if policyText.isEmpty && d == Door.Flight then
+                // No policy: the excerpt stays, as DuckDB wrote it.
+                nodeExcerpts should not be empty
+              else
+                nodeExcerpts shouldBe empty
+                if policyText.nonEmpty then err should not include policyText
+            }
+      }
+    // The statement history, which each user reads as their own, records the same text. The
+    // FlightSQL bind error is the prepare probe's, which records nothing; the native door's row is
+    // recorded (with no excerpt from the node, policies or not: FlightSqlRouterSpec pins that a
+    // principal without policies keeps one in history).
+    for (user, _, _, policyText) <- cases do
+      val marker = s"nonexist_stfix_${user.head}"
+      val rows   = inHistory("permanent", marker)
+        .filter(_.hcursor.get[String]("username").toOption.contains(user))
+      val errors = rows.map(_.hcursor.get[String]("error").getOrElse(""))
+      withClue(s"$user's history rows: $errors -> ") {
+        errors should not be empty
+        errors.foreach(_ should include(marker))
+        if policyText.nonEmpty then
+          errors.foreach { e =>
+            e should not include "LINE "
+            e should not include policyText
+          }
+      }
   }
 
   "prepared statements" should "keep working for a principal with column or row policies" in {
@@ -1949,12 +2008,15 @@ abstract class AuthzEndToEndCases(
   /** The `denied` rows of the statement history (`GET /api/history/statements`) whose text holds
     * `fragment`, polled while the journal flushes (every 500 ms).
     */
-  private def deniedInHistory(fragment: String): List[Json] =
+  private def deniedInHistory(fragment: String): List[Json] = inHistory("denied", fragment)
+
+  /** The statement history rows of `status` whose text holds `fragment`, once some are recorded. */
+  private def inHistory(status: String, fragment: String): List[Json] =
     val q        = java.net.URLEncoder.encode(fragment, java.nio.charset.StandardCharsets.UTF_8)
     val deadline = System.nanoTime() + 15.seconds.toNanos
     def rows(): List[Json] =
       stack
-        .get(s"/api/history/statements?status=denied&q=$q&limit=50")
+        .get(s"/api/history/statements?status=$status&q=$q&limit=50")
         .hcursor
         .downField("statements")
         .as[List[Json]]

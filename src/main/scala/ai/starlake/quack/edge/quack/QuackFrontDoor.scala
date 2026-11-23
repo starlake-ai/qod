@@ -350,7 +350,13 @@ final class QuackFrontDoor(
           if catalogRead then s.catalogNode.set(Some(routed.nodeId))
           // A failed recovery keeps the fence: the client is still inside its dead transaction.
           if reopenTx then s.txAborted.set(None)
-          afterPrepare(s, cq, prep.sql, routed)
+          afterPrepare(
+            s,
+            cq,
+            prep.sql,
+            routed,
+            ai.starlake.quack.edge.policy.StatementExcerpt.withheldFor(Some(eff))
+          )
       }
       // A link the node answered on but no statement took (a cancel between the router's Ok and
       // `afterPrepare`) is released here, with its hold on the node.
@@ -360,11 +366,12 @@ final class QuackFrontDoor(
       s: QuackSession,
       cq: Long,
       sql: String,
-      routed: Routed[PrepareOutcome]
+      routed: Routed[PrepareOutcome],
+      excerptWithheld: Boolean
   ): IO[Array[Byte]] =
     val po        = routed.value
     val kind      = router.classifier.classify(sql)
-    val statement = QuackStatement(po.link, routed.nodeId, kind, cq, routed.close)
+    val statement = QuackStatement(po.link, routed.nodeId, kind, cq, routed.close, excerptWithheld)
     statement.pendingCommit.set(po.stamped)
     val moreOpt: Option[Boolean] =
       if messageType(po.response) == Type.PrepareResponse then
@@ -836,7 +843,9 @@ final class QuackFrontDoor(
                         node.nodeId,
                         StatementKind.Select,
                         cq,
-                        closer(s, link, cq, reused = false)
+                        closer(s, link, cq, reused = false),
+                        // The manager's own rendering, as the system principal.
+                        excerptWithheld = false
                       )
                       if QuackNodeLink.nativeNeedsMore(resp).contains(false) then
                         finishStatement(s, st, commit = false).as(resp)
@@ -897,8 +906,17 @@ final class QuackFrontDoor(
       case None     => IO.pure(onNone)
       case Some(st) =>
         st.link.forward(f).flatMap {
-          case Left(fail)  => IO.pure(encodeError(fail.message))
-          case Right(resp) =>
+          case Left(fail)   => IO.pure(encodeError(fail.message))
+          case Right(resp0) =>
+            // A policy holder's statement is the gateway's rewrite: an error the node answers it
+            // with goes back without DuckDB's excerpt of it, every other byte as the node sent it.
+            val resp =
+              if st.excerptWithheld then
+                QuackWire.mapErrorMessage(
+                  resp0,
+                  ai.starlake.quack.edge.policy.StatementExcerpt.strip
+                )
+              else resp0
             val isFetch = f.header.msgType == Type.FetchRequest
             if isFetch && messageType(resp) == Type.FetchResponse && isTerminalFetch(resp) then
               // The client has the whole result. A pending stamping bracket commits now; the

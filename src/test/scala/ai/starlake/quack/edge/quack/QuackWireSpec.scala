@@ -157,6 +157,38 @@ class QuackWireSpec extends AnyFlatSpec with Matchers:
     // no type: the message alone
     decodeErrorText(encodeError("Authentication failed")) shouldBe Right("Authentication failed")
 
+  "mapErrorMessage" should "replace the message alone, every other byte as the node sent it" in:
+    // the v3 error above, its message ("boom") followed by a statement excerpt
+    val excerpt = "\n\nLINE 1: SELECT x\n       ^"
+    val msg     = "boom" + excerpt
+    val msgHex  = toHex(msg.getBytes("UTF-8"))
+    val v3      = hex(
+      "0100640300ffffffffffffffffff01ffff" +
+        "0100" + f"${msg.length}%02x" + msgHex +
+        "020007436174616c6f67" +
+        "030002" + "000001610100017a" + "ffff" + "000001620100017b" + "ffff" +
+        "040001" +
+        "ffff"
+    )
+    val out = mapErrorMessage(v3, ai.starlake.quack.edge.policy.StatementExcerpt.strip)
+    toHex(out) shouldBe
+      "0100640300ffffffffffffffffff01ffff" +
+      "010004626f6f6d" +
+      "020007436174616c6f67" +
+      "030002" + "000001610100017a" + "ffff" + "000001620100017b" + "ffff" +
+      "040001" +
+      "ffff"
+    decodeErrorText(out) shouldBe Right("Catalog Error: boom")
+
+  it should "answer the same array when nothing changes or the bytes are no error" in:
+    val err = encodeError("boom")
+    mapErrorMessage(err, identity) should be theSameInstanceAs err
+    mapErrorMessage(err, _ => "boom") should be theSameInstanceAs err
+    val ok = encodeSuccess()
+    mapErrorMessage(ok, _ => "x") should be theSameInstanceAs ok
+    val junk = Array[Byte](1, 2, 3)
+    mapErrorMessage(junk, _ => "x") should be theSameInstanceAs junk
+
   "encodeSuccess" should "match the captured SUCCESS_RESPONSE" in:
     toHex(encodeSuccess()) shouldBe toHex(success)
 

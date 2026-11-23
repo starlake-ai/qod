@@ -274,9 +274,20 @@ holding any column or row policy, whatever table the policy names, wherever the 
 (a direct call, a view or secure view body, a generated column, a default, a CHECK, a `query()`
 literal, a `SET VARIABLE` value, a `LIMIT` / `OFFSET`), before OPA is asked
 (`AuthzDecider.statementTextUnderPolicies`, `StatementTextFunctions`: `function <name> is not
-available to principals with column or row policies`, permanent), since the gateway's rewrites put
-the policies' expressions in the text they show; the gateway's `StatementTextScreen` refuses the
-same names in the client's own text. A bind-time slot in stored SQL is a residual (below).
+available to principals with column or row policies`, `view <name>` for the view, permanent), since
+the gateway's rewrites put the policies' expressions in the text they show; the gateway's
+`StatementTextScreen` refuses the same names in the client's own text. Principals without policies
+keep `current_query()` and `duckdb_prepared_statements()` (`pg_catalog.pg_prepared_statements` is
+refused to every non-superuser outside a secure view by the node's name walk); superusers keep all
+four. For the same reason every node error answered to such a principal (neither a superuser nor the
+system principal) loses DuckDB's excerpt of the statement (`LINE <n>:` to the end of the caret line
+under it, `policy.StatementExcerpt`, decided by `withheldFor` on the effective set): the router
+strips it in `readNodeError` (first try and retry; both doors' prepare-time errors, MCP, REST, the
+FlightSQL prepare probe, history and audit read that text), the native front door strips it from an
+ERROR_RESPONSE it relays to a later FETCH or SEND_DATA (`QuackStatement.excerptWithheld`,
+`QuackWire.mapErrorMessage`, every other byte kept), and a `RewriteScope` refusal of the rewrite is
+answered without what it quotes of it (`RewriteScope.withoutDetail`). Principals without policies
+keep the excerpt. A bind-time slot in stored SQL is a residual (below).
 `BootPreflight.checkRetiredSettings` (decision 28) judges the removed settings, from the variable or
 else its `quack-flightsql.acl.*` / `quack-flightsql.nodeLockdown` path: `QOD_ACL_ENABLED` and
 `QOD_NODE_LOCKDOWN` set to off (`false`/`no`/`off`) refuse boot, any other value boots with a stderr
