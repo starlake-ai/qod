@@ -2,30 +2,52 @@
 
 ## Status and rollout
 
-Row policies are enforced exclusively by qod-node using the pinned DuckDB 2.0.1 C++
-planner interfaces. The gateway no longer rewrites row-policy queries, and there is
-no gateway fallback or enforcement-mode switch. `QOD_RLS_ENABLED=false` disables RLS.
-Every manager replica must use the same setting.
+Enabled row policies are enforced on qod-node's bound DuckDB plan, using the pinned
+DuckDB 2.0.1 C++ planner interfaces. The gateway SQL rewrite and enforcement selector
+have been removed. `QOD_RLS_ENABLED=false` disables row policies; every manager replica
+must use the same setting.
 
-Node protocol 7 and signed handle version 5 are mandatory. Rebuild and vendor every
-platform's qod-node binary, deploy the matching node image and fleet CLI, and restart
-the nodes with this release. Version-4 handles and older nodes fail closed. No
-policy-table or DuckLake metadata migration is required.
+Node protocol 9 and signed handle version 7 are mandatory.
+Rebuild and vendor every platform's qod-node binary, deploy the matching node image
+and fleet CLI, and restart the nodes before enabling the feature. Older handles and nodes fail closed. No policy-table or DuckLake metadata migration is required.
 
 ## Data flow and trust
 
-The manager resolves the caller's effective, token-attenuated policies. It substitutes
-the authenticated user's identity using SQL-literal escaping,
-sorts policies by id, and puts `{id,catalog,schema,table,sql}` entries in the signed
-session handle's required `rowPolicies` array. Superuser and internal handles carry
-an empty array. Unknown identity tokens refuse instead of silently becoming NULL.
-The handle permits at most 256 policies and 64 KiB of expanded UTF-8 SQL per predicate.
+Table ACLs decide whether a principal may read a table. With a read grant and no
+applicable row policy, reads remain unfiltered. Applicable policies combine with OR.
+This is the QoD contract; enabling RLS does not introduce default-deny table access.
+
+The manager resolves the caller's effective, token-attenuated policies and expands
+identity tokens as escaped SQL values. Tokens must be standalone values, outside SQL
+literals and quoted identifiers; unknown tokens and unsupported predicate forms are
+rejected at creation and manifest import. Stored invalid predicates, or identity
+expansions over 64 KiB, become deliberately unbindable entries on their original
+scope. They deny only matching table access, without breaking unrelated statements.
+Boot diagnostics and administrator logs identify the policy without its predicate.
+
+Production handles carry a SHA-256 reference to an immutable policy snapshot instead
+of embedding every expanded predicate. The private `/api/internal/authz/row-policies`
+endpoint checks the request HMAC, signed handle, and the exact handle's issuance by
+this replica. It serves signed pages of at most 64 policies and 512 KiB of encoded
+entries, keeping responses under the HTTP 1 MiB bound. The node verifies the page
+signature, snapshot id, offset and continuation before installing any policies.
+A partial or invalid fetch installs nothing and returns an authenticated retry marker.
+
+Snapshots are content-addressed, so a different identity expansion or policy body
+has a different reference even at the same policy version. Node snapshots are cached
+for five minutes with a 32 MiB total serialized budget and 1,024-entry bound; a fetch
+also refuses past 32 MiB. Manager snapshots have a 128 MiB serialized budget and six
+minutes of idle retention. Cache eviction or snapshot capacity exhaustion is an
+explicit authorization-availability failure, never unfiltered access. There is no
+256-policy limit on production snapshots; the inline handle representation retained
+for small test fixtures remains bounded. Empty, internal and superuser snapshots
+need no fetch.
 
 The node verifies the handle before installing policies on the connection. A statement's
 `post_bind` hook visits DuckDB's resolved base-table scans, including scans in plain
 views, literal `query()`, `query_table()`, CTEs and expression subqueries. Coverage
 uses DuckDB's own case-insensitive identifier comparison, with the existing `*`
-wildcards. All matching policies are combined with OR, using the existing policy-composition semantics.
+wildcards. All matching policies are combined with OR, across all applicable policies.
 
 Each predicate is parsed independently by DuckDB. Combination uses expression trees,
 never concatenated policy SQL. A separate binder with no parent query binds the
@@ -50,11 +72,12 @@ can still grant the row. This is deliberately more restrictive than returning an
 that might quote a hidden value. Binding failures return a fixed refusal without
 the predicate, identity literals or DuckDB's binder excerpt. Volatile predicates
 that DuckDB cannot evaluate under TRY refuse. Reads under a non-default collation
-or caller overrides of expression-meaning settings refuse; RESET can recover the
+or any core or extension session setting override except schema/search_path refuse; RESET can recover the
 session. Explicit collations in the administrator's predicate remain explicit.
 
 Before optimization, QoD verifies that every protected scan is still immediately
 inside its original filter and boundary, that the bound filter expressions are
+unchanged, that scan column ids, projection ids, table index, names and types are
 unchanged, and that the policies match the current handle. An extension registering
 a later post-bind callback cannot remove or replace the filter unnoticed. Enforcement
 starts at post-bind and does not depend on an optional optimizer pass being enabled.
@@ -71,7 +94,10 @@ different signed policy vector is installed.
   Wildcard policies apply to base scans, not to a view's projected aliases.
 - The reader's base-table policies also apply inside a real secure view. The view's
   definer-rights table-grant rules remain unchanged.
-- Writes to a covered table, INSERT included, are refused by the node. A future write
+- Ordinary users with an applicable policy on a target table cannot write it, INSERT
+  included, even with an INSERT grant. A loader with an INSERT grant and no applicable
+  row policy can insert. Superuser and internal connections bypass this RLS restriction;
+  read-only catalog rules still apply. A future write
   policy must distinguish visibility (`USING`) from validation of proposed values
   (`WITH CHECK`). The gateway's protected-write checks stay mounted too.
 - CLS remains a gateway rewrite. When the two features coexist, native row filters
@@ -80,8 +106,13 @@ different signed policy vector is installed.
   remain. Node RLS does not promise unrestricted DuckDB syntax on those paths.
 - File-reading functions without a bound base-table identity remain governed by
   file-location authorization, not name-scoped table policies.
-- DuckLake change feeds refuse for row-policy principals, including inside views and
-  literal dynamic queries, because their rows have no filterable base-table scan.
+- Fresh catalog objects are not writes to existing protected rows. Wildcards do not
+  forbid creating tables, views, macros or sequences. Replacement and destructive DDL
+  on covered existing tables remain refused.
+- EXPLAIN and EXPLAIN ANALYZE over protected scans refuse because their estimates or
+  profiling can expose hidden row counts. `stats()` exposes no hidden column extrema.
+- DuckLake change feeds refuse for policy holders, including through views and literal
+  dynamic queries, because their output has no ordinary filterable base scan.
 - Existing fail-closed historical-name checks remain in place. Policy coverage is
   still name-based, not an immutable table-id model.
 - Timing, resource use, administrator or internal connections, and native code loaded
@@ -99,18 +130,21 @@ changes, privileged connections, write refusals and a later extension removing t
 filter. DuckLake cases also run when the pinned extension is installed.
 
 Scala tests verify identity expansion, unknown-token refusal, handle signing and
-verification, wire bounds, unchanged row-only query text, the RLS kill switch, and protected-write
-and historical-name checks. Cross-language golden
+verification, wire bounds, and the native read / protected-write guard split. Cross-language golden
 handles and the existing native authorization tests pin the version transition.
 
 At each DuckDB upgrade, review `post_bind` ordering, generic binding, scan column-id
 mapping, secure-view filter pushdown, TRY semantics, serialization and prepared-query
 rebinding. These are internal C++ interfaces, not a stable extension ABI.
 
-## Removed gateway machinery
+## Administration and diagnostics
 
-The runtime `RowPolicyRewriter`, its configuration mode, router stage, rewrite timers
-and dashboard panels are removed. Identity expansion remains as a small helper for
-signed handles. Static predicate-column analysis remains solely for boot diagnostics;
-it never transforms submitted SQL. Administrative predicate validation, the RLS
-kill switch, CLS rewriting, metadata filtering and protected-write checks remain.
+Native binding failures emit a structured node log with policy id, table scope and
+cause, never predicate SQL, substituted identity values or hidden data. The manager
+exports `qod_node_authz_row_policy_refusals_total` with tenant/pool/node labels through
+its existing health probe. The boot report checks unsupported stored expressions,
+including wildcard scopes, in addition to missing-column diagnostics. Full native
+type and function-resolution checks still run against the actual scan at bind time.
+
+The protocol generation differs from the separately stacked CLS implementation;
+that stack must be rebased and fenced consistently before a combined deployment.

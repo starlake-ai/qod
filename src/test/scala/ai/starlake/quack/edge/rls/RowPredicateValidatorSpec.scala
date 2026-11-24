@@ -77,3 +77,28 @@ class RowPredicateValidatorSpec extends AnyFlatSpec with Matchers:
   it should "accept a semicolon that appears inside a string literal" in {
     valid("note = 'a;b'") shouldBe "note = 'a;b'"
   }
+
+  it should "reject unknown identity tokens at administration time" in {
+    invalid("owner = ${usr}") should include("unknown identity token")
+    invalid("owner = ${tenant_id}") should include("unknown identity token")
+  }
+
+  it should "reject window functions, lambdas, variables and user functions" in
+    List(
+      "row_number() OVER () = 1",
+      "list_filter(xs, x -> x > 1) IS NOT NULL",
+      "getvariable('owner') = owner",
+      "my_user_macro(owner)",
+      "random() > 0.5"
+    ).foreach { p =>
+      validate(p) shouldBe a[Invalid]
+    }
+
+  it should "reject identity substitution inside SQL literals, identifiers and escape prefixes" in
+    List(
+      "owner = '${user}'",
+      "owner = E${user}",
+      "owner = U&${user}",
+      "owner = \"${user}\"",
+      "owner = $$${user}$$"
+    ).foreach(p => validate(p) shouldBe a[Invalid])

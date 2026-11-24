@@ -1,9 +1,13 @@
 package ai.starlake.quack.ondemand.runtime
 
-import ai.starlake.quack.edge.authz.{NodeHandles, Verdict, Verdicts}
+import ai.starlake.quack.edge.authz.{NodeHandles, NodeKeys, RowPolicyRoute, Verdict, Verdicts}
+import cats.effect.IO
+import cats.effect.unsafe.implicits.global
 import com.sun.net.httpserver.{HttpExchange, HttpServer}
 import io.circe.Json
 import io.circe.parser.parse
+import org.http4s.{Header, Headers, Method, Request, Uri}
+import org.typelevel.ci.CIString
 
 import java.net.InetSocketAddress
 import java.nio.charset.StandardCharsets.UTF_8
@@ -42,6 +46,29 @@ final class StubDecideServer private (secret: String, server: HttpServer):
   def principals: List[String] = asked.asScala.toList.map(_.principal)
 
   def stop(): Unit = server.stop(0)
+
+  /** Serve the manager's real signed snapshot endpoint alongside the stand-in decider. */
+  def serveRowPolicies(keys: NodeKeys): Unit =
+    val app = new RowPolicyRoute(keys).routes.orNotFound
+    server.createContext(
+      "/api/internal/authz/row-policies",
+      exchange =>
+        try
+          val headers = exchange.getRequestHeaders.asScala.toList.flatMap((name, values) =>
+            values.asScala.map(v => Header.Raw(CIString(name), v))
+          )
+          val request = Request[IO](
+            Method.fromString(exchange.getRequestMethod).toOption.get,
+            Uri.unsafeFromString(exchange.getRequestURI.toString),
+            headers = Headers(headers)
+          ).withBodyStream(fs2.Stream.emits(exchange.getRequestBody.readAllBytes().toSeq))
+          val response = app.run(request).unsafeRunSync()
+          val bytes    = response.body.compile.to(Array).unsafeRunSync()
+          exchange.getResponseHeaders.set("Content-Type", "text/plain; charset=UTF-8")
+          exchange.sendResponseHeaders(response.status.code, bytes.length.toLong)
+          exchange.getResponseBody.write(bytes)
+        finally exchange.close()
+    )
 
   private[runtime] def handle(exchange: HttpExchange): Unit =
     try

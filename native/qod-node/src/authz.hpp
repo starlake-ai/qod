@@ -3,6 +3,7 @@
 #include "credentials.hpp"
 #include "decide_client.hpp"
 #include "handle.hpp"
+#include "row_policy_client.hpp"
 
 #include <cstdint>
 #include <functional>
@@ -169,6 +170,8 @@ public:
 
 	//! The S3 credential client of this node (its key, its clock, the decide timeout), shared by every
 	//! connection: qod_session installs each principal's own credentials with it (decision 23).
+	RowPolicyClient &RowPolicies() { return row_policies_; }
+
 	CredentialClient &Credentials() {
 		return credentials_;
 	}
@@ -191,6 +194,7 @@ private:
 	//! After the four above: initialized from them.
 	DecideClient decider_;
 	CredentialClient credentials_;
+	RowPolicyClient row_policies_;
 	NonceLedger ledger_;
 	std::mutex lock_;
 	std::unordered_map<std::string, Installed> connections_;

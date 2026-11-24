@@ -92,7 +92,7 @@ final class ProtectedWriteGuard(
     if eff.user.isSuperuser then Allow // superuser
     else if nativeRead && colPolicies.isEmpty && eff.rowPolicies.nonEmpty then
       // Change-feed rows have no base scan to filter. Historical names still need the existing
-      // identity check: native policy coverage is keyed on today’s names too.
+      // identity check: native policy coverage is keyed on today's names too.
       CatalogReachingCalls
         .unfilteredChangeFeed(sql)
         .map(CatalogReachingCalls.denyReason)

@@ -137,6 +137,12 @@ object ManifestImporter extends LazyLogging:
     }
 
     m.roles.foreach { r =>
+      r.rowPolicies.foreach { p =>
+        ai.starlake.quack.edge.rls.RowPredicateValidator.validate(p.predicateSql) match
+          case ai.starlake.quack.edge.rls.RowPredicateValidator.Invalid(reason) =>
+            errs += s"role '${r.name}': invalid row policy on ${p.catalog}.${p.schema}.${p.table}: $reason"
+          case _ => ()
+      }
       if !knownTenants.contains(r.tenant) then
         errs += s"role '${r.name}': tenant '${r.tenant}' not in YAML or DB"
     }

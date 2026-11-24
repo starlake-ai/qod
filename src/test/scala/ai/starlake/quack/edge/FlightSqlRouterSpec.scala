@@ -4108,8 +4108,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       () =>
         out =
           try Right(body)
-          catch case e: Throwable => Left(e),
-      "deep-nesting",
+          catch case e: Throwable => Left(e), "deep-nesting",
       1L << 20
     )
     t.start()

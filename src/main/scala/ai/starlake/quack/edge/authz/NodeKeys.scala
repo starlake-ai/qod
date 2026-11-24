@@ -38,6 +38,8 @@ final class NodeKeys(
     readOnlyCatalogs: ReadOnlyCatalogs,
     rowPoliciesEnabled: Boolean = true
 ):
+  val rowPolicyBundles = new RowPolicyBundles()
+
   require(secret.nonEmpty, "the node-key secret is empty")
 
   /** The nonces of every handle minted for a statement, by the statement's [[DecideContext]]
@@ -71,21 +73,25 @@ final class NodeKeys(
     * endpoint recorded for its statement (decision 25).
     */
   def mint(node: RunningNode, principal: NodePrincipal): MintedHandle =
-    val ctx = NodeHandles.contextDigest(principal.context)
-    val m   = NodeHandles.mint(
+    val ctx           = NodeHandles.contextDigest(principal.context)
+    val policyVersion = versions.current(node.poolKey.tenant)
+    val bundle        =
+      if rowPoliciesEnabled then rowPolicyBundles.of(principal, ctx, policyVersion) else ""
+    val m = NodeHandles.mint(
       secret,
       node.nodeId,
       replica,
       principal,
       NodeHandles.pool(node.poolKey),
-      policyVersion = versions.current(node.poolKey.tenant),
+      policyVersion = policyVersion,
       ctx = ctx,
       creds = if principal.system then "" else creds.digest(principal.id),
       path = paths(node.poolKey),
       readOnly = if principal.system then Set.empty else readOnlyCatalogs.of(node.poolKey),
       nowMs = clock(),
-      rowPolicies = if rowPoliciesEnabled then NodeRowPolicy.of(principal) else Nil
+      rowPolicyBundle = bundle
     )
+    if bundle.nonEmpty then rowPolicyBundles.authorize(m)
     // The statement's own record of its nonces: what its "authorization unavailable" marker is
     // checked against, whatever the bounded registries below still hold.
     principal.context.foreach { c =>

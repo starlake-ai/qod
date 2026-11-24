@@ -20,7 +20,7 @@
         { "when": "before", "boot_refuses_until_done": true, "text": "In fleet mode set QOD_INTERNAL_URL on every manager; on Kubernetes without the chart set QOD_POD_IP. The REST port + 1 must be free, or set QOD_INTERNAL_PORT. Under HA, set QOD_NODE_KEY_SECRET to one value on every replica, or on none." },
         { "when": "before", "boot_refuses_until_done": true, "text": "With the Helm chart, unset env.QOD_INTERNAL_URL, env.QOD_INTERNAL_PORT and env.QOD_POD_IP (helm upgrade fails on them), and size the pod for a 2 GiB heap and 512 MiB of direct memory, or set javaOpts." },
         { "when": "during", "boot_refuses_until_done": false, "text": "Upgrade every HA replica together (scale to one replica or use a Recreate rollout), and upgrade the qod CLI with the manager, on every fleet server too." },
-        { "when": "after", "boot_refuses_until_done": false, "text": "Restart every node (node protocol 7); on Kubernetes pull this release's node image. Read the boot log's WARN and ERROR lines about untrusted initSql, sql federation sources and parked clientSecretRef values." }
+        { "when": "after", "boot_refuses_until_done": false, "text": "Restart every node (node protocol 6); on Kubernetes pull this release's node image. Read the boot log's WARN and ERROR lines about untrusted initSql, sql federation sources and parked clientSecretRef values." }
       ]
     },
     {
@@ -142,7 +142,7 @@
       "rollback_blocked_by": [],
       "notes": "https://github.com/starlake-ai/quack-on-demand/blob/v0.14.3/CHANGELOG.md",
       "steps": [
-        { "when": "after", "boot_refuses_until_done": false, "text": "Restart every node so it runs DuckDB 2.0.1: a node an earlier release started keeps running DuckDB 2.0.0 until it restarts. On Kubernetes that means the new node image; fleet servers need this release's qod fleet join." }
+        { "when": "after", "boot_refuses_until_done": false, "text": "Restart every node on protocol 9 / handle version 7 so it runs DuckDB 2.0.1 and verifies policy snapshots: a node an earlier release started keeps running DuckDB 2.0.0 until it restarts. On Kubernetes that means the new node image; fleet servers need this release's qod fleet join." }
       ]
     }
   ]

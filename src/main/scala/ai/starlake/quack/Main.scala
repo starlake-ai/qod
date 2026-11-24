@@ -2341,7 +2341,11 @@ object Main extends IOApp with LazyLogging:
         internalHost,
         internalPort,
         mgrCfg.nodeAuthz.internalMaxConnections,
-        List(credentialsRoute.routes, decideRoute.routes)
+        List(
+          credentialsRoute.routes,
+          decideRoute.routes,
+          new ai.starlake.quack.edge.authz.RowPolicyRoute(nodeKeys).routes
+        )
       )
       // One managed-object-store client for both the boot probe below and the purge
       // worker further down. Constructed unconditionally: the SDK client it wraps is
