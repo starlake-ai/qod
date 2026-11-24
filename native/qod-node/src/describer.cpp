@@ -25,6 +25,7 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/multi_file/multi_file_states.hpp"
+#include "duckdb/common/sql_identifier.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/execution/operator/helper/physical_set.hpp"
 #include "duckdb/function/lambda_functions.hpp"
@@ -1825,7 +1826,7 @@ std::string DuckLakeMetadataPrefix(ClientContext &context, const std::string &ca
 	if (!schema) {
 		return "";
 	}
-	return KeywordHelper::WriteQuoted(metadata, '"') + "." + KeywordHelper::WriteQuoted(Text(*schema), '"');
+	return SQLQuotedIdentifier::ToString(metadata) + "." + SQLQuotedIdentifier::ToString(Text(*schema));
 }
 
 //! `column` folded as DuckDB folds identifiers, ASCII letters only (review 5 R3: SQL lower() folds Unicode
@@ -1851,7 +1852,7 @@ std::vector<DuckLakeTableVersion> DuckLakeTableVersions(ClientContext &context, 
 	auto result = internal.Query(
 	    "SELECT t.table_id, t.begin_snapshot, coalesce(t.end_snapshot, -1), t.table_name FROM " + prefix +
 	    ".ducklake_table t WHERE t.schema_id IN (SELECT schema_id FROM " + prefix + ".ducklake_schema WHERE " +
-	    AsciiFolded("schema_name") + " = " + KeywordHelper::WriteQuoted(StringUtil::Lower(schema), '\'') +
+	    AsciiFolded("schema_name") + " = " + SQLString::ToString(StringUtil::Lower(schema)) +
 	    ") ORDER BY t.table_id, t.begin_snapshot LIMIT " + std::to_string(kMaxDuckLakeHistory + 1));
 	if (result->HasError()) {
 		return versions;
@@ -1885,7 +1886,7 @@ int64_t DuckLakeSnapshotAt(ClientContext &context, const std::string &prefix, co
 		auto found = context.TryGetCurrentSetting(Identifier(setting), value);
 		if (found && !value.IsNull()) {
 			auto set = internal.Query(std::string("SET SESSION ") + setting + " = " +
-			                          KeywordHelper::WriteQuoted(value.ToString(), '\''));
+			                          SQLString::ToString(value.ToString()));
 			if (set->HasError()) {
 				return -1;
 			}
@@ -1893,7 +1894,7 @@ int64_t DuckLakeSnapshotAt(ClientContext &context, const std::string &prefix, co
 	}
 	auto result = internal.Query("SELECT coalesce(max(snapshot_id), -1) FROM " + prefix +
 	                             ".ducklake_snapshot WHERE snapshot_time <= " +
-	                             KeywordHelper::WriteQuoted(ts.ToString(), '\'') + "::TIMESTAMPTZ");
+	                             SQLString::ToString(ts.ToString()) + "::TIMESTAMPTZ");
 	if (result->HasError()) {
 		return -1;
 	}
