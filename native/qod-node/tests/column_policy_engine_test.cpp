@@ -92,7 +92,11 @@ int main() {
 	                  "CREATE SCHEMA other; CREATE TABLE other.docs AS SELECT * FROM docs; "
 	                  "CREATE TABLE generated(id INTEGER, secret VARCHAR, derived VARCHAR "
 	                  "GENERATED ALWAYS AS (upper(secret))); "
-	                  "INSERT INTO generated(id,secret) VALUES(1,'raw-generated')"),
+	                  "INSERT INTO generated(id,secret) VALUES(1,'raw-generated'); "
+	                  "CREATE TABLE \"Clés\"(id INTEGER, secret VARCHAR); "
+	                  "INSERT INTO \"Clés\" VALUES(1,'raw-unicode'); "
+	                  "CREATE TABLE dotted(\"a.b\" VARCHAR, key VARCHAR, current_date VARCHAR); "
+	                  "INSERT INTO dotted VALUES('raw-dot','raw-key','raw-date')"),
 	       "1");
 	Connection user(db);
 	user.context->registered_state->Insert(qod::kQuackSessionKey, make_shared_ptr<Client>());
@@ -133,6 +137,45 @@ int main() {
 	Expect("whole-row value has no raw path",
 	       Run(user, "SELECT d.secret FROM (SELECT docs AS d FROM docs) x ORDER BY d.id"), "raw-alice!,raw-bob!");
 	Expect("list consumer", Run(user, "SELECT list(secret ORDER BY id) FROM docs"), "[raw-alice!, raw-bob!]");
+
+	auto unicode = mask;
+	unicode.table = "Clés";
+	handle.column_policies = {unicode};
+	install();
+	Expect("ASCII identifier case", Run(user, "SELECT SECRET FROM \"CLéS\""), "raw-unicode!");
+	Expect("non-ASCII CTE does not hide source",
+	       Run(user, "WITH \"clÉs\" AS (SELECT 'cte' AS secret) SELECT secret FROM \"Clés\""), "raw-unicode!");
+	Expect("ASCII-equivalent CTE shadows source",
+	       Run(user, "WITH \"CLéS\" AS (SELECT 'cte' AS secret) SELECT secret FROM \"Clés\""), "cte");
+	auto dotted = mask;
+	dotted.table = "dotted";
+	dotted.column = "a.b";
+	dotted.sql = "\"a.b\" || '!'";
+	handle.column_policies = {dotted};
+	install();
+	Expect("dotted source column", Run(user, "SELECT d.\"a.b\" FROM dotted d"), "raw-dot!");
+	Expect("dotted source star", Run(user, "SELECT d.* FROM dotted d"), "raw-dot!,raw-key,raw-date");
+	Expect("dotted column excluded", Run(user, "SELECT * EXCLUDE(\"a.b\") FROM dotted"), "raw-key,raw-date");
+	Expect("caller star replacement", Run(user, "SELECT * REPLACE('caller' AS \"a.b\") FROM dotted"),
+	       "caller,raw-key,raw-date");
+	auto keyword = dotted;
+	keyword.column = "key";
+	keyword.sql = "\"key\" || '!'";
+	handle.column_policies = {keyword};
+	install();
+	Expect("keyword source column", Run(user, "SELECT key FROM dotted"), "raw-key!");
+	keyword.column = "current_date";
+	keyword.sql = "\"current_date\" || '!'";
+	handle.column_policies = {keyword};
+	install();
+	Expect("SQL value name binds source", Run(user, "SELECT current_date FROM dotted"), "raw-date!");
+	handle.column_policies = {mask};
+	install();
+	auto labeled = user.Query("SELECT upper(secret) FROM docs");
+	Expect("result name excludes mask",
+	       labeled->HasError() ? labeled->GetError() : labeled->ColumnName(0).GetIdentifierName(),
+	       setup.Query("SELECT upper(secret) FROM docs")->ColumnName(0).GetIdentifierName());
+
 	auto explanation = Run(user, "EXPLAIN SELECT secret FROM docs");
 	Expect("EXPLAIN hides masks", explanation.find("||") == std::string::npos ? "hidden" : explanation, "hidden");
 

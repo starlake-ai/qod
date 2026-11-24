@@ -571,35 +571,23 @@ class TenantIsolationRulesSpec extends AnyFlatSpec with Matchers:
     f.sup.findTenantDbByCatalogName("acme", "sales") shouldBe None
   }
 
-  it should "cache per tenant, so no tenant is answered from another's read" in {
-    val asked   = ListBuffer.empty[String]
-    val columns = new ai.starlake.quack.edge.cls.CachedColumnCatalog((tenant, _, _, _, _) =>
-      cats.effect.IO {
-        asked += tenant
-        List(s"col_of_$tenant")
-      }
+  it should "keep historical-name checks isolated by tenant and pool" in {
+    val asked   = ListBuffer.empty[(String, Option[ai.starlake.quack.model.PoolKey])]
+    val catalog = new ai.starlake.quack.edge.cls.CachedColumnCatalog(
+      history = (tenant, pool, _, _, _) =>
+        cats.effect.IO {
+          asked += ((tenant, pool))
+          tenant == "a" && pool.exists(_.pool == "p1")
+        },
+      latestSnapshot = (_, _, _) => cats.effect.IO.pure(Some(7L))
     )
-    columns.columnsOf("a", None, "c", "s", "t").unsafeRunSync() shouldBe List("col_of_a")
-    columns.columnsOf("b", None, "c", "s", "t").unsafeRunSync() shouldBe List("col_of_b")
-    columns.columnsOf("a", None, "c", "s", "t").unsafeRunSync() shouldBe List("col_of_a")
-    asked.toList shouldBe List("a", "b")
-  }
-
-  it should "cache per pool, so no pool is answered from another's node" in {
-    import ai.starlake.quack.model.PoolKey
-    val asked   = ListBuffer.empty[Option[PoolKey]]
-    val columns = new ai.starlake.quack.edge.cls.CachedColumnCatalog((_, pool, _, _, _) =>
-      cats.effect.IO {
-        asked += pool
-        List(s"col_of_${pool.fold("none")(_.pool)}")
-      }
-    )
-    val p1 = Some(PoolKey("a", "db", "p1"))
-    val p2 = Some(PoolKey("a", "db", "p2"))
-    columns.columnsOf("a", p1, "c", "s", "t").unsafeRunSync() shouldBe List("col_of_p1")
-    columns.columnsOf("a", p2, "c", "s", "t").unsafeRunSync() shouldBe List("col_of_p2")
-    columns.columnsOf("a", p1, "c", "s", "t").unsafeRunSync() shouldBe List("col_of_p1")
-    asked.toList shouldBe List(p1, p2)
+    val p1 = Some(ai.starlake.quack.model.PoolKey("a", "db", "p1"))
+    val p2 = Some(ai.starlake.quack.model.PoolKey("a", "db", "p2"))
+    catalog.historyStable("a", p1, "c", "s", "t").unsafeRunSync() shouldBe true
+    catalog.historyStable("a", p2, "c", "s", "t").unsafeRunSync() shouldBe false
+    catalog.historyStable("b", p1, "c", "s", "t").unsafeRunSync() shouldBe false
+    catalog.historyStable("a", p1, "c", "s", "t").unsafeRunSync() shouldBe true
+    asked.toList shouldBe List(("a", p1), ("a", p2), ("b", p1))
   }
 
   // ---------- QoD's login goes only to QoD's server ----------

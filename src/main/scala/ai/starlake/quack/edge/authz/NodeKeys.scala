@@ -37,7 +37,7 @@ final class NodeKeys(
     paths: PoolKey => String = _ => "",
     readOnlyCatalogs: ReadOnlyCatalogs,
     rowPoliciesEnabled: Boolean = true,
-    nativeColumnPoliciesEnabled: Boolean = false,
+    columnPoliciesEnabled: Boolean = true,
     policySnapshots: NodePolicySnapshots = new NodePolicySnapshots()
 ):
   val policyBundles = new PolicyBundles()
@@ -88,7 +88,7 @@ final class NodeKeys(
     )
     val version  = versions.current(node.poolKey.tenant)
     val snapshot =
-      policySnapshots.of(principal, ctx, version, rowPoliciesEnabled, nativeColumnPoliciesEnabled)
+      policySnapshots.of(principal, ctx, version, rowPoliciesEnabled, columnPoliciesEnabled)
     val bundle = policyBundles.put(snapshot)
     val m      = NodeHandles.mint(
       secret,

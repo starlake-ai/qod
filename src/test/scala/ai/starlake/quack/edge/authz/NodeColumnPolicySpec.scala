@@ -1,29 +1,12 @@
 package ai.starlake.quack.edge.authz
 
-import ai.starlake.quack.edge.cls.{ColumnCatalog, ColumnPolicyRewriter, SchemaContext}
-import ai.starlake.quack.model.{PoolKey, StatementKind}
+import ai.starlake.quack.model.PoolKey
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.state.{RbacUser, RoleColumnPolicy}
-import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 class NodeColumnPolicySpec extends AnyFlatSpec with Matchers:
-  "CLS enforcement mode" should "select one path and honor the kill switch" in {
-    def config(mode: String, enabled: Boolean) = com.typesafe.config.ConfigFactory.parseString(
-      s"""enforcement = "$mode", enabled = $enabled"""
-    )
-    ai.starlake.quack.edge.cls.ColumnPolicyEnforcement
-      .nativeEnabled(config("node", true)) shouldBe true
-    ai.starlake.quack.edge.cls.ColumnPolicyEnforcement
-      .nativeEnabled(config("gateway", true)) shouldBe false
-    ai.starlake.quack.edge.cls.ColumnPolicyEnforcement
-      .nativeEnabled(config("node", false)) shouldBe false
-    intercept[IllegalArgumentException] {
-      ai.starlake.quack.edge.cls.ColumnPolicyEnforcement.nativeEnabled(config("fallback", true))
-    }
-  }
-
   private val user = RbacUser("u-1", Some("acme"), "alice", "user")
   private val mask = RoleColumnPolicy(
     "m1",
@@ -114,23 +97,7 @@ class NodeColumnPolicySpec extends AnyFlatSpec with Matchers:
     NodeColumnPolicy.valid(NodeColumnPolicy("m", "*", "*", "*", "c", "mask", "")) shouldBe false
   }
 
-  it should "bypass gateway masking in native mode without reading the schema catalog" in {
-    val catalog = new ColumnCatalog:
-      def columnsOf(t: String, p: Option[PoolKey], c: String, s: String, n: String) =
-        cats.effect.IO.raiseError[List[String]](new IllegalStateException("unexpected lookup"))
-    val rewriter = new ColumnPolicyRewriter(catalog, nativeEnforcement = true)
-    val p        = principal(List(mask))
-    rewriter
-      .rewrite(
-        "SELECT secret, id // 2 FROM docs",
-        StatementKind.Select,
-        p.context.get.effective,
-        SchemaContext(Some("memory"), Some("main"), Set("memory"))
-      )
-      .unsafeRunSync() shouldBe ColumnPolicyRewriter.Passthrough
-  }
-
-  it should "transport policies only when native CLS is enabled" in {
+  it should "transport policies by default and honor the CLS kill switch" in {
     val pool = PoolKey("acme", "db", "bi")
     val node = ai.starlake.quack.model.RunningNode(
       "node",
@@ -143,15 +110,15 @@ class NodeColumnPolicySpec extends AnyFlatSpec with Matchers:
       None,
       java.time.Instant.EPOCH
     )
-    def policies(enabled: Boolean) =
-      val keys = new NodeKeys(
-        "secret",
-        "replica",
-        clock = () => 1000L,
-        versions = PolicyVersions.zero,
-        readOnlyCatalogs = ReadOnlyCatalogs.none,
-        nativeColumnPoliciesEnabled = enabled
-      )
+    def keys(enabled: Boolean) = new NodeKeys(
+      "secret",
+      "replica",
+      clock = () => 1000L,
+      versions = PolicyVersions.zero,
+      readOnlyCatalogs = ReadOnlyCatalogs.none,
+      columnPoliciesEnabled = enabled
+    )
+    def policies(keys: NodeKeys) =
       val handle = NodeHandles
         .verify(keys.handle(node, principal(List(mask))), keys.key("node"), "node", 1000L)
         .toOption
@@ -166,6 +133,14 @@ class NodeColumnPolicySpec extends AnyFlatSpec with Matchers:
           .get[List[NodeColumnPolicy]]("policies")
           .toOption
           .get
-    policies(false) shouldBe Nil
-    policies(true).map(_.id) shouldBe List("m1")
+    val defaultKeys = new NodeKeys(
+      "secret",
+      "replica",
+      clock = () => 1000L,
+      versions = PolicyVersions.zero,
+      readOnlyCatalogs = ReadOnlyCatalogs.none
+    )
+    policies(defaultKeys).map(_.id) shouldBe List("m1")
+    policies(keys(false)) shouldBe Nil
+    policies(keys(true)).map(_.id) shouldBe List("m1")
   }

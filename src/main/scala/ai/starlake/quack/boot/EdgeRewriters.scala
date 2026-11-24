@@ -1,27 +1,15 @@
 package ai.starlake.quack.boot
 
-import java.util.Locale
-import ai.starlake.quack.edge.RouterFailure
-import ai.starlake.quack.edge.cls.{
-  CachedColumnCatalog,
-  ColumnCatalog,
-  ColumnPolicyRewriter,
-  PolicyColumnSources,
-  UnresolvedMode
-}
+import ai.starlake.quack.edge.cls.{CachedColumnCatalog, ColumnCatalog}
 import ai.starlake.quack.model.{PoolKey, TenantDb, TenantDbKind}
-import ai.starlake.quack.observability.metrics.StatementInstruments
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
 import ai.starlake.quack.route.{StatementClassifier, StatementClassifierConfig}
 import cats.effect.IO
 import com.typesafe.scalalogging.LazyLogging
-import io.circe.Json
-
-import scala.concurrent.duration.FiniteDuration
 
 /** Statement-pipeline components built from operator config, extracted from Main.bootManager: the
-  * routing classifier, CLS rewriter and protected-write guard.
+  * routing classifier and the shared policy guards.
   */
 object EdgeRewriters extends LazyLogging:
 
@@ -42,78 +30,12 @@ object EdgeRewriters extends LazyLogging:
     )
     new StatementClassifier(classifierCfg)
 
-  /** Column-level security rewriter. Resolves a DuckDB-side catalog name to its
-    * DuckLakeCatalogReader by looking up the tenant-db owning that catalog and reusing the shared
-    * reader cache. Returns Nil for unknown catalogs; the rewriter's unresolvedMode then decides
-    * whether to deny or pass through.
-    */
-  /** SELECT-path column-masking rewriter. Takes a pre-built [[columnCatalog]] so the caller can
-    * share ONE catalog instance (hence one cache) with the write-path [[protectedWriteGuard]],
-    * rather than each building its own.
-    */
-  def columnPolicyRewriter(catalog: ColumnCatalog): ColumnPolicyRewriter =
-    val clsConfig = com.typesafe.config.ConfigFactory.load().getConfig("quack-on-demand.cls")
-    val clsEnabled: Boolean = clsConfig.getBoolean("enabled")
-    if !clsEnabled then
-      logger.info(
-        "column-level security is DISABLED (quack-on-demand.cls.enabled=false). " +
-          "Every statement bypasses the rewriter."
-      )
-    new ColumnPolicyRewriter(
-      catalog = catalog,
-      unresolvedMode = unresolvedTableMode(),
-      enabled = clsEnabled,
-      nativeEnforcement = ai.starlake.quack.edge.cls.ColumnPolicyEnforcement.nativeEnabled()
-    )
-
-  /** `quack-on-demand.cls.unresolvedTable`: what the column policy rewriter does with a table whose
-    * column list cannot be read.
-    */
-  private def unresolvedTableMode(): UnresolvedMode =
-    com.typesafe.config.ConfigFactory
-      .load()
-      .getConfig("quack-on-demand.cls")
-      .getString("unresolvedTable")
-      .toLowerCase(Locale.ROOT) match
-      case "deny" => UnresolvedMode.Deny
-      case "pass" => UnresolvedMode.Pass
-      case other  =>
-        logger.warn(s"unknown quack-on-demand.cls.unresolvedTable='$other', defaulting to pass")
-        UnresolvedMode.Pass
-
-  /** Column catalog shared by the SELECT-path [[columnPolicyRewriter]] and the write-path
-    * [[protectedWriteGuard]]. Both must resolve a table's columns identically so the guard's
-    * Deny-mode oracle and the rewriter agree on which columns a masked SELECT exposes. A DuckLake
-    * catalog of the asking tenant (by name or attach alias) is read from its Postgres metadata; any
-    * other table (a federated source, a `duckdb-file` or `memory` database, a DuckLake view) is
-    * described on a node of the statement's pool by `nodeQuery`, the manager's system caller
-    * ([[ai.starlake.quack.edge.cls.PolicyColumnSources]]). A table neither lists returns Nil so the
-    * caller's unresolvedMode decides deny-vs-pass. `readerOf` is a tenant-db's catalog reader
-    * (`CatalogReaders.get`).
-    */
+  /** Historical-name checks use DuckLake metadata and never probe a node for its schema. */
   def columnCatalog(
       sup: PoolSupervisor,
-      readerOf: (String, String) => DuckLakeCatalogReader,
-      stmtInstruments: StatementInstruments,
-      nodeQuery: (PoolKey, String) => IO[Either[RouterFailure, List[List[Json]]]],
-      nodeTimeout: FiniteDuration
+      readerOf: (String, String) => DuckLakeCatalogReader
   ): ColumnCatalog =
-    val sources = new PolicyColumnSources(
-      // The row the history reads too, so a branch pool's columns are the branch's own (#241).
-      duckLake = (tenant, pool, cat, sch, tab) =>
-        IO.blocking(
-          duckLakeReader(sup, readerOf, tenant, pool, cat).fold(List.empty[String])(
-            _.columnNames(sch, tab)
-          )
-        ),
-      node = nodeQuery,
-      nodeTimeout = nodeTimeout
-    )
     new CachedColumnCatalog(
-      fetch = sources.fetch,
-      instruments = Some(stmtInstruments),
-      // All three from the one row, so a branch pool's answer is kept under the branch's own
-      // snapshot and judged against the branch's own columns.
       history = (tenant, pool, cat, sch, tab) =>
         IO.blocking(
           duckLakeReader(sup, readerOf, tenant, pool, cat).exists(_.nameHistoryStable(sch, tab))
@@ -121,12 +43,6 @@ object EdgeRewriters extends LazyLogging:
       latestSnapshot = (tenant, pool, cat) =>
         IO.blocking(
           duckLakeReader(sup, readerOf, tenant, pool, cat).flatMap(_.maxSnapshotIdBounded())
-        ),
-      snapshotColumns = (tenant, pool, cat, sch, tab, snapshot) =>
-        IO.blocking(
-          duckLakeReader(sup, readerOf, tenant, pool, cat).map(
-            _.columnsAt(sch, tab, snapshot).map(_.name)
-          )
         )
     )
 
@@ -144,8 +60,7 @@ object EdgeRewriters extends LazyLogging:
   /** The DuckLake row whose catalog `cat` names for a statement on `pool`: the pool's own row when
     * it attaches under `cat` (a branch attaches under its parent's alias, so its history is its
     * own), else the tenant's DuckLake row of that name or alias. None for anything else (a
-    * federated or built-in catalog): no history, which the guard reads as unstable, and no columns,
-    * so they are asked of a node of the pool.
+    * federated or built-in catalog): no history, which the guard reads as unstable.
     */
   private def duckLakeRow(
       sup: PoolSupervisor,
@@ -166,11 +81,7 @@ object EdgeRewriters extends LazyLogging:
       }
     own.orElse(sup.findTenantDbByCatalogName(tenant, cat).filter(_.kind == TenantDbKind.DuckLake))
 
-  /** Write-path protected-read guard. Reads the same CLS / RLS enable flags the SELECT-path
-    * rewriters consult, and takes the [[columnCatalog]] (NOT a pre-built rewriter): the guard owns
-    * its own Deny-mode oracle internally, so an unresolvable protected table denies rather than
-    * passing through. Inert when both flags are off.
-    */
+  /** Write and history guard using the same policy enable flags as signed transport. */
   def protectedWriteGuard(
       catalog: ColumnCatalog
   ): ai.starlake.quack.edge.policy.ProtectedWriteGuard =

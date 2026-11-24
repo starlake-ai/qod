@@ -17,7 +17,7 @@ class StatementTextScreenSpec extends AnyFlatSpec with Matchers:
   private val ctx   = SchemaContext(Some("acme_tpch"), Some("tpch1"), attachedCatalogs = Set.empty)
   private val guard =
     new ProtectedWriteGuard(
-      new ColumnCatalog.MapCatalog(Map.empty),
+      new ColumnCatalog.MapCatalog(),
       clsEnabled = true,
       rlsEnabled = true
     )
@@ -43,8 +43,8 @@ class StatementTextScreenSpec extends AnyFlatSpec with Matchers:
   )
 
   for sql <- statements do
-    s"$sql" should "be refused to a row-policy holder" in {
-      check(sql, List(rowPolicy), Nil) shouldBe a[Deny]
+    s"$sql" should "reach native enforcement for a row-policy holder" in {
+      check(sql, List(rowPolicy), Nil) shouldBe Allow
     }
 
     it should "be refused to a column-policy holder" in {

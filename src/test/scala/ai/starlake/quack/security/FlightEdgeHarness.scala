@@ -4,7 +4,6 @@ package ai.starlake.quack.security
 import ai.starlake.quack.edge._
 import ai.starlake.quack.edge.adapter._
 import ai.starlake.quack.edge.auth.AuthenticationService
-import ai.starlake.quack.edge.cls.{ColumnCatalog, ColumnPolicyRewriter}
 import ai.starlake.quack.edge.policy.ProtectedWriteGuard
 import ai.starlake.quack.model.PoolKey
 import ai.starlake.quack.observability.metrics.StatementInstruments
@@ -43,7 +42,8 @@ object FlightEdgeHarness:
   // ------------------------------------------------------------------
   private def stubAdapter(
       tracker: NodeLoadTracker,
-      nodeQuery: String => QuackResponse
+      nodeQuery: String => QuackResponse,
+      onAuthorize: String => Unit
   ): QuackHttpAdapter =
     val client = new QuackHttpClient(
       // Use the test-shared allocator (never closed) so we don't fight
@@ -57,7 +57,7 @@ object FlightEdgeHarness:
           session: Option[String],
           authorize: () => String
       ): IO[QuackResponse] =
-        IO(nodeQuery(sql))
+        IO { onAuthorize(authorize()); nodeQuery(sql) }
     new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
 
   // ------------------------------------------------------------------
@@ -118,9 +118,7 @@ object FlightEdgeHarness:
   final case class RouterWiring(
       opa: Option[OpaPoolAccess] = None,
       nodeQuery: String => QuackResponse = _ => TestArrow.okResponse(),
-      columnPolicyRewriter: ColumnPolicyRewriter = new ColumnPolicyRewriter(
-        new ColumnCatalog.MapCatalog(Map.empty)
-      ),
+      onAuthorize: String => Unit = _ => (),
       journal: EventJournal = EventJournal.noop,
       spawnNodes: Boolean = false,
       /** Required, like the router's: a default would let a spec forget it and narrow nothing. */
@@ -190,7 +188,7 @@ object FlightEdgeHarness:
     wiring.opa.foreach(sup.wireOpa)
     if wiring.spawnNodes then sup.reconcile().unsafeRunSync()
 
-    val adapter  = stubAdapter(tracker, wiring.nodeQuery)
+    val adapter  = stubAdapter(tracker, wiring.nodeQuery, wiring.onAuthorize)
     val sessions = new SessionRegistry
     val history  = new StatementHistoryStore()
     val si       = StatementInstruments.noop
@@ -202,7 +200,6 @@ object FlightEdgeHarness:
       adapter = adapter,
       history = history,
       stmtInstruments = si,
-      columnPolicyRewriter = wiring.columnPolicyRewriter,
       journal = wiring.journal,
       protectedWriteGuard = wiring.protectedWriteGuard,
       metadataFilterRewriter = wiring.metadataFilterRewriter

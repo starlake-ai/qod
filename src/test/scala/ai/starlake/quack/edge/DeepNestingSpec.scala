@@ -2,7 +2,7 @@ package ai.starlake.quack.edge
 
 import ai.starlake.acl.model.Config
 import ai.starlake.acl.parser.{SqlParser, StatementResult}
-import ai.starlake.quack.edge.cls.{ColumnCatalog, ColumnPolicyRewriter, SchemaContext}
+import ai.starlake.quack.edge.cls.{ColumnCatalog, SchemaContext}
 import ai.starlake.quack.edge.meta.{MetadataFilterOutcome, MetadataFilterRewriter}
 import ai.starlake.quack.edge.policy.{GuardOutcome, ProtectedWriteGuard, RewriteScope}
 import ai.starlake.quack.model.StatementKind
@@ -18,8 +18,8 @@ import org.scalatest.matchers.should.Matchers
   * to cats-effect: under `IOApp` one statement halted the whole manager.
   *
   * Each step runs on a thread with a 1 MiB stack, the JVM default of a production worker thread, so
-  * the depth that overflows does not depend on the test runner's own thread. JSqlParser parses on
-  * a thread of its own (`CCJSqlParserUtil.parseStatements` submits to an executor), with the JVM's
+  * the depth that overflows does not depend on the test runner's own thread. JSqlParser parses on a
+  * thread of its own (`CCJSqlParserUtil.parseStatements` submits to an executor), with the JVM's
   * default stack, and only the walks over the result run on that 1 MiB stack.
   *
   * Every shape is nested far past what either stack holds, whatever the JIT has compiled: compiled
@@ -32,14 +32,11 @@ class DeepNestingSpec extends AnyFunSuite with Matchers:
   /** `body` on a 1 MiB stack; a throwable escaping it is returned, not rethrown. */
   private def onWorkerStack[A](body: => A): Either[Throwable, A] =
     var out: Either[Throwable, A] = Left(new IllegalStateException("not run"))
-    val t                         = new Thread(
-      null,
-      () =>
-        out =
-          try Right(body)
-          catch case e: Throwable => Left(e), "deep-nesting",
-      1L << 20
-    )
+    val task: Runnable            = () =>
+      out =
+        try Right(body)
+        catch case e: Throwable => Left(e)
+    val t = new Thread(null, task, "deep-nesting", 1L << 20)
     t.start()
     t.join()
     out
@@ -67,9 +64,7 @@ class DeepNestingSpec extends AnyFunSuite with Matchers:
       defaultSchema = Some("tpch1"),
       attachedCatalogs = Set.empty
     )
-  private val cat = new ColumnCatalog.MapCatalog(
-    Map(("acme_tpch", "tpch1", "customer") -> List("c_id", "c_email", "c_region"))
-  )
+  private val cat = new ColumnCatalog.MapCatalog()
   private val acl = Config.forDuckDB("db", "main")
 
   shapes.foreach { (name, sql) =>
@@ -101,16 +96,6 @@ class DeepNestingSpec extends AnyFunSuite with Matchers:
           .check(insertChain, StatementKind.Dml, eff, ctx)
       )
     ) shouldBe a[GuardOutcome.Deny]
-  }
-
-  test("ColumnPolicyRewriter denies a too-deep read for a column-policy holder") {
-    val outcome = value(
-      onWorkerStack(
-        new ColumnPolicyRewriter(cat).rewrite(chain, StatementKind.Select, eff, ctx).unsafeRunSync()
-      )
-    )
-    outcome should not be ColumnPolicyRewriter.Passthrough
-    outcome should not be a[ColumnPolicyRewriter.Rewritten]
   }
 
   test("MetadataFilterRewriter denies a too-deep read") {
