@@ -1,26 +1,27 @@
 #include "row_policies.hpp"
 
-#include "function_classes.hpp"
 #include "duckdb/catalog/catalog_entry.hpp"
+#include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/type_catalog_entry.hpp"
-#include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
 #include "duckdb/common/string_util.hpp"
-#include "duckdb/parser/parser.hpp"
+#include "duckdb/main/client_config.hpp"
+#include "duckdb/main/config.hpp"
+#include "duckdb/main/settings.hpp"
+#include "duckdb/parser/expression/cast_expression.hpp"
 #include "duckdb/parser/expression/columnref_expression.hpp"
 #include "duckdb/parser/expression/conjunction_expression.hpp"
-#include "duckdb/parser/expression/cast_expression.hpp"
 #include "duckdb/parser/expression/operator_expression.hpp"
 #include "duckdb/parser/parsed_expression_iterator.hpp"
+#include "duckdb/parser/parser.hpp"
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression_binder/where_binder.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
-#include "duckdb/main/client_config.hpp"
-#include "duckdb/main/config.hpp"
-#include "duckdb/main/settings.hpp"
+#include "function_classes.hpp"
 
 namespace qod {
 using namespace duckdb;
@@ -87,77 +88,97 @@ void PrepareExpression(ParsedExpression &expr, TableCatalogEntry &table) {
 	});
 }
 
-unique_ptr<Expression> BindPredicate(ClientContext &context, LogicalGet &get,
-                                     const std::vector<RowPolicy> &policies) {
+unique_ptr<Expression> BindPredicate(ClientContext &context, LogicalGet &get, const std::vector<RowPolicy> &policies,
+									 const RowPolicyObserver &failure) {
+	const RowPolicy *current = &policies.front();
 	try {
 		if (!Settings::Get<DefaultCollationSetting>(context).empty()) {
 			throw PermissionException(kBindingFailure);
 		}
-		for (auto name : {"default_collation", "integer_division", "ieee_floating_point_ops", "lambda_syntax"}) {
-			auto option = DBConfig::GetOptionByName(Identifier(name));
-			if (option && option->setting_idx.IsValid() &&
-			    ClientConfig::GetConfig(context).user_settings.IsSet(option->setting_idx.GetIndex())) {
+		// Match secure-view safety: unclassified session overrides fail closed, including
+		// extension settings such as TimeZone and Calendar. A short denylist drifts.
+		auto &settings = ClientConfig::GetConfig(context).user_settings;
+		auto changed = [&](idx_t index, const std::string &name) {
+			return settings.IsSet(index) && name != "schema" && name != "search_path";
+		};
+		for (idx_t i = 0; i < DBConfig::GetOptionCount(); ++i) {
+			auto option = DBConfig::GetOptionByIndex(i);
+			if (option && option->setting_idx.IsValid() && changed(option->setting_idx.GetIndex(), option->name)) {
 				throw PermissionException(kBindingFailure);
 			}
+		}
+		for (auto &entry : DBConfig::GetConfig(context).GetExtensionSettings()) {
+			if (entry.second.setting_index.IsValid() &&
+				changed(entry.second.setting_index.GetIndex(), entry.first.GetIdentifierName())) {
+				throw PermissionException(kBindingFailure);
+			}
+		}
+		if (!get.projection_ids.empty()) {
+			throw PermissionException(kBindingFailure);
 		}
 		auto parser = Parser::GetBuiltinParser();
-		vector<unique_ptr<ParsedExpression>> each;
+		vector<unique_ptr<Expression>> bound;
 		for (auto &p : policies) {
+			current = &p;
+			// Manager-side validation/expansion failures retain their scope as this sentinel.
+			// Refuse explicitly rather than relying on a parser error in a future DuckDB version.
+			if (p.sql == "SELECT")
+				throw PermissionException(kBindingFailure);
 			auto one = parser.ParseSingleExpression(p.sql);
 			PrepareExpression(*one, *get.GetTable());
-			each.push_back(make_uniq<OperatorExpression>(ExpressionType::OPERATOR_TRY,
-			    make_uniq<CastExpression>(LogicalType::BOOLEAN, std::move(one))));
+			unique_ptr<ParsedExpression> parsed = make_uniq<OperatorExpression>(
+				ExpressionType::OPERATOR_TRY, make_uniq<CastExpression>(LogicalType::BOOLEAN, std::move(one)));
+			auto binder = Binder::CreateBinder(context);
+			binder->bind_context.AddGenericBinding(get.table_index, get.GetTable()->name, get.names,
+												   get.returned_types);
+			binder->SetCatalogLookupCallback([](CatalogEntry &entry) {
+				if (entry.type == CatalogType::TYPE_ENTRY && entry.Cast<TypeCatalogEntry>().internal) {
+					return;
+				}
+				auto name = StringUtil::Lower(entry.name.GetIdentifierName());
+				if (entry.ParentCatalog().GetName() != Identifier("system")) {
+					throw PermissionException(kBindingFailure);
+				}
+				if (entry.type == CatalogType::SCALAR_FUNCTION_ENTRY || entry.type == CatalogType::MACRO_ENTRY) {
+					auto cls = FunctionClassOf(name, entry.type == CatalogType::MACRO_ENTRY ? "macro" : "scalar");
+					if (!cls || *cls != FunctionClass::Allowed || name == "getvariable" || name == "current_setting") {
+						throw PermissionException(kBindingFailure);
+					}
+				} else if (entry.type != CatalogType::TYPE_ENTRY && entry.type != CatalogType::COLLATION_ENTRY) {
+					throw PermissionException(kBindingFailure);
+				}
+			});
+			WhereBinder expression_binder(*binder, context);
+			auto result = expression_binder.Bind(parsed);
+			std::function<void(Expression &)> remap = [&](Expression &expr) {
+				if (expr.GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
+					auto &column = expr.Cast<BoundColumnRefExpression>();
+					if (column.Depth() != 0 || column.Binding().table_index != get.table_index) {
+						throw PermissionException(kBindingFailure);
+					}
+					column.BindingMutable().column_index = get.AddColumnId(column.Binding().column_index.GetIndex());
+				}
+				ExpressionIterator::EnumerateChildren(expr, [&](Expression &child) { remap(child); });
+			};
+			remap(*result);
+			bound.push_back(std::move(result));
 		}
-		// Errors in a policy must not quote a hidden value. Failed conversions become NULL and
-		// therefore reject that row. Volatile functions in TRY are rejected by DuckDB's binder.
-		unique_ptr<ParsedExpression> parsed = each.size() == 1 ? std::move(each[0]) :
-		    make_uniq<ConjunctionExpression>(ExpressionType::CONJUNCTION_OR, std::move(each));
-		auto binder = Binder::CreateBinder(context);
-		binder->bind_context.AddGenericBinding(get.table_index, get.GetTable()->name, get.names,
-		                                       get.returned_types);
-		binder->SetCatalogLookupCallback([](CatalogEntry &entry) {
-			if (entry.type == CatalogType::TYPE_ENTRY && entry.Cast<TypeCatalogEntry>().internal) {
-				return;
-			}
-			auto name = StringUtil::Lower(entry.name.GetIdentifierName());
-			if (entry.ParentCatalog().GetName() != Identifier("system")) {
-				throw PermissionException(kBindingFailure);
-			}
-			if (entry.type == CatalogType::SCALAR_FUNCTION_ENTRY || entry.type == CatalogType::MACRO_ENTRY) {
-				auto cls = FunctionClassOf(name, entry.type == CatalogType::MACRO_ENTRY ? "macro" : "scalar");
-				if (!cls || *cls != FunctionClass::Allowed || name == "getvariable" || name == "current_setting") {
-					throw PermissionException(kBindingFailure);
-				}
-			} else if (entry.type != CatalogType::TYPE_ENTRY && entry.type != CatalogType::COLLATION_ENTRY) {
-				throw PermissionException(kBindingFailure);
-			}
-		});
-		WhereBinder expression_binder(*binder, context);
-		auto result = expression_binder.Bind(parsed);
-		std::function<void(Expression &)> remap = [&](Expression &expr) {
-			if (expr.GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
-				auto &column = expr.Cast<BoundColumnRefExpression>();
-				if (column.Depth() != 0 || column.Binding().table_index != get.table_index) {
-					throw PermissionException(kBindingFailure);
-				}
-				column.BindingMutable().column_index = get.AddColumnId(column.Binding().column_index.GetIndex());
-			}
-			ExpressionIterator::EnumerateChildren(expr, [&](Expression &child) { remap(child); });
-		};
-		remap(*result);
-		return result;
+		return BoundConjunctionExpression::Create(ExpressionType::CONJUNCTION_OR, std::move(bound));
 	} catch (std::exception &) {
+		if (failure)
+			failure(*current, "binding_failed");
 		// Never return a binder excerpt, policy text, column value or identity literal.
 		throw PermissionException(kBindingFailure);
 	}
 }
 
-void Apply(ClientContext &context, unique_ptr<LogicalOperator> &op, const std::vector<RowPolicy> &policies) {
+void Apply(ClientContext &context, unique_ptr<LogicalOperator> &op, const std::vector<RowPolicy> &policies,
+		   const RowPolicyObserver &failure) {
 	if (dynamic_cast<RowPolicyBoundary *>(op.get())) {
 		return;
 	}
 	for (auto &child : op->children) {
-		Apply(context, child, policies);
+		Apply(context, child, policies, failure);
 	}
 	if (op->type != LogicalOperatorType::LOGICAL_GET) {
 		return;
@@ -167,7 +188,7 @@ void Apply(ClientContext &context, unique_ptr<LogicalOperator> &op, const std::v
 	if (matched.empty()) {
 		return;
 	}
-	auto filter = make_uniq<LogicalFilter>(BindPredicate(context, get, matched));
+	auto filter = make_uniq<LogicalFilter>(BindPredicate(context, get, matched, failure));
 	filter->children.push_back(std::move(op));
 	op = make_uniq<RowPolicyBoundary>(std::move(filter), std::move(matched));
 }
@@ -179,9 +200,14 @@ void Verify(LogicalOperator &op, const std::vector<RowPolicy> &policies) {
 		}
 		auto &filter = *boundary->children[0];
 		if (filter.children.size() != 1 || filter.children[0].get() != boundary->scan ||
-		    filter.children[0]->type != LogicalOperatorType::LOGICAL_GET ||
-		    Matching(filter.children[0]->Cast<LogicalGet>(), policies) != boundary->policies ||
-		    filter.expressions.size() != boundary->predicates.size()) {
+			filter.children[0]->type != LogicalOperatorType::LOGICAL_GET ||
+			Matching(filter.children[0]->Cast<LogicalGet>(), policies) != boundary->policies ||
+			filter.expressions.size() != boundary->predicates.size() ||
+			filter.children[0]->Cast<LogicalGet>().GetColumnIds() != boundary->column_ids ||
+			filter.children[0]->Cast<LogicalGet>().projection_ids != boundary->projection_ids ||
+			filter.children[0]->Cast<LogicalGet>().table_index != boundary->table_index ||
+			filter.children[0]->Cast<LogicalGet>().names != boundary->names ||
+			filter.children[0]->Cast<LogicalGet>().returned_types != boundary->types) {
 			throw PermissionException(kPlacementFailure);
 		}
 		for (idx_t i = 0; i < filter.expressions.size(); ++i) {
@@ -204,15 +230,21 @@ RowPolicyBoundary::RowPolicyBoundary(unique_ptr<LogicalOperator> child, std::vec
     : LogicalSecureView("QoD row policy", std::move(child)), policies(std::move(policies_p)) {
 	auto &filter = *children[0];
 	scan = filter.children[0].get();
+	auto &get = filter.children[0]->Cast<LogicalGet>();
+	column_ids = get.GetColumnIds();
+	projection_ids = get.projection_ids;
+	table_index = get.table_index;
+	names = get.names;
+	types = get.returned_types;
 	for (auto &expr : filter.expressions) {
 		predicates.push_back(expr->Copy());
 	}
 }
 
-void ApplyRowPolicies(ClientContext &context, unique_ptr<LogicalOperator> &plan,
-                      const std::vector<RowPolicy> &policies) {
+void ApplyRowPolicies(ClientContext &context, unique_ptr<LogicalOperator> &plan, const std::vector<RowPolicy> &policies,
+					  RowPolicyObserver failure) {
 	if (!policies.empty()) {
-		Apply(context, plan, policies);
+		Apply(context, plan, policies, failure);
 		Verify(*plan, policies);
 	}
 }

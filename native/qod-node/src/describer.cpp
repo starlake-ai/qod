@@ -824,10 +824,19 @@ private:
 		                          "." + Text(entry.name) + ", which is not DuckDB's own");
 	}
 
-	//! A classified name of the statement's own text that resolves to an entry that is not DuckDB's own
-	//! (a macro shadowing a built-in) is refused.
+	//! Change rows have no ordinary base scan on which a row-policy filter can be installed.
+	void RefuseUnfilteredChangeFeed(const std::string &name) {
+		if (row_policies_ && !row_policies_->empty() &&
+			(name == "ducklake_table_changes" || name == "ducklake_table_insertions" ||
+			 name == "ducklake_table_deletions")) {
+			Unsupported("a DuckLake change feed with row policies; no filterable base-table scan");
+		}
+	}
+
+	//! A classified name resolving to an entry that is not DuckDB's own is refused.
 	void Resolution(const QualifiedName &name, CatalogType type, CatalogEntryRetriever &retriever) {
 		auto lower = StringUtil::Lower(Text(name.Name()));
+		RefuseUnfilteredChangeFeed(lower);
 		if (!IsClassifiedFunction(lower)) {
 			return;
 		}
@@ -853,6 +862,7 @@ private:
 	//! classification, and outside a secure view's boundary its class.
 	void Call(const QualifiedName &name, CatalogType type, CatalogEntryRetriever &retriever, Rules rules) {
 		auto lower = StringUtil::Lower(Text(name.Name()));
+		RefuseUnfilteredChangeFeed(lower);
 		auto entry = Resolved(name, type, retriever);
 		if (rules.secure && lower == "current_setting") {
 			// The plan rule (Walker::AddFunction), for a call DuckDB folded away (reviews m-R7, m-R9).
@@ -2239,6 +2249,13 @@ void Walker::Create(LogicalCreate &create, const std::string &via) {
 void Walker::CreateTable(LogicalCreateTable &create, const std::string &via) {
 	auto &base = create.info->Base();
 	InSchema("table", "create", create.schema, Text(base.GetTableName()), {}, via);
+	if (base.on_conflict == OnCreateConflict::REPLACE_ON_CONFLICT) {
+		auto existing = Catalog::GetEntry<TableCatalogEntry>(
+			context_, QualifiedName(create.schema.ParentCatalog().GetName(), create.schema.name, base.GetTableName()),
+			OnEntryNotFound::RETURN_NULL);
+		if (existing)
+			InSchema("table", "drop", create.schema, Text(base.GetTableName()), {}, via);
+	}
 	// DuckDB records a foreign key on the table it references (same schema, BindCreateTableConstraints).
 	for (auto &constraint : base.constraints) {
 		if (constraint->type != ConstraintType::FOREIGN_KEY) {

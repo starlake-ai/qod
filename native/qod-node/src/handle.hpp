@@ -58,6 +58,7 @@ struct Handle {
 	//! ATTACH and DETACH into one is refused, the system's included. Required since node protocol 5.
 	std::vector<std::string> read_only;
 	std::vector<RowPolicy> row_policies;
+	std::string row_policy_bundle;
 	std::string nonce;
 	//! Epoch milliseconds.
 	int64_t exp = 0;
@@ -73,7 +74,7 @@ struct Handle {
 //! serve.
 //! Version 4 is protocol 6's: its nodes have no native row-policy enforcement. Version 5 requires
 //! rowPolicies even when empty, and keeps an older node from silently serving native-RLS traffic.
-constexpr int64_t kHandleVersion = 5;
+constexpr int64_t kHandleVersion = 7;
 
 //! How far ahead of this node's clock a handle may expire: the manager mints them for 60 s, and the
 //! rest tolerates a manager clock up to 4 minutes ahead of the node's. That is the one direction it

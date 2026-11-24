@@ -657,7 +657,13 @@ class RowPolicyRewriter(
         )
       val expr: Expression =
         try
-          val each = matched.map(p => substitute(p.predicateSql, values))
+          val each = matched.map { p =>
+            require(
+              RowPolicyIdentity.safeTokenLocations(p.predicateSql),
+              "unsafe identity token location"
+            )
+            substitute(p.predicateSql, values)
+          }
           // Each predicate must read whole on its own: one stored before the validator required
           // it could hold text the checks never saw, a closing parenthesis that joins the next
           // policy's predicate once they are put together included.

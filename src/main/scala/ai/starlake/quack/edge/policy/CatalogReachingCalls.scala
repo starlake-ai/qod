@@ -196,6 +196,24 @@ object CatalogReachingCalls:
     */
   private val NestingTooDeep = "\u0000nesting-too-deep"
 
+  /** Change feeds have no base-table scan on which native row filters can run. */
+  def unfilteredChangeFeed(sql: String): Option[String] =
+    val scan = FunctionCalls.scan(sql)
+    if scan.truncated then Some(NestingTooDeep)
+    else
+      scan.calls
+        .map(_.name)
+        .find(
+          Set(
+            "ducklake_table_changes",
+            "ducklake_table_insertions",
+            "ducklake_table_deletions",
+            "table_changes",
+            "table_insertions",
+            "table_deletions"
+          )
+        )
+
   /** The first catalog-reaching or node-escaping function called by `sql`, lowercased, or the
     * nesting sentinel when a literal nested past
     * [[ai.starlake.quack.edge.sql.FunctionCalls.MaxDepth]] left part of the statement unscanned

@@ -26,7 +26,8 @@ final case class VerifiedHandle(
     ctx: String,
     creds: String,
     readOnly: List[String],
-    rowPolicies: List[NodeRowPolicy] = Nil
+    rowPolicies: List[NodeRowPolicy] = Nil,
+    rowPolicyBundle: String = ""
 )
 
 /** Session handles: who a statement on a node runs for, vouched for by the manager (design:
@@ -37,8 +38,8 @@ final case class VerifiedHandle(
   * `<base64url(payload)>.<hex HMAC-SHA256(node key, payload bytes)>`, the payload a JSON object
   * (`v`, `node`, `replica`, `principal`, `pool`, `policyVersion`, `ctx`, `creds`, `path`,
   * `readOnly`, `rowPolicies`, `nonce`, `exp`): the MAC covers the bytes as sent, so the two sides
-  * never have to agree on a canonical form. native/qod-node/src/handle.cpp reads it; a nonce makes it single-use
-  * and `exp` bounds it to [[LifetimeMs]].
+  * never have to agree on a canonical form. native/qod-node/src/handle.cpp reads it; a nonce makes
+  * it single-use and `exp` bounds it to [[LifetimeMs]].
   *
   * Each node has its own key, derived from the manager's node-key secret and the node id
   * ([[nodeKey]]), so a handle minted for one node never verifies on another. The key reaches the
@@ -55,10 +56,12 @@ object NodeHandles:
     * `readOnly`, so a superuser could write into a read-only catalog there), version 3 is protocol
     * 5's (a DuckLake read at an earlier snapshot described under the name it had then, so another
     * table's grant could cover it: review M1). Version 4 is protocol 6's, without native RLS.
-    * Writing 5 keeps such a node unhealthy and never routed to on every backend (Kubernetes pods
-    * and fleet servers are not checked by [[ai.starlake.quack.ondemand.runtime.QodNodeBinary]]).
+    * Version 5 is protocol 7's inline RLS payload. Version 6 is the separately stacked CLS payload.
+    * Version 7 requires signed policy snapshots; writing 7 keeps older nodes unhealthy and never
+    * routed to on every backend (Kubernetes pods and fleet servers are not checked by
+    * [[ai.starlake.quack.ondemand.runtime.QodNodeBinary]]).
     */
-  val Version: Int = 5
+  val Version: Int = 7
 
   /** Part of what a node answers a statement that carries no current principal (qod-node's
     * kNoPrincipal): the health probe's canary expects it.
@@ -150,7 +153,8 @@ object NodeHandles:
       readOnly: Set[String],
       nowMs: Long,
       nonce: String = newNonce(),
-      rowPolicies: List[NodeRowPolicy] = Nil
+      rowPolicies: List[NodeRowPolicy] = Nil,
+      rowPolicyBundle: String = ""
   ): MintedHandle =
     require(principal.id.nonEmpty, "no principal is bound to this statement")
     require(policyVersion >= 0L, "a policy version is never negative")
@@ -166,6 +170,12 @@ object NodeHandles:
       rowPolicies.size <= 256 && rowPolicies.forall(NodeRowPolicy.valid),
       "invalid node row policies"
     )
+    require(
+      rowPolicyBundle.isEmpty || (ContextDigestPattern.matches(
+        rowPolicyBundle
+      ) && rowPolicies.isEmpty),
+      "invalid row policy bundle"
+    )
     val payload = Json
       .obj(
         "v"         -> Json.fromInt(Version),
@@ -178,12 +188,13 @@ object NodeHandles:
           "superuser" -> Json.fromBoolean(principal.superuser),
           "system"    -> Json.fromBoolean(principal.system)
         ),
-        "pool"          -> Json.fromString(pool),
-        "policyVersion" -> Json.fromLong(policyVersion),
-        "ctx"           -> Json.fromString(ctx),
-        "creds"         -> Json.fromString(creds),
-        "path"          -> Json.fromString(path),
-        "readOnly"      -> Json.arr(readOnly.toList.sorted.map(Json.fromString)*),
+        "pool"            -> Json.fromString(pool),
+        "policyVersion"   -> Json.fromLong(policyVersion),
+        "ctx"             -> Json.fromString(ctx),
+        "creds"           -> Json.fromString(creds),
+        "path"            -> Json.fromString(path),
+        "readOnly"        -> Json.arr(readOnly.toList.sorted.map(Json.fromString)*),
+        "rowPolicyBundle" -> Json.fromString(rowPolicyBundle),
         "rowPolicies" -> Json.arr(rowPolicies.map(summon[io.circe.Encoder[NodeRowPolicy]].apply)*),
         "nonce"       -> Json.fromString(nonce),
         "exp"         -> Json.fromLong(exp)
@@ -300,8 +311,14 @@ object NodeHandles:
               _        <- Either.cond(CredsPattern.matches(creds), (), "malformed handle payload")
               readOnly <- field[List[String]](c, "readOnly")
               _        <- Either.cond(wellFormedReadOnly(readOnly), (), "malformed handle payload")
+              bundle   <- field[String](c, "rowPolicyBundle")
               rows     <- field[List[NodeRowPolicy]](c, "rowPolicies")
               _        <- Either.cond(
+                bundle.isEmpty || (ContextDigestPattern.matches(bundle) && rows.isEmpty),
+                (),
+                "malformed handle payload"
+              )
+              _ <- Either.cond(
                 rows.size <= 256 && rows.forall(NodeRowPolicy.valid),
                 (),
                 "malformed handle payload"
@@ -323,7 +340,8 @@ object NodeHandles:
               ctx,
               creds,
               readOnly,
-              rows
+              rows,
+              bundle
             )
         }
 

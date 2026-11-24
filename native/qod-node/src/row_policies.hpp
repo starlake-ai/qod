@@ -1,8 +1,10 @@
 #pragma once
 
 #include "duckdb.hpp"
+#include "duckdb/common/column_index.hpp"
 #include "duckdb/planner/operator/logical_secure_view.hpp"
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -32,12 +34,18 @@ public:
 	std::vector<RowPolicy> policies;
 	std::vector<duckdb::unique_ptr<duckdb::Expression>> predicates;
 	const duckdb::LogicalOperator *scan;
+	duckdb::vector<duckdb::ColumnIndex> column_ids;
+	duckdb::vector<duckdb::ProjectionIndex> projection_ids;
+	duckdb::TableIndex table_index;
+	duckdb::vector<duckdb::Identifier> names;
+	duckdb::vector<duckdb::LogicalType> types;
 };
 
 //! Applies every matching predicate (permissive OR) to every bound base-table scan. Unsupported
 //! protected writes and binding failures refuse; policies never fall back to an unfiltered scan.
+using RowPolicyObserver = std::function<void(const RowPolicy &, const std::string &)>;
 void ApplyRowPolicies(duckdb::ClientContext &context, duckdb::unique_ptr<duckdb::LogicalOperator> &plan,
-                      const std::vector<RowPolicy> &policies);
+					  const std::vector<RowPolicy> &policies, RowPolicyObserver failure = nullptr);
 
 //! Rechecks placement after other post-bind extensions, before optimization. Rejects an unguarded
 //! protected scan, a changed filter or a boundary from another policy set.

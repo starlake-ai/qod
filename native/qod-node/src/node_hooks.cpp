@@ -4,10 +4,11 @@
 #include "credentials.hpp"
 #include "crypto.hpp"
 #include "describer.hpp"
-#include "locations.hpp"
-#include "screen_rules.hpp"
-#include "row_policies.hpp"
 #include "json.hpp"
+#include "json_writer.hpp"
+#include "locations.hpp"
+#include "row_policies.hpp"
+#include "screen_rules.hpp"
 
 #include "duckdb/catalog/catalog_entry_retriever.hpp"
 #include "duckdb/catalog/catalog_transaction.hpp"
@@ -408,6 +409,12 @@ unique_ptr<FunctionData> SessionBind(ClientContext &context, TableFunctionBindIn
 		throw PermissionException(kHandleRefused + std::string(error.what()));
 	}
 	auto session = context.registered_state->GetOrCreate<SessionState>(SessionState::kKey);
+	try {
+		handle.row_policies = authz.RowPolicies().Fetch(handle, text);
+	} catch (std::exception &) {
+		throw PermissionException("QoD: row policy snapshot unavailable; retry" +
+								  UnavailableMarker(authz.NodeKey(), handle.nonce));
+	}
 	session->Install(authz, handle, text);
 	// Decision 16: no replacement scan for a user session, whatever the spelling (FROM 'x.parquet',
 	// FROM "s3://b/x"); such a user reads a file through a reader function, which the parse screen
@@ -735,11 +742,33 @@ void Enforce(ClientContext &context, Gate &gate, LogicalOperator &plan) {
 		return;
 	}
 	auto privileged = installed.principal.superuser || installed.principal.system;
-	if (!privileged) {
-		VerifyRowPolicies(plan, installed.row_policies);
-	}
 	Described described;
 	try {
+		if (!privileged) {
+			VerifyRowPolicies(plan, installed.row_policies);
+		}
+		if (!privileged && !installed.row_policies.empty()) {
+			std::function<bool(LogicalOperator &)> protected_scan = [&](LogicalOperator &op) {
+				if (dynamic_cast<RowPolicyBoundary *>(&op))
+					return true;
+				for (auto &child : op.children)
+					if (protected_scan(*child))
+						return true;
+				return false;
+			};
+			std::function<bool(LogicalOperator &)> exposes = [&](LogicalOperator &op) {
+				if (op.type == LogicalOperatorType::LOGICAL_EXPLAIN && protected_scan(op))
+					return true;
+				for (auto &child : op.children)
+					if (exposes(*child))
+						return true;
+				return false;
+			};
+			if (exposes(plan)) {
+				throw PermissionException("QoD: EXPLAIN of a row-policy table exposes protected estimates");
+			}
+		}
+
 		auto text = session->StatementText(context);
 		if (!text && !privileged) {
 			// Item 32 B judges the call names as written: a statement whose text is out of reach is refused.
@@ -751,7 +780,11 @@ void Enforce(ClientContext &context, Gate &gate, LogicalOperator &plan) {
 		if (!privileged && !installed.row_policies.empty()) {
 			auto description = ParseJson(described.canonical);
 			for (auto &object : description.Get("objects", JsonValue::Kind::ARRAY).array) {
-				if (object.Get("access", JsonValue::Kind::STRING).string == "read") {
+				auto access = object.Get("access", JsonValue::Kind::STRING).string;
+				auto kind = object.Get("kind", JsonValue::Kind::STRING).string;
+				// RLS governs table rows, not unrelated catalog objects. CREATE OR REPLACE
+				// also describes the old entry's drop, so it remains protected.
+				if (access == "read" || access == "create" || (kind != "table" && kind != "schema")) {
 					continue;
 				}
 				for (auto &policy : installed.row_policies) {
@@ -776,7 +809,11 @@ void Enforce(ClientContext &context, Gate &gate, LogicalOperator &plan) {
 		if (!privileged) {
 			RefuseForeignCopyFunction(context, plan);
 		}
-	} catch (PermissionException &) {
+	} catch (PermissionException &error) {
+		auto reason = std::string(error.what());
+		if (reason.find("row-policy") != std::string::npos || reason.find("row policy") != std::string::npos ||
+			reason.find("row policies") != std::string::npos)
+			gate.authz->Stats().row_policy_refusals++;
 		// Decision 26: a refusal the node made alone, before any verdict.
 		gate.authz->Stats().local_refusals++;
 		throw;
@@ -803,7 +840,17 @@ void PostBind(PlannerExtensionInput &input, BoundStatement &statement) {
 	Installed installed;
 	if (SessionSnapshot(context, gate.authz->Now(), installed) &&
 	    !installed.principal.superuser && !installed.principal.system && !IsPrelude(*statement.plan)) {
-		ApplyRowPolicies(context, statement.plan, installed.row_policies);
+		ApplyRowPolicies(context, statement.plan, installed.row_policies,
+						 [&](const RowPolicy &p, const std::string &cause) {
+							 gate.authz->Stats().row_policy_refusals++;
+							 std::cerr << "QoD row policy refusal "
+									   << CanonicalJson(JsonObject({{"policy", JsonString(p.id)},
+																	{"catalog", JsonString(p.catalog)},
+																	{"schema", JsonString(p.schema)},
+																	{"table", JsonString(p.table)},
+																	{"cause", JsonString(cause)}}))
+									   << std::endl;
+						 });
 	}
 	Enforce(context, gate, *statement.plan);
 }

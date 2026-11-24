@@ -1,11 +1,12 @@
-#include "node_hooks.hpp"
-#include "test_handles.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/client_context_state.hpp"
 #include "duckdb/main/config.hpp"
-#include "duckdb/planner/planner_extension.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
+#include "duckdb/planner/operator/logical_get.hpp"
+#include "duckdb/planner/planner_extension.hpp"
+#include "node_hooks.hpp"
 #include "row_policies.hpp"
+#include "test_handles.hpp"
 
 #include <iostream>
 #include <filesystem>
@@ -46,10 +47,18 @@ void Refused(const std::string &what, const std::string &got, const std::string 
 }
 
 bool tamper = false;
+bool tamper_columns = false;
 void Tamper(PlannerExtensionInput &, BoundStatement &statement) {
-	if (!tamper || !statement.plan) return;
+	if ((!tamper && !tamper_columns) || !statement.plan)
+		return;
 	std::function<void(unique_ptr<LogicalOperator> &)> walk = [&](unique_ptr<LogicalOperator> &op) {
 		if (dynamic_cast<qod::RowPolicyBoundary *>(op.get())) {
+			if (tamper_columns) {
+				auto &ids = op->children[0]->children[0]->Cast<LogicalGet>().GetMutableColumnIds();
+				if (ids.size() > 1)
+					std::swap(ids[0], ids[1]);
+				return;
+			}
 			op = std::move(op->children[0]->children[0]);
 			return;
 		}
@@ -87,6 +96,12 @@ int main() {
 	};
 	install();
 	Expect("direct scan", Run(user, "SELECT id FROM docs"), "1");
+	Refused("explain hides protected estimates", Run(user, "EXPLAIN SELECT * FROM docs"), "protected estimates");
+	Refused("explain analyze hides protected profiling", Run(user, "EXPLAIN ANALYZE SELECT * FROM docs"),
+			"protected estimates");
+	auto stats = Run(user, "SELECT stats(secret)::VARCHAR FROM docs");
+	Expect("stats hides hidden values", stats.find("hidden-payload") == std::string::npos ? "hidden" : stats, "hidden");
+	Expect("stats hides min max", stats.find("Min:") == std::string::npos ? "hidden" : stats, "hidden");
 	Expect("count needs policy column", Run(user, "SELECT count(*) FROM docs"), "1");
 	Expect("view", Run(user, "SELECT id FROM v"), "1");
 	Expect("nested view", Run(user, "SELECT id FROM v2"), "1");
@@ -98,11 +113,45 @@ int main() {
 	Expect("hidden error", Run(user, "SELECT id FROM docs WHERE CAST(secret AS INTEGER)>0"), "1");
 	Expect("query table", Run(user, "SELECT id FROM query_table('docs')"), "1");
 	Expect("query literal", Run(user, "SELECT id FROM query('SELECT * FROM docs')"), "1");
+	Expect("CTE shadows protected name", Run(user, "WITH docs AS (SELECT 9 AS id) SELECT id FROM docs"), "9");
+	Expect("CTE shadows caller only", Run(user, "WITH docs AS (SELECT 9 AS id) SELECT id FROM memory.main.docs"), "1");
+	Expect("catalog-first two-part name", Run(user, "SELECT count(*) FROM memory.docs"), "1");
+	Refused("table macro keeps native literal-target restriction",
+			Run(user, "SELECT sum(count) FROM histogram_values('docs', owner)"), "without literal table names");
+	Run(setup, "CREATE TABLE \"a.b\" AS SELECT * FROM docs; CREATE TABLE \"Équipe\" AS SELECT * FROM docs");
+	handle.row_policies.push_back({"p-dot", "memory", "main", "a.b", "owner = 'alice'"});
+	handle.row_policies.push_back({"p-unicode", "memory", "main", "Équipe", "owner = 'alice'"});
+	++handle.policy_version;
+	install();
+	Expect("dotted quoted table", Run(user, "SELECT id FROM \"a.b\""), "1");
+	Expect("Unicode table", Run(user, "SELECT id FROM \"Équipe\""), "1");
+	handle.row_policies.resize(1);
+	++handle.policy_version;
+	install();
 	Expect("rowid survives filtering", Run(user, "SELECT rowid FROM docs"), "0");
 	Expect("integer division dialect", Run(user, "SELECT id // 1 FROM docs"), "1");
 	Expect("sample after row filtering", Run(user, "SELECT count(*) FROM (SELECT * FROM docs USING SAMPLE 100%)"), "1");
 	Expect("pivot", Run(user, "PIVOT docs ON owner IN ('alice','bob') USING count(*) GROUP BY id"), "1");
 	Refused("insert", Run(user, "INSERT INTO docs VALUES(3,'alice','33')"), "write-check");
+	Expect("fresh table under exact policy", Run(user, "CREATE TABLE scratch(id INTEGER)"), "");
+	Expect("insert into uncovered table", Run(user, "INSERT INTO scratch VALUES(1)"), "1");
+	Refused("replace covered table", Run(user, "CREATE OR REPLACE TABLE docs(id INTEGER)"), "write-check");
+	handle.row_policies[0] = {"p-wild", "*", "*", "*", "owner = 'alice'"};
+	++handle.policy_version;
+	install();
+	Expect("wildcard fresh table", Run(user, "CREATE TABLE fresh(id INTEGER)"), "");
+	Expect("wildcard fresh view", Run(user, "CREATE VIEW fresh_v AS SELECT 1 AS id"), "");
+	Expect("wildcard fresh macro", Run(user, "CREATE MACRO fresh_m() AS 1"), "");
+	Expect("wildcard fresh sequence", Run(user, "CREATE SEQUENCE fresh_s"), "");
+	Expect("wildcard dynamic pivot", Run(user, "PIVOT docs ON owner USING count(*) GROUP BY id"), "1");
+	auto pivot = user.Query("PIVOT docs ON owner USING count(*) GROUP BY id");
+	bool leaked_label = false;
+	for (auto &name : pivot->GetNames())
+		leaked_label |= name.GetIdentifierName() == "bob";
+	Expect("dynamic pivot hides hidden labels", leaked_label ? "bob" : "hidden", "hidden");
+	handle.row_policies[0] = {"p1", "memory", "main", "docs", "owner = 'alice'"};
+	++handle.policy_version;
+	install();
 	Refused("update", Run(user, "UPDATE docs SET owner='alice'"), "write-check");
 	Refused("delete", Run(user, "DELETE FROM docs"), "write-check");
 	Refused("drop", Run(user, "DROP TABLE docs"), "write-check");
@@ -149,10 +198,28 @@ int main() {
 	Refused("caller cannot change policy collation", Run(user, "SELECT id FROM docs"), "could not be bound");
 	Expect("reset caller collation", Run(user, "RESET default_collation"), "");
 	Expect("read after reset", Run(user, "SELECT id FROM docs"), "1");
+	Expect("set caller timezone", Run(user, "SET TimeZone='Pacific/Kiritimati'"), "");
+	Refused("caller timezone cannot steer policy", Run(user, "SELECT id FROM docs"), "could not be bound");
+	Expect("reset timezone", Run(user, "RESET TimeZone"), "");
+	Expect("after timezone reset", Run(user, "SELECT id FROM docs"), "1");
+	for (auto setting : {"calendar", "old_implicit_casting", "default_order", "default_null_order"}) {
+		std::string value = std::string(setting) == "calendar"				 ? "'gregorian'"
+							: std::string(setting) == "old_implicit_casting" ? "true"
+							: std::string(setting) == "default_order"		 ? "'DESC'"
+																			 : "'NULLS_FIRST'";
+		Expect(std::string("set ") + setting, Run(user, std::string("SET SESSION ") + setting + "=" + value), "");
+		Refused(std::string("override ") + setting, Run(user, "SELECT id FROM docs"), "could not be bound");
+		Expect(std::string("reset ") + setting, Run(user, std::string("RESET SESSION ") + setting), "");
+	}
 	handle.row_policies[0].sql = "lower(owner) = 'alice'";
 	++handle.policy_version;
 	install();
 	Expect("built-in function in policy", Run(user, "SELECT id FROM docs"), "1");
+	handle.row_policies[0].sql = "owner.lower() = 'alice'";
+	++handle.policy_version;
+	install();
+	Expect("method-form policy binds natively", Run(user, "SELECT id FROM docs"), "1");
+	handle.row_policies[0].sql = "lower(owner) = 'alice'";
 	Run(setup, "CREATE MACRO memory.main.lower(v) AS 'alice'");
 	Refused("macro cannot shadow policy function", Run(user, "SELECT id FROM docs"), "could not be bound");
 	Run(setup, "DROP MACRO memory.main.lower");
@@ -176,10 +243,20 @@ int main() {
 	tamper = true;
 	Refused("later extension removes filter", Run(user, "SELECT id FROM docs"), "placement");
 	tamper = false;
+	tamper_columns = true;
+	Refused("later extension reorders scan columns", Run(user, "SELECT id FROM docs"), "placement");
+	tamper_columns = false;
+	handle.row_policies[0].sql = "SELECT";
+	++handle.policy_version;
+	install();
+	Expect("bad policy leaves unrelated query usable", Run(user, "SELECT 1"), "1");
+	Refused("bad policy refuses matching table", Run(user, "SELECT id FROM docs"), "could not be bound");
 	handle.row_policies.clear();
 	++handle.policy_version;
 	install();
 	Expect("no policy", Run(user, "SELECT count(*) FROM docs"), "2");
+	Expect("insert without applicable policy", Run(user, "INSERT INTO docs VALUES(3,'charlie','33')"), "1");
+	Run(setup, "DELETE FROM docs WHERE id=3");
 	Expect("internal connection bypass", Run(setup, "SELECT count(*) FROM docs"), "2");
 	handle.row_policies = {{"p1", "memory", "main", "docs", "owner = 'alice'"}};
 	handle.superuser = true;
@@ -205,12 +282,23 @@ int main() {
 		Expect("DuckLake base scan", Run(user, "SELECT id FROM lake.main.docs"), "1");
 		Expect("DuckLake view", Run(user, "SELECT id FROM lake.main.v"), "1");
 		Expect("DuckLake count", Run(user, "SELECT count(*) FROM lake.main.docs"), "1");
+		Expect("DuckLake historical scan", Run(user, "SELECT id FROM lake.main.docs AT (VERSION => 1)"), "1");
+		Refused("DuckLake change feed", Run(user, "SELECT * FROM ducklake_table_insertions('lake','main','docs',0,1)"),
+				"change feed with row policies");
+		Run(setup, "CREATE VIEW lake.main.feed AS SELECT * FROM ducklake_table_insertions('lake','main','docs',0,1)");
+		Refused("DuckLake change feed behind view", Run(user, "SELECT * FROM lake.main.feed"),
+				"change feed with row policies");
+		Refused(
+			"DuckLake change feed behind query",
+			Run(user, "SELECT * FROM query('SELECT * FROM ducklake_table_insertions(''lake'',''main'',''docs'',0,1)')"),
+			"change feed with row policies");
 		Expect("DuckLake caller error", Run(user, "SELECT id FROM lake.main.docs WHERE CAST(secret AS INTEGER)>0"), "1");
 		Run(setup, "DETACH lake");
 		std::filesystem::remove_all(dir);
 	} else {
 		std::cout << "DuckLake cases skipped: pinned extension is not installed" << std::endl;
 	}
+	Expect("row policy refusal metric", authz->Stats().row_policy_refusals.load() > 0 ? "counted" : "absent", "counted");
 	std::cout << "row_policy_engine: " << checks << " checks, " << failures << " failures" << std::endl;
 	return failures ? 1 : 0;
 }

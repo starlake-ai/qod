@@ -89,6 +89,13 @@ final class ProtectedWriteGuard(
       .normalized(statement, columnPolicies = colPolicies.nonEmpty && !eff.user.isSuperuser)
     val sql = normalized.text
     if eff.user.isSuperuser then Allow // superuser
+    else if nativeRead && rlsEnabled && colPolicies.isEmpty && eff.rowPolicies.nonEmpty then
+      CatalogReachingCalls
+        .unfilteredChangeFeed(sql)
+        .map(CatalogReachingCalls.denyReason)
+        .orElse(unstableTimeTravel(sql, eff.user.tenant.getOrElse(""), ctx)) match
+        case Some(reason) => Deny(s"access denied: $reason")
+        case None         => Allow
     else if colPolicies.isEmpty && rowPolicies.isEmpty then Allow
     // A method call the column rewriter could not write as a plain call: refused there too.
     else if normalized.refusal.isDefined then Deny(s"access denied: ${normalized.refusal.get}")
