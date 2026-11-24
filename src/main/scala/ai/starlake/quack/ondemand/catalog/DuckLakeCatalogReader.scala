@@ -869,15 +869,15 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource)
     * `ducklake_merge_adjacent_files` does NOT end-date the superseded `ducklake_data_file` rows -
     * it hard-deletes them and appends their paths to `ducklake_files_scheduled_for_deletion`
     * (already used unscoped by `filesScheduledForDeletion`), which carries no `table_id` or
-    * `snapshot_id` column. `schedule_start` matches the triggering snapshot's `snapshot_time`
-    * exactly (same transaction), so `sched` joins on that equality and scopes to this table via a
-    * `path LIKE 'schema/table/%'` prefix. That prefix scoping UNDERCOUNTS in two known cases: a
+    * `snapshot_id` column. `sched` finds each row's triggering snapshot through
+    * [[DuckLakeCatalogReader.ScheduledSnapshotSql]] (the snapshot written by the same Postgres
+    * transaction) and scopes to this table via a `path LIKE 'schema/table/%'` prefix. That prefix scoping UNDERCOUNTS in two known cases: a
     * renamed table (rows scheduled under the old name no longer match the current `schema/table/%`
     * prefix) and files stored with `path_is_relative = false` (absolute paths never match the
     * relative prefix); both make `filesRemoved` read low, never high. `sched` deliberately does NOT
-    * participate in the membership WHERE below - `schedule_start = snapshot_time` is a
-    * timestamp-equality join with no snapshot_id/table_id on the DuckLake side, so on a timestamp
-    * collision between two snapshots it could admit a foreign snapshot into this table's timeline;
+    * participate in the membership WHERE below - the mapping carries no snapshot_id/table_id on
+    * the DuckLake side, and on a cloned catalog (a branch) it falls back to time order for the
+    * rows copied before the fork, so it could admit a foreign snapshot into this table's timeline;
     * compaction snapshots are already members via `tf` (the merged output file's
     * `ducklake_data_file` row has `begin_snapshot` = the compaction snapshot).
     * `tr.files_removed + sched.n` is a plain sum, not `greatest(...)`: verified against a live
@@ -949,10 +949,9 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource)
            |     ce AS (SELECT end_snapshot AS sid, count(*) AS n
            |              FROM ducklake_column
            |             WHERE table_id = ? AND end_snapshot IS NOT NULL GROUP BY 1),
-           |     sched AS (SELECT s2.snapshot_id AS sid, count(*) AS n
-           |                 FROM ducklake_files_scheduled_for_deletion d
-           |                 JOIN ducklake_snapshot s2 ON s2.snapshot_time = d.schedule_start
-           |                WHERE d.path LIKE ? ESCAPE '\' GROUP BY 1)
+           |     sched AS (SELECT m.snapshot_id AS sid, count(*) AS n
+           |                 FROM (${DuckLakeCatalogReader.ScheduledSnapshotSql}) m
+           |                WHERE m.path LIKE ? ESCAPE '\' GROUP BY 1)
            |SELECT * FROM (
            |  SELECT s.snapshot_id,
            |         s.snapshot_time,
@@ -1235,6 +1234,25 @@ object DuckLakeCatalogReader:
     * DuckDB 1.5.4 and 1.5.5; `rewrite_delete` seen on 2.0.0.
     */
   val HistoryIgnoredVerbs: Set[String] = Set("created_schema", "inline_flush", "rewrite_delete")
+
+  /** Each `ducklake_files_scheduled_for_deletion` row (`data_file_id`, `path`) with the snapshot of
+    * the commit that scheduled it (`snapshot_id`), on a Postgres catalog. DuckLake writes neither id
+    * on the row. Through DuckDB 2.0.0 `schedule_start` equalled that snapshot's `snapshot_time`
+    * (both `NOW()`); from 2.0.1 a Postgres catalog stamps `snapshot_time` with `clock_timestamp()`
+    * and `schedule_start` still with `NOW()`, the transaction's start, so the two differ. Both rows
+    * are written by one Postgres transaction and share `xmin`, and a native catalog has one
+    * snapshot per transaction, so `xmin` names it. A branch clone copies every row in one
+    * transaction (`BranchCloner`'s `COPY`), so its pre-fork rows all share one `xmin`: among the
+    * snapshots of that `xmin`, the earliest at or after `schedule_start` is taken, exact for rows a
+    * 2.0.0 engine wrote and the nearest commit otherwise. A row whose snapshot is gone (expired)
+    * maps to none. Pinned by `DuckLakePinBumpChecklistSpec` (item 2).
+    */
+  val ScheduledSnapshotSql: String =
+    """SELECT d.data_file_id, d.path, s2.snapshot_id
+      |  FROM ducklake_files_scheduled_for_deletion d
+      |  JOIN LATERAL (SELECT s.snapshot_id FROM ducklake_snapshot s
+      |                 WHERE s.xmin = d.xmin AND s.snapshot_time >= d.schedule_start
+      |                 ORDER BY s.snapshot_time, s.snapshot_id LIMIT 1) s2 ON true""".stripMargin
 
   /** Bound, in seconds, on [[DuckLakeCatalogReader.nameHistoryStable]] and
     * [[DuckLakeCatalogReader.maxSnapshotIdBounded]]. Both run on the statement path of every

@@ -613,13 +613,13 @@ def test_ensure_duckdb_cli_honours_a_duckdb_version_override_over_the_cached_pin
     tmp_path, monkeypatch
 ):
     _duckdb_cache.plant(tmp_path, os_name="linux")
-    monkeypatch.setenv("DUCKDB_VERSION", "2.0.1")
+    monkeypatch.setenv("DUCKDB_VERSION", "9.9.9")
     route = _serve_duckdb_asset(
         monkeypatch, launcher.duckdb_cli_url("linux", "x86_64"), _duckdb_cli_archive()
     )
     bin_dir = launcher.ensure_duckdb_cli(cache_dir=tmp_path, os_name="linux", arch="x86_64")
-    assert route.called and "v2.0.1/" in str(route.calls.last.request.url)
-    assert pathlib.Path(bin_dir) == tmp_path / "duckdb" / "2.0.1" / "bin"
+    assert route.called and "v9.9.9/" in str(route.calls.last.request.url)
+    assert pathlib.Path(bin_dir) == tmp_path / "duckdb" / "9.9.9" / "bin"
 
 
 def test_bundled_spawn_scripts_match_the_canonical_ones():

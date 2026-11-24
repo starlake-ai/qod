@@ -141,6 +141,7 @@ PRAGMA_SUPERUSER = {
 # ---- scalar, aggregate and window functions --------------------------------------------------------------
 
 SUPERUSER_SCALAR = {
+    "__aws__expired",           # the aws extension's internal credential-expiry check (DuckDB 2.0.1)
     "current_setting",          # no argument in a description: any setting, credentials included
     "duckdb_aws_session_id",
     "getenv",                   # the node's environment (a CLI function; listed in case a build has it)

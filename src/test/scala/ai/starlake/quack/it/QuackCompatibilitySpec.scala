@@ -585,9 +585,8 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
       .drop(before)
       .exists((kind, d) => kind == "plan" && d.noSpaces.contains("\"name\":\"ids\"")) shouldBe true
 
-/** The Python `duckdb` packages the spec provisions. PyPI publishes no 2.0 release yet: the
-  * pre-release's bundled quack extension (974927a394) is the commit the nodes run, so it speaks the
-  * same protocol 3. Bump it with the engine.
+/** The Python `duckdb` packages the spec provisions: the release of the engine the nodes run, which
+  * speaks the same Quack protocol 3. Bump it with the engine.
   */
-private val Python20 = "2.0.0.dev2610011535"
+private val Python20 = "2.0.1"
 private val Python15 = "1.5.4"

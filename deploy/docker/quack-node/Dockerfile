@@ -22,7 +22,7 @@
 FROM debian:bookworm-slim AS duckdb
 
 ARG TARGETARCH
-ARG DUCKDB_VERSION=2.0.0
+ARG DUCKDB_VERSION=2.0.1
 # The node protocol of this build (QOD_NODE_PROTOCOL in native/qod-node/CMakeLists.txt, which
 # QodNodeBinarySpec pins): a vendored qod-node of another protocol fails the build. Pods never pass
 # through the manager's QodNodeBinary check, so this is theirs.
@@ -53,10 +53,10 @@ mkdir -p /opt/qod-node/bin /opt/qod-node/lib /tmp/libs
 # --check-pins refuses a difference), and a DUCKDB_VERSION with no line here fails the build.
 duckdb_sha256() {
   case "$1" in
-    2.0.0/duckdb-cli-linux-amd64.tar.gz) echo c6507206baf7793c6013dbd82368469a45f20dc0e17a6f92f204602f652ed2bc ;;
-    2.0.0/duckdb-cli-linux-arm64.tar.gz) echo 859e1875d2a9515fbb4bf8871061437a14af82320da68c753f094c4b776348fe ;;
-    2.0.0/duckdb-shared-libs-linux-amd64.tar.gz) echo 993ad89e7dfca66cd6da994c2cad090c2fc160ddf9f550498a098ab4bb13cfb1 ;;
-    2.0.0/duckdb-shared-libs-linux-arm64.tar.gz) echo c60eecf91143ca6bbac55c4f4d40dc22520488b0ac257c86e0fe9a2b451cf2b7 ;;
+    2.0.1/duckdb-cli-linux-amd64.tar.gz) echo b676268be4d39e4e41a904442c9796c9914e645cc085c7505f048f2c992b5eca ;;
+    2.0.1/duckdb-cli-linux-arm64.tar.gz) echo 84e37891fcc45c887e30220f51a4914995cd8174139e87f8efd311ac83c956a7 ;;
+    2.0.1/duckdb-shared-libs-linux-amd64.tar.gz) echo e25502612fed533a243b61f23a2a574daad030e7e88906222a5f0ab30d06769e ;;
+    2.0.1/duckdb-shared-libs-linux-arm64.tar.gz) echo 811e8b4d0226f5e531f583aadc798070ffb33b350e3823be563a2ebeb2c68593 ;;
   esac
 }
 # Downloads one release asset to a file and checks its sha256 before anything unpacks it.
