@@ -73,14 +73,14 @@ final class NodePolicySnapshots(
     else
       val e = NodePrincipal.policyEffectiveSet(principal).get
       // Context digests contain identity ids. Predicate substitution also uses ordered names.
-      val identity = Json
-        .obj(
+      val identity = CanonicalJson.sha256Hex(
+        Json.obj(
           "user"   -> Json.fromString(e.user.username),
           "tenant" -> Json.fromString(e.user.tenant.getOrElse("")),
           "roles"  -> Json.arr(e.roles.map(r => Json.fromString(r.name))*),
           "groups" -> Json.arr(e.groups.map(g => Json.fromString(g.name))*)
         )
-        .noSpaces
+      )
       cache.get(
         Key(context, version, rows, columns, identity),
         _ => compile(e, rows, columns)
