@@ -65,10 +65,6 @@ final class FlightSqlRouter(
     val history: StatementHistoryStore = new StatementHistoryStore(),
     val stmtInstruments: StatementInstruments = StatementInstruments.noop,
     val classifier: StatementClassifier = StatementClassifier.default,
-    val columnPolicyRewriter: ai.starlake.quack.edge.cls.ColumnPolicyRewriter =
-      new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
-        new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(Map.empty)
-      ),
     val registry: ActiveStatementRegistry = new ActiveStatementRegistry(),
     val journal: EventJournal = EventJournal.noop,
     val stampWrites: Boolean = false,
@@ -1176,7 +1172,7 @@ final class FlightSqlRouter(
           maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(reason))
           Left(RouterFailure.AccessDenied(s"access denied: $reason"))
 
-    // Column-level security: enforce per-column policies before routing.
+    // Session coordinates for metadata filtering and policy guards.
     val schemaCtx = ai.starlake.quack.edge.cls.SchemaContext(
       defaultDatabase = defaultDb,
       defaultSchema = defaultSchm,
@@ -1184,20 +1180,13 @@ final class FlightSqlRouter(
       pool = Some(poolKey)
     )
 
-    // Column-policy SQL is normalized consistently for the guard and column rewriter.
-    // An RLS-only statement keeps the caller's text (policyText).
-    val policySql =
-      if columnPolicyRewriter.nativeEnforcement then sql
-      else FlightSqlRouter.policyText(sql, effectiveSet)
-
-    // Protected writes stay refused before CLS rewriting. On reads this guard retains CLS
-    // parser checks and historical-name/change-feed refusals; the node applies row filters.
-    // No effective principal means no policy or signed user handle can be bound.
+    // The node enforces signed column and row policies on bound source scans. The gateway
+    // retains protected-write and historical-name checks before metadata filtering.
     def protectedWrite(): Either[RouterFailure, Unit] = effectiveSet match
       case None      => Right(())
       case Some(eff) =>
         val g0        = System.nanoTime()
-        val outcome   = protectedWriteGuard.check(policySql, kind, eff, schemaCtx, clientDataScans)
+        val outcome   = protectedWriteGuard.check(sql, kind, eff, schemaCtx, clientDataScans)
         val elapsedMs = (System.nanoTime() - g0) / 1_000_000L
         stmtInstruments.recordProtectedWriteDuration(poolKey.tenant, poolKey.pool, elapsedMs)
         outcome match
@@ -1208,44 +1197,6 @@ final class FlightSqlRouter(
             stmtInstruments.recordProtectedWrite(poolKey.tenant, poolKey.pool, "deny")
             maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(reason))
             Left(RouterFailure.AccessDenied(reason))
-    import cats.effect.unsafe.implicits.global
-    // Shared CLS deny arm: instrument tag, journal, wire error.
-    def clsDenied(tag: String, reason: String): Either[RouterFailure, String] =
-      stmtInstruments.recordColumnPolicyRewrite(poolKey.tenant, poolKey.pool, tag)
-      maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(reason))
-      Left(RouterFailure.AccessDenied(s"access denied: $reason"))
-
-    def clsRewritten(): Either[RouterFailure, String] = effectiveSet match
-      case None =>
-        Right(sql) // no RBAC principal bound: no policy applies
-      case Some(eff) =>
-        val t0      = System.nanoTime()
-        val outcome =
-          columnPolicyRewriter.rewrite(policySql, kind, eff, schemaCtx).unsafeRunSync()
-        val elapsedMs = (System.nanoTime() - t0) / 1_000_000L
-        stmtInstruments.recordColumnPolicyRewriteDuration(poolKey.tenant, poolKey.pool, elapsedMs)
-        outcome match
-          case ai.starlake.quack.edge.cls.ColumnPolicyRewriter.Passthrough =>
-            stmtInstruments.recordColumnPolicyRewrite(poolKey.tenant, poolKey.pool, "passthrough")
-            Right(policySql)
-          case ai.starlake.quack.edge.cls.ColumnPolicyRewriter.PassthroughParseFailed =>
-            // Fail closed: the principal has column policies and we cannot prove the masked
-            // columns are absent; forwarding the original SQL would leak them.
-            clsDenied(
-              "parse_failed",
-              "column policy rewrite could not parse statement; denied (fail-closed)"
-            )
-          case ai.starlake.quack.edge.cls.ColumnPolicyRewriter.Rewritten(s) =>
-            stmtInstruments.recordColumnPolicyRewrite(poolKey.tenant, poolKey.pool, "rewritten")
-            Right(s)
-          case ai.starlake.quack.edge.cls.ColumnPolicyRewriter.Denied(reason) =>
-            clsDenied("denied", reason)
-          case ai.starlake.quack.edge.cls.ColumnPolicyRewriter.DeniedUnresolvedTable =>
-            // Unresolved coordinate, not a policy match; same wire error, separate tag.
-            clsDenied("unresolved_deny", "unresolved table")
-
-    // System-catalog filtering follows CLS: its substitutions inject derived tables that
-    // the column rewriter has no policy for.
     def metadataFiltered(rewrittenSql: String): Either[RouterFailure, String] =
       effectiveSet match
         // No RBAC principal bound: nothing to filter for.
@@ -1285,14 +1236,10 @@ final class FlightSqlRouter(
           maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(reason))
           Left(f)
 
-    // Defense in depth behind gateway rewriting: it prints a NEW statement, and the node runs
-    // that one. A rewrite that reaches a table the original did not (the column policy rewrite
-    // once schema-qualified a CTE reference, turning it into a read of the real table of that
-    // name) would read past the policy that covers it. So the rewritten statement must reach
-    // nothing beyond the original's tables, verbs and file reader calls (RewriteScope, parse only:
-    // the node judges the rewritten statement's grants); anything else denies.
+    // Metadata filtering still prints new SQL. It must not introduce source reads or file
+    // locations beyond the caller's statement; the node judges the resulting statement's grants.
     def rewriteRevalidated(rewrittenSql: String): Either[RouterFailure, String] =
-      if rewrittenSql == sql || rewrittenSql == policySql then Right(rewrittenSql)
+      if rewrittenSql == sql then Right(rewrittenSql)
       else
         val parserCfg =
           ai.starlake.acl.model.Config.forDuckDB(defaultDb, defaultSchm, attachedCatalogs)
@@ -1324,14 +1271,13 @@ final class FlightSqlRouter(
             maybeRecord(nodeId = "-", durationMs = 0, status = "denied", error = Some(denial))
             Left(RouterFailure.AccessDenied(s"access denied: $denial"))
 
-    // client scan -> protected write -> CLS -> metadata filter -> rewrite scope; every
+    // client scan -> protected write -> metadata filter -> rewrite scope; every
     // denial arm has already journaled itself. Bound to resultIO so one flatTap below emits
     // exactly one StatementExecuted event on every exit path, including the denial arms.
     val resultIO: IO[Either[RouterFailure, Routed[A]]] =
       clientScan()
         .flatMap(_ => protectedWrite())
-        .flatMap(_ => clsRewritten())
-        .flatMap(metadataFiltered)
+        .flatMap(_ => metadataFiltered(sql))
         .flatMap(rewriteRevalidated) match
         case Left(f)         => IO.pure(Left(f))
         case Right(finalSql) =>
@@ -1902,14 +1848,6 @@ object FlightSqlRouter:
     */
   private[edge] def oneLogLine(text: String): String =
     text.map(c => if c.isControl then '?' else c)
-
-  /** Normalize SQL only for gateway column policies. Row-only statements keep their original text:
-    * DuckDB binds their policies independently on the native node.
-    */
-  def policyText(sql: String, effectiveSet: Option[EffectiveSet]): String =
-    val columnPolicies = effectiveSet.exists(e => !e.user.isSuperuser && e.columnPolicies.nonEmpty)
-    if columnPolicies then ai.starlake.quack.edge.cls.MisreadNames.normalized(sql, true).text
-    else sql
 
   /** `UNDROP TABLE` inside a client transaction (review M5): refused on both doors, since its
     * recovery commits on a connection of its own and the client's ROLLBACK would not undo it.

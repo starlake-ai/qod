@@ -8,7 +8,7 @@ import ai.starlake.quack.edge.adapter.{
   QuackResponse,
   TestArrow
 }
-import ai.starlake.quack.edge.cls.{ColumnCatalog, ColumnPolicyRewriter}
+import ai.starlake.quack.edge.cls.ColumnCatalog
 import ai.starlake.quack.edge.meta.MetadataFilterRewriter
 import ai.starlake.quack.model.{
   NodeSpec,
@@ -94,15 +94,14 @@ object PolicyPipelineFixture:
     */
   def harness(
       kc: KindCase,
-      columnCatalog: ColumnCatalog = new ColumnCatalog.MapCatalog(Map.empty),
+      columnCatalog: ColumnCatalog = new ColumnCatalog.MapCatalog(),
       metadataFilter: MetadataFilterRewriter = new MetadataFilterRewriter(enabled = false),
       /** What the node answers to the statement it received; by default one row of `SELECT 1`. */
       respond: String => QuackResponse = _ => TestArrow.okResponse(),
       /** The control plane under the supervisor; a spec seeds principals into it. */
       store: InMemoryControlPlaneStore = new InMemoryControlPlaneStore(),
       /** Mounts the production protected-write guard over `columnCatalog` (CLS and RLS on). */
-      guarded: Boolean = false,
-      nativeCls: Boolean = false
+      guarded: Boolean = false
   ): Harness =
     val backend = new QuackBackend:
       def allowsLocalFiles   = true
@@ -171,8 +170,6 @@ object PolicyPipelineFixture:
       new SessionRegistry,
       tracker,
       new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral()),
-      columnPolicyRewriter =
-        new ColumnPolicyRewriter(columnCatalog, enabled = true, nativeEnforcement = nativeCls),
       metadataFilterRewriter = metadataFilter,
       protectedWriteGuard =
         if guarded then new ProtectedWriteGuard(columnCatalog, clsEnabled = true, rlsEnabled = true)

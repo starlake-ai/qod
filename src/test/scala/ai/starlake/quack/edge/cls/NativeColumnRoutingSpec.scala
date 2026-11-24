@@ -7,14 +7,11 @@ import org.scalatest.matchers.should.Matchers
 
 class NativeColumnRoutingSpec extends AnyFlatSpec with Matchers:
   "native CLS routing" should "send caller SQL without a gateway mask or normalization" in {
-    val catalog = new ColumnCatalog.MapCatalog(
-      Map(("memory", "main", "docs") -> List("id", "secret"))
-    )
+    val catalog = new ColumnCatalog.MapCatalog()
     val harness = PolicyPipelineFixture.harness(
       PolicyPipelineFixture.Memory,
       columnCatalog = catalog,
-      guarded = true,
-      nativeCls = true
+      guarded = true
     )
     val effective = PolicyPipelineFixture.effWith(columnPolicies =
       List(

@@ -13,14 +13,14 @@ import scala.util.{Failure, Success, Try}
   *
   * A `transform_sql` value must be ONE scalar DuckDB expression that:
   *   1. Parses whole as one expression ([[ai.starlake.quack.edge.rls.WholeExpression]]).
-  *   2. References only the protected column, read as the rewriter reads it when it splices the
-  *      mask ([[ResidualColumns.references]]: every column node outside a lambda's parameters,
+  *   2. References only the protected column, interpreted by the stored-expression analysis
+  *      ([[PolicyExpressionAnalysis.references]]: every column node outside a lambda's parameters,
   *      every time keyword but a SQL value function's call, no column reference held as another
   *      node), names compared as DuckDB folds them.
   *   3. Contains no subqueries (parenthesed SELECTs).
   *   4. Calls no side-effect or escape functions (denylist + `pragma_*` prefix).
   *   5. Is bounded in size (<= 1024 chars in canonical form).
-  *   6. Holds only allowed mask forms ([[MaskForms]]), as written and as the rewriter reads the
+  *   6. Holds only allowed mask forms ([[MaskForms]]), as written and as the validator reads the
   *      stored text: none can answer with an error quoting the unmasked value.
   */
 object TransformSqlValidator:
@@ -58,9 +58,8 @@ object TransformSqlValidator:
 
     // Reject splice-unsafe constructs BEFORE parsing: jsqlparser accepts a `--`/`/*` comment or a
     // bare `;` and silently truncates at it rather than failing the parse, so the parse step below
-    // proves nothing about these. ColumnPolicyRewriter splices the validated transformSql directly
-    // into generated SQL, so an unrejected comment or statement separator here is the same
-    // splice-safety hazard as the RLS predicate case (see [[RowPredicateValidator]]).
+    // proves nothing about these. Policy validation must cover the complete stored expression,
+    // independently of the native binder's own checks (see [[RowPredicateValidator]]).
     if SqlCommentScan.hasComment(trimmed) then
       return Invalid("comments are not allowed in transformSql")
     if SqlCommentScan.hasSemicolon(trimmed) then
@@ -75,15 +74,13 @@ object TransformSqlValidator:
         case Left(reason) => return Invalid(reason)
 
     val violations = scala.collection.mutable.ListBuffer.empty[String]
-    // Every column reference of the expression, as the rewriter reads it when it splices the mask:
-    // one walk for both, so a mask valid here is one the rewriter applies (a lambda's parameter is
-    // no column; a time keyword or a node JSqlParser makes of a column reference is read as DuckDB
-    // reads it).
-    val stored = Try(ResidualColumns.parseStoredExpression(trimmed)) match
-      case Success(e)                                          => e
-      case Failure(e: ResidualColumns.StoredExpressionRefused) => return Invalid(e.reason)
+    // Inspect every stored reference, including parser-specific keyword and method forms.
+    // Native binding independently checks the validated mask against its own source slot.
+    val stored = Try(PolicyExpressionAnalysis.parseStoredExpression(trimmed)) match
+      case Success(e)                                                   => e
+      case Failure(e: PolicyExpressionAnalysis.StoredExpressionRefused) => return Invalid(e.reason)
       case Failure(ex) => return Invalid(s"transformSql does not parse: ${ex.getMessage}")
-    val references                  = ResidualColumns.references(stored)
+    val references                  = PolicyExpressionAnalysis.references(stored)
     def protectedName(name: String) =
       ai.starlake.sql.IdentifierFold.same(unquote(name), unquote(protectedColumn))
     def otherColumn(name: String) =
@@ -124,14 +121,13 @@ object TransformSqlValidator:
     if canonical.length > MaxLen then
       return Invalid(s"canonical transformSql exceeds $MaxLen chars (got ${canonical.length})")
 
-    // What is stored is the canonical text, and what applies is the rewriter's reading of it
-    // (ResidualColumns.parseStoredExpression): both must read whole and hold only allowed forms.
+    // Canonical storage must read back whole and remain within the same allowed forms.
     val desugared = MisreadNames.stored(canonical)
     if desugared.refusal.isDefined then return Invalid(desugared.refusal.get)
     WholeExpression.parseFor("transformSql", desugared.text, cond = false) match
       case Left(reason) => return Invalid(reason)
       case Right(_)     => ()
-    val applied = Try(ResidualColumns.parseStoredExpression(canonical)) match
+    val applied = Try(PolicyExpressionAnalysis.parseStoredExpression(canonical)) match
       case Success(e) => e
       case Failure(_) => return Invalid("transformSql does not read back as stored")
     val appliedParts = MaskForms.refusals(applied)
@@ -159,10 +155,10 @@ object TransformSqlValidator:
             case Left(reason) => List(reason)
         )
 
-  /** Visits every node of `start`, at any depth: every child JSqlParser keeps
-    * ([[StarExpansion.nodes]], the shared reflective walk), so a subscript's or a slice's indexes,
-    * a COLLATE operand, a lambda's body, an IN list, a CASE operand, a call's ORDER BY or FILTER
-    * and a subquery's own nodes are all seen.
+  /** Visits every node of `start`, at any depth: every child JSqlParser keeps ([[PolicyAst.nodes]],
+    * the shared reflective walk), so a subscript's or a slice's indexes, a COLLATE operand, a
+    * lambda's body, an IN list, a CASE operand, a call's ORDER BY or FILTER and a subquery's own
+    * nodes are all seen.
     */
   private def walk(start: Expression)(visit: PartialFunction[Any, Unit]): Unit =
-    StarExpansion.nodes(start).foreach(node => if visit.isDefinedAt(node) then visit(node))
+    PolicyAst.nodes(start).foreach(node => if visit.isDefinedAt(node) then visit(node))

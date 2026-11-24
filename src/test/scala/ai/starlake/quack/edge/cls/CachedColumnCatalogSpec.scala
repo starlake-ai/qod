@@ -25,7 +25,6 @@ class CachedColumnCatalogSpec extends AnyFlatSpec with Matchers:
     val snapshotReads = new AtomicInteger
     val historyReads  = new AtomicInteger
     val catalog       = new CachedColumnCatalog(
-      fetch = (_, _, _, _, _) => IO.pure(Nil),
       history = (_, _, _, _, _) => IO.defer { historyReads.incrementAndGet(); answer.get },
       latestSnapshot = (_, _, _) => IO.defer { snapshotReads.incrementAndGet(); snapshot.get }
     )
@@ -92,7 +91,6 @@ class CachedColumnCatalogSpec extends AnyFlatSpec with Matchers:
     val pools     = ListBuffer.empty[Option[PoolKey]]
     val snapshots = ListBuffer.empty[Option[PoolKey]]
     val catalog   = new CachedColumnCatalog(
-      fetch = (_, _, _, _, _) => IO.pure(Nil),
       // The branch renamed a column of `customer` since its fork; its parent did not.
       history =
         (_, pool, _, _, table) => IO { pools += pool; pool == Parent && table == "customer" },

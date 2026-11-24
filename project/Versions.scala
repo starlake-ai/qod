@@ -1,39 +1,38 @@
 object Versions {
-  val tapir          = "1.11.10"
-  val sttpApispec    = "0.11.3" // openapi-circe-yaml serializer; must match what tapir 1.11.10 pulls transitively
-  val http4s         = "0.23.24"
-  val circe          = "0.14.10"
-  val arrow          = "18.3.0"
-  val grpc           = "1.76.3"
-  val scalaLogging   = "3.9.5"
-  val logbackClassic = "1.5.12"
-  val slf4j          = "2.0.16" // must match what logback-classic pulls transitively
-  val pureconfig     = "0.17.8"
-  val javaJwt        = "4.4.0"
-  val nimbusJoseJwt  = "9.47"
-  val scalaTest      = "3.2.17"
-  // jsqlParser must match the version jsqltranspiler's pom pins (its manticore line)
-  val jsqlParser     = "5.4.272"
-  val jsqltranspiler = "1.17"
-  val circeYaml      = "0.16.1"
-  val cats           = "2.13.0"
-  val netty          = "4.1.118.Final"
-  val fabric8        = "7.1.0"
-  val hikariCp       = "6.2.1"
-  val jbcrypt        = "0.10.2"
-  val postgresql     = "42.7.4"
+  val tapir       = "1.11.10"
+  val sttpApispec =
+    "0.11.3" // openapi-circe-yaml serializer; must match what tapir 1.11.10 pulls transitively
+  val http4s           = "0.23.24"
+  val circe            = "0.14.10"
+  val arrow            = "18.3.0"
+  val grpc             = "1.76.3"
+  val scalaLogging     = "3.9.5"
+  val logbackClassic   = "1.5.12"
+  val slf4j            = "2.0.16" // must match what logback-classic pulls transitively
+  val pureconfig       = "0.17.8"
+  val javaJwt          = "4.4.0"
+  val nimbusJoseJwt    = "9.47"
+  val scalaTest        = "3.2.17"
+  val jsqlParser       = "5.4.272"
+  val circeYaml        = "0.16.1"
+  val cats             = "2.13.0"
+  val netty            = "4.1.118.Final"
+  val fabric8          = "7.1.0"
+  val hikariCp         = "6.2.1"
+  val jbcrypt          = "0.10.2"
+  val postgresql       = "42.7.4"
   val embeddedPostgres = "2.0.7"
   // Binary set for the arm64 artifacts added explicitly in Dependencies.scala. MUST match the
   // version `embeddedPostgres` pulls in transitively for amd64, or arm and x86 users get
   // different Postgres majors from the same jar; DemoPostgresSpec fails when they drift.
   val embeddedPostgresBinaries = "14.10.1"
-  val wireMock       = "3.9.2"
-  val blobstore      = "0.10.1"
-  val starlakeJdbc   = "0.7"
-  val duckdb         = "2.0.1.0" // before bumping: docs/duckdb-pin-bump-checklist.md
-  val duckdbJdbc     = duckdb
-  val micrometer     = "1.13.6"
-  val liquibase      = "4.29.2"
-  val caffeine       = "3.1.8"
-  val awsSdk         = "2.42.21"
+  val wireMock                 = "3.9.2"
+  val blobstore                = "0.10.1"
+  val starlakeJdbc             = "0.7"
+  val duckdb                   = "2.0.1.0" // before bumping: docs/duckdb-pin-bump-checklist.md
+  val duckdbJdbc               = duckdb
+  val micrometer               = "1.13.6"
+  val liquibase                = "4.29.2"
+  val caffeine                 = "3.1.8"
+  val awsSdk                   = "2.42.21"
 }

@@ -62,12 +62,7 @@ class DefaultDatabaseResolutionSpec extends AnyFlatSpec with Matchers:
   /** Both catalogs hold a `t` with the same columns, so a mask that matched either would rewrite.
     */
   private def columnCatalog =
-    new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(
-      Map(
-        (Alias, "main", "t") -> List("id", "f"),
-        (Other, "main", "t") -> List("id", "f")
-      )
-    )
+    new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog()
 
   private def filtered(sql: String): Boolean = sql.toLowerCase(Locale.ROOT).contains("f = 0")
   private def masked(sql: String): Boolean   = sql.contains("'***'")
@@ -110,32 +105,6 @@ class DefaultDatabaseResolutionSpec extends AnyFlatSpec with Matchers:
     val (router, _) = routerWith(None)
     router.defaultsOf(PoolKey("acme", "acme_nothere", "p")) shouldBe ((None, None))
   }
-
-  for (name, dd, policyCatalog, expected) <- cases do
-    it should s"make a column mask apply as the node resolves, case $name" in {
-      val (router, _)  = routerWith(dd)
-      val (db, schema) = router.defaultsOf(probeKey)
-      val ctx = ai.starlake.quack.edge.cls.SchemaContext(db, schema, Set(Alias), Some(probeKey))
-      val rw  =
-        new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(columnCatalog, enabled = true)
-      for (table, form) <- forms do
-        withClue(s"$form name $table: ") {
-          val out = rw
-            .rewrite(
-              s"SELECT f FROM $table",
-              StatementKind.Select,
-              withMasks(List(maskOn(policyCatalog))),
-              ctx
-            )
-            .unsafeRunSync()
-          out match
-            case ai.starlake.quack.edge.cls.ColumnPolicyRewriter.Rewritten(sql) =>
-              masked(sql) shouldBe expected
-            case ai.starlake.quack.edge.cls.ColumnPolicyRewriter.Passthrough =>
-              expected shouldBe false
-            case other => fail(s"unexpected $other")
-        }
-    }
 
   // ---------- router level ----------
 
@@ -217,8 +186,6 @@ class DefaultDatabaseResolutionSpec extends AnyFlatSpec with Matchers:
       new SessionRegistry,
       tracker,
       adapter,
-      columnPolicyRewriter =
-        new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(columnCatalog, enabled = true),
       metadataFilterRewriter =
         new ai.starlake.quack.edge.meta.MetadataFilterRewriter(enabled = true),
       protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
@@ -282,12 +249,13 @@ class DefaultDatabaseResolutionSpec extends AnyFlatSpec with Matchers:
         }
     }
 
-    it should s"apply a column mask as the node resolves, case $name, over $path" in {
+    it should s"forward column-policy SQL for native resolution, case $name, over $path" in {
       val (router, sent) = routerWith(dd)
       for (table, form) <- forms do
         withClue(s"$form name $table: ") {
           send(router, s"SELECT f FROM $table", withMasks(List(maskOn(policyCatalog))))
           UseTarget.findFirstMatchIn(sent()).map(_.group(1)) shouldBe Some(s"$Alias.main")
-          masked(sent()) shouldBe expected
+          sent() should endWith(s"SELECT f FROM $table")
+          masked(sent()) shouldBe false
         }
     }

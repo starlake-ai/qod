@@ -621,8 +621,8 @@ object Main extends IOApp with LazyLogging:
             readOnlyCatalogs = readOnlyCatalogs,
             rowPoliciesEnabled =
               com.typesafe.config.ConfigFactory.load().getBoolean("quack-on-demand.rls.enabled"),
-            nativeColumnPoliciesEnabled =
-              ai.starlake.quack.edge.cls.ColumnPolicyEnforcement.nativeEnabled()
+            columnPoliciesEnabled =
+              com.typesafe.config.ConfigFactory.load().getBoolean("quack-on-demand.cls.enabled")
           )
     // After the store: the fleet backend claims servers through it (FleetServerStore).
     val backend: QuackBackend = BootFactories.quackBackend(mgrCfg, store, qodNodeBin, nodeKeys)
@@ -1376,25 +1376,9 @@ object Main extends IOApp with LazyLogging:
                 "tenant's opaUrl); every decision for it will be refused"
             )
           )
-      // ONE catalog instance (hence one cache) shared by the SELECT-path rewriter and the
-      // write-path guard, so both resolve a table's columns identically AND the metastore fetch
-      // is not doubled on cold misses.
-      val columnCatalog = EdgeRewriters.columnCatalog(
-        sup,
-        catalogReaders.get,
-        stmtInstruments,
-        // A table only the pool's nodes hold is described there through the same routed system
-        // caller as the node-held catalog browser (set once the router exists; "manager starting"
-        // until then, which reads as no columns). The bound covers waking a suspended pool.
-        nodeQuery = (key, sql) => nodeCatalogQuery.get()(key, sql),
-        nodeTimeout = scala.concurrent.duration
-          .DurationInt(
-            mgrCfg.catalog.previewTimeoutSec + edgeCfg.resumeHoldTimeoutSec.toInt
-          )
-          .seconds
-      )
-      val columnPolicyRewriter = EdgeRewriters.columnPolicyRewriter(columnCatalog)
-      val protectedWriteGuard  = EdgeRewriters.protectedWriteGuard(columnCatalog)
+      // Retained for historical-name checks; native CLS does not enumerate columns here.
+      val columnCatalog       = EdgeRewriters.columnCatalog(sup, catalogReaders.get)
+      val protectedWriteGuard = EdgeRewriters.protectedWriteGuard(columnCatalog)
 
       // SQL admin dialect (GRANT/REVOKE, ROW/COLUMN POLICY, ALTER GROUP, admin SHOW forms)
       // answered at the FlightSQL edge. Off restores the pre-feature fail-closed denial of
@@ -1573,7 +1557,6 @@ object Main extends IOApp with LazyLogging:
         stmtHistory,
         stmtInstruments,
         classifier,
-        columnPolicyRewriter,
         activeStatements,
         eventJournal,
         stampWrites = mgrCfg.stampWrites,

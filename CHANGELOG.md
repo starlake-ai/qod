@@ -4,17 +4,19 @@
 
 ### Upgrading
 
-- **Native column policies are opt-in.** Deploy and restart protocol-10 nodes (signed
-  handle version 8) before setting `QOD_CLS_ENFORCEMENT=node` on every replica.
-  Gateway CLS remains the default. Native CLS applies compatible masks and denies
-  to bound base-table reads, including reads through views; unsupported types,
-  generated-output/view-scoped policies and writes to covered tables refuse.
-  Invalid new masks are rejected on every write/import path. Unusable stored masks
-  become scoped denies; mask evaluation errors become NULL.
-  Policy preparation is cached by context and version. Both policy kinds use one
-  signed, paged snapshot with a small handle, and wildcard policies target base tables
-  without blocking unrelated views or built-in macros. Native refusals count once.
-  See [the design and limits](docs/node-column-security.md).
+- **Column policies now run exclusively in the native node.** Deploy and restart
+  protocol-10 nodes (signed handle version 8) with every manager replica. Gateway
+  CLS rewriting, its JSQL column resolver, schema probes, mode/unresolved-table
+  settings and rewrite/catalog metrics are removed. `QOD_CLS_ENABLED=false` remains
+  the kill switch. Native CLS applies type-preserving masks and denies to bound
+  source scans; unsupported types, generated-output/view-scoped policies and writes
+  to covered tables refuse. Gateway guards also refuse writes or batches reading a
+  CLS-covered table, even when they project only unprotected columns. Invalid new
+  masks are refused on every write/import path; unusable stored masks become scoped
+  denies. Both policy kinds share a signed, paged snapshot cached by context and version;
+  handles stay small as policy counts grow. Wildcards target base tables, and native
+  refusals count once. Evaluation errors become NULL. Historical-name and metadata
+  guards remain. See [the design and limits](docs/node-column-security.md).
 
 - **Enabled row policies now run only on qod-node's bound DuckDB plan.** The gateway
   row-policy SQL rewrite and `QOD_RLS_ENFORCEMENT` selector are removed. `QOD_RLS_ENABLED`
