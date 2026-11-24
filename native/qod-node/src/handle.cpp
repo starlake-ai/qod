@@ -68,6 +68,18 @@ Handle VerifyHandle(const std::string &text, const std::string &node_key, const 
 			}
 			handle.read_only.push_back(alias.string);
 		}
+		for (auto &p : json.Get("rowPolicies", JsonValue::Kind::ARRAY).array) {
+			RowPolicy policy {p.Get("id", JsonValue::Kind::STRING).string,
+			                  p.Get("catalog", JsonValue::Kind::STRING).string,
+			                  p.Get("schema", JsonValue::Kind::STRING).string,
+			                  p.Get("table", JsonValue::Kind::STRING).string,
+			                  p.Get("sql", JsonValue::Kind::STRING).string};
+			if (policy.id.empty() || policy.catalog.empty() || policy.schema.empty() || policy.table.empty() ||
+			    policy.sql.empty() || policy.sql.size() > 65536 || handle.row_policies.size() >= 256) {
+				throw std::invalid_argument("invalid row policy");
+			}
+			handle.row_policies.push_back(std::move(policy));
+		}
 		handle.exp = json.Get("exp", JsonValue::Kind::INTEGER).integer;
 		auto &principal = json.Get("principal", JsonValue::Kind::OBJECT);
 		handle.principal.id = principal.Get("id", JsonValue::Kind::STRING).string;

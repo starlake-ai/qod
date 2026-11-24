@@ -1,4 +1,5 @@
 #include "describer.hpp"
+#include "row_policies.hpp"
 
 #include "crypto.hpp"
 #include "file_functions.hpp"
@@ -711,7 +712,8 @@ void Definition::Table(const BaseTableRef &table, const std::set<std::string> &s
 //! CTEs) and a trigger action's (an INSERT, UPDATE or DELETE).
 class CallNames {
 public:
-	explicit CallNames(ClientContext &context) : context_(context) {
+	explicit CallNames(ClientContext &context, const std::vector<RowPolicy> *policies = nullptr)
+	    : context_(context), row_policies_(policies) {
 	}
 
 	//! Every statement of `sql`.
@@ -935,6 +937,14 @@ private:
 			return;
 		}
 		auto &view = entry->Cast<ViewCatalogEntry>();
+		if (row_policies_) {
+			for (auto &p : *row_policies_) {
+				if (p.table != "*" && RowPolicyMatches(p, Text(view.ParentCatalog().GetName()),
+				                                      Text(view.ParentSchema().name), Text(view.name))) {
+					Unsupported("a row policy scoped to a view; scope it to its base tables instead");
+				}
+			}
+		}
 		if (path_.count(entry.get()) != 0) {
 			Unsupported("a view that reads itself");
 		}
@@ -1339,6 +1349,7 @@ private:
 	}
 
 	ClientContext &context_;
+	const std::vector<RowPolicy> *row_policies_;
 	//! The views and macros on the walk's current path, for cycles.
 	std::set<const CatalogEntry *> path_;
 	//! How deep query() literals nest on the current path.
@@ -1347,8 +1358,9 @@ private:
 
 //! The client statement's own statements: every statement of its text, and an EXECUTE's prepared one
 //! (the statement it re-binds now, under the catalog as it is now).
-void JudgeCallNames(ClientContext &context, LogicalOperator &plan, const std::string &statement_text) {
-	CallNames names(context);
+void JudgeCallNames(ClientContext &context, LogicalOperator &plan, const std::string &statement_text,
+                    const std::vector<RowPolicy> *row_policies) {
+	CallNames names(context, row_policies);
 	names.Sql(statement_text);
 	std::function<void(LogicalOperator &)> executes = [&](LogicalOperator &op) {
 		if (op.type == LogicalOperatorType::LOGICAL_EXECUTE) {
@@ -2532,7 +2544,11 @@ void Walker::Operator(LogicalOperator &op, const std::string &via) {
 		Get(op.Cast<LogicalGet>(), via);
 		break;
 	case LogicalOperatorType::LOGICAL_SECURE_VIEW:
-		child_via = SecureView(op.Cast<LogicalSecureView>(), via);
+		// A node-created row-filter boundary preserves the caller's grants. It must never
+		// turn the enclosed base-table reads into definer-rights reads through a view.
+		if (!dynamic_cast<RowPolicyBoundary *>(&op)) {
+			child_via = SecureView(op.Cast<LogicalSecureView>(), via);
+		}
 		break;
 	case LogicalOperatorType::LOGICAL_INSERT: {
 		auto &insert = op.Cast<LogicalInsert>();
@@ -3167,7 +3183,7 @@ bool IsLockedSetting(const std::string &name) {
 }
 
 Described Describe(duckdb::ClientContext &context, duckdb::LogicalOperator &plan, const Principal &principal,
-                   const std::string *statement_text) {
+                   const std::string *statement_text, const std::vector<RowPolicy> *row_policies) {
 	std::string canonical;
 	std::set<std::string> written;
 	try {
@@ -3178,7 +3194,7 @@ Described Describe(duckdb::ClientContext &context, duckdb::LogicalOperator &plan
 			// Item 32 B: every call name the statement reaches, as written, which the plan may not show:
 			// DuckDB folded calls on constants away while binding. Without a text the caller refuses the
 			// statement (node_hooks, Enforce).
-			JudgeCallNames(context, plan, *statement_text);
+			JudgeCallNames(context, plan, *statement_text, row_policies);
 		}
 		canonical = walker.Canonical(duckdb::LogicalOperatorToString(plan.type));
 		written = walker.Written();

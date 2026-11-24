@@ -365,6 +365,17 @@ object RowPolicyRewriter:
         java.util.regex.Matcher.quoteReplacement(values.getOrElse(name, "NULL"))
     )
 
+  /** The native path uses exactly the gateway's escaped identity literals. Unknown tokens refuse
+    * instead of becoming NULL: NULL is not restrictive in every boolean expression.
+    */
+  def filledPredicate(predicate: String, eff: EffectiveSet): String =
+    val values = tokenValues(eff)
+    require(
+      TokenRegex.findAllIn(predicate).forall(t => values.contains(t.drop(2).dropRight(1))),
+      "row policy contains an unknown identity token"
+    )
+    substitute(predicate, values)
+
 class RowPolicyRewriter(
     catalog: ColumnCatalog,
     unresolvedMode: UnresolvedMode,

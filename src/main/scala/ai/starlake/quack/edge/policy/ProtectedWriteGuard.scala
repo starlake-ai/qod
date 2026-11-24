@@ -59,7 +59,8 @@ enum GuardOutcome:
 final class ProtectedWriteGuard(
     catalog: ColumnCatalog,
     clsEnabled: Boolean,
-    rlsEnabled: Boolean
+    rlsEnabled: Boolean,
+    nodeRowPolicies: Boolean = false
 ):
 
   import GuardOutcome._
@@ -82,7 +83,8 @@ final class ProtectedWriteGuard(
     // The text every policy step reads (MisreadNames.normalize): the column rewriter parses this
     // one, so this guard must too, or a word JSqlParser misreads would hide a read from it alone.
     val colPolicies = if clsEnabled then eff.columnPolicies else Nil
-    val rowPolicies = if rlsEnabled then eff.rowPolicies else Nil
+    val nativeRead  = nodeRowPolicies && kind == StatementKind.Select && !isBatch(statement)
+    val rowPolicies = if rlsEnabled && !nativeRead then eff.rowPolicies else Nil
     val normalized  = ai.starlake.quack.edge.cls.MisreadNames
       .normalized(statement, columnPolicies = colPolicies.nonEmpty && !eff.user.isSuperuser)
     val sql = normalized.text

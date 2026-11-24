@@ -6,6 +6,8 @@
 #include "describer.hpp"
 #include "locations.hpp"
 #include "screen_rules.hpp"
+#include "row_policies.hpp"
+#include "json.hpp"
 
 #include "duckdb/catalog/catalog_entry_retriever.hpp"
 #include "duckdb/catalog/catalog_transaction.hpp"
@@ -97,7 +99,7 @@ public:
 			throw PermissionException(kHandleRefused + std::string("it was already used"));
 		}
 		current_ = Installed {handle.principal, handle.policy_version, handle.exp, handle.nonce, handle.ctx,
-		                      text,             handle.replica,        handle.path, handle.read_only};
+		                      text,             handle.replica,        handle.path, handle.read_only, handle.row_policies};
 		installed_ = true;
 		authz_ = &authz;
 	}
@@ -228,7 +230,7 @@ public:
 	void AdmitPrelude() {
 		std::lock_guard<std::mutex> guard(lock_);
 		pending_ = Admitted {"",           current_.principal.id, current_.policy_version,
-		                     current_.ctx, kNeverExpires,         current_.read_only};
+		                     current_.ctx, kNeverExpires,         current_.read_only, current_.row_policies};
 	}
 
 	//! True when the current statement already runs under a verdict for the plan `fingerprint`
@@ -697,7 +699,7 @@ std::string RefusalMessage(const DecideResult &decided, const NodeAuthz &authz, 
 //! else the decider's (from Task 7's cache or the issuing replica). Throws the refusal.
 Admitted Decide(Gate &gate, const Installed &installed, const Described &described) {
 	Admitted admitted {described.fingerprint, installed.principal.id, installed.policy_version,
-	                   installed.ctx,         kNeverExpires,          installed.read_only};
+	                   installed.ctx,         kNeverExpires,          installed.read_only, installed.row_policies};
 	if (installed.principal.superuser || installed.principal.system) {
 		return admitted;
 	}
@@ -733,6 +735,9 @@ void Enforce(ClientContext &context, Gate &gate, LogicalOperator &plan) {
 		return;
 	}
 	auto privileged = installed.principal.superuser || installed.principal.system;
+	if (!privileged) {
+		VerifyRowPolicies(plan, installed.row_policies);
+	}
 	Described described;
 	try {
 		auto text = session->StatementText(context);
@@ -741,7 +746,27 @@ void Enforce(ClientContext &context, Gate &gate, LogicalOperator &plan) {
 			throw PermissionException("QoD: statement uses a statement whose text cannot be read, so its calls "
 			                          "cannot be judged, which QoD does not support");
 		}
-		described = Describe(context, plan, installed.principal, text ? &*text : nullptr);
+		described = Describe(context, plan, installed.principal, text ? &*text : nullptr,
+		                     &installed.row_policies);
+		if (!privileged && !installed.row_policies.empty()) {
+			auto description = ParseJson(described.canonical);
+			for (auto &object : description.Get("objects", JsonValue::Kind::ARRAY).array) {
+				if (object.Get("access", JsonValue::Kind::STRING).string == "read") {
+					continue;
+				}
+				for (auto &policy : installed.row_policies) {
+					auto access = object.Get("access", JsonValue::Kind::STRING).string;
+					auto schema_ddl = object.Get("kind", JsonValue::Kind::STRING).string == "schema" &&
+					                  (access == "drop" || access == "alter");
+					if (RowPolicyMatches(policy, object.Get("catalog", JsonValue::Kind::STRING).string,
+					                     object.Get("schema", JsonValue::Kind::STRING).string,
+					                     schema_ddl ? policy.table : object.Get("name", JsonValue::Kind::STRING).string)) {
+						throw PermissionException("QoD: writes to a row-policy table require write-check policies, "
+						                          "which node RLS does not yet support");
+					}
+				}
+			}
+		}
 		// Decision 24: a read-only catalog refuses every principal's writes, superusers and the manager
 		// itself included, before the verdict the statement holds, the node's verdict cache or the replica.
 		auto read_only = ReadOnlyRefusal(described.written_catalogs, installed.read_only);
@@ -774,6 +799,11 @@ void PostBind(PlannerExtensionInput &input, BoundStatement &statement) {
 			throw PermissionException(kNoPrincipal);
 		}
 		return;
+	}
+	Installed installed;
+	if (SessionSnapshot(context, gate.authz->Now(), installed) &&
+	    !installed.principal.superuser && !installed.principal.system && !IsPrelude(*statement.plan)) {
+		ApplyRowPolicies(context, statement.plan, installed.row_policies);
 	}
 	Enforce(context, gate, *statement.plan);
 }

@@ -4,6 +4,13 @@
 
 ### Upgrading
 
+- **Native row-policy enforcement is opt-in.** Set `QOD_RLS_ENFORCEMENT=node` after
+  deploying and restarting protocol-7 nodes. Signed session handles are now version 5;
+  older nodes and handles refuse. Gateway enforcement remains the default. Native mode
+  applies base-table policies through views and resolved scans; writes to protected tables
+  (INSERT included), view-scoped policies and unsupported predicate forms refuse. See
+  [the design and rollout guide](docs/node-row-security.md).
+
 - **Restart every node after upgrading** so it runs DuckDB 2.0.1 (see Changed): a node an
   earlier release started keeps running DuckDB 2.0.0 until it restarts. On Kubernetes that means
   the new node image; fleet servers need this release's `qod fleet join`, which bundles the 2.0.1
@@ -34,6 +41,13 @@
   one written so.
 
 ### Security
+
+- **Optional row filtering on DuckDB's bound plan.** The manager signs identity-filled
+  row policies into each session handle. qod-node binds each predicate against its own
+  table, adds a protected filter at every matching scan, and verifies placement again
+  before optimization. DuckDB's secure-view optimizer boundary protects caller expressions
+  from hidden rows. Policy evaluation failures become NULL and hide that row; binding
+  failures return a fixed refusal. Prepared statements rebind when signed policies change.
 
 - **A row policy no longer filters a reference that DuckDB binds to a CTE.** A statement whose
   WITH clause declares a CTE named like a table the caller holds a row policy on had its

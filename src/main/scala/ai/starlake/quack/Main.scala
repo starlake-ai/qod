@@ -618,7 +618,8 @@ object Main extends IOApp with LazyLogging:
             issued = Some(issuedHandles),
             minted = Some(mintedHandles),
             paths = key => usePaths.get()(key),
-            readOnlyCatalogs = readOnlyCatalogs
+            readOnlyCatalogs = readOnlyCatalogs,
+            nodeRowPolicies = ai.starlake.quack.edge.rls.RowPolicyEnforcement.onNode
           )
     // After the store: the fleet backend claims servers through it (FleetServerStore).
     val backend: QuackBackend = BootFactories.quackBackend(mgrCfg, store, qodNodeBin, nodeKeys)

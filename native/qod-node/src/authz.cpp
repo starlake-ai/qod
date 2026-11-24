@@ -144,13 +144,15 @@ std::string FinalizeRefusal(bool installed, bool privileged, bool has_verdict) {
 bool ExpiredInPlanning(const Admitted *pending, const Installed &current, int64_t now_ms) {
 	return pending && pending->principal_id == current.principal.id &&
 	       pending->policy_version == current.policy_version && pending->ctx == current.ctx &&
-	       pending->read_only == current.read_only && pending->expires_at <= now_ms;
+	       pending->read_only == current.read_only && pending->row_policies == current.row_policies &&
+	       pending->expires_at <= now_ms;
 }
 
 bool RebindRequired(const Admitted *stored, const Installed &current, int64_t now_ms) {
 	return !stored || stored->principal_id != current.principal.id ||
 	       stored->policy_version != current.policy_version || stored->ctx != current.ctx ||
-	       stored->read_only != current.read_only || stored->expires_at <= now_ms;
+	       stored->read_only != current.read_only || stored->row_policies != current.row_policies ||
+	       stored->expires_at <= now_ms;
 }
 
 std::string ReadOnlyRefusal(const std::set<std::string> &written, const std::vector<std::string> &read_only) {
