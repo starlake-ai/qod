@@ -31,6 +31,7 @@ struct AuthzStats {
 	//! Statements quack submitted to the parse screen (qod_screen): client statements, the manager's
 	//! preludes and its probe's statements.
 	std::atomic<int64_t> screen_calls {0};
+	std::atomic<int64_t> row_policy_refusals{0};
 	//! Plan verdicts the verdict cache evicted for room (least recently used first), never one it replaced
 	//! or one that expired: a count that keeps rising means QOD_AUTHZ_CACHE_ENTRIES is too small.
 	std::atomic<int64_t> verdict_cache_evictions {0};

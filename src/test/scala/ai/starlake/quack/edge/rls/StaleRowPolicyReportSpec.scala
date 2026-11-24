@@ -75,3 +75,20 @@ class StaleRowPolicyReportSpec extends AnyFlatSpec with Matchers:
       policy("rp-4", "nope = 1", roleId = "r-gone")
     ) shouldBe Nil
   }
+
+  it should "report unsupported stored predicates even on wildcard or absent tables" in {
+    val lines = StaleRowPolicyReport.invalidLines(
+      List(role),
+      List(
+        policy("rp-wild", "getvariable('secret') = 1", schema = "*", table = "*"),
+        policy("rp-missing", "owner = ${unknown}", table = "missing"),
+        policy("rp-good", "owner = ${user}", table = "missing")
+      )
+    )
+    lines.size shouldBe 2
+    lines.mkString should include("rp-wild")
+    lines.mkString should include("rp-missing")
+    lines.mkString should not include "secret"
+    lines.mkString should not include "unknown"
+    lines.mkString should not include "rp-good"
+  }

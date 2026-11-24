@@ -24,7 +24,7 @@ option(QOD_NODE_RELATIVE_RPATH "Find libduckdb only in ../lib next to the binary
 option(QOD_NODE_TESTS "Build the tests (ctest)" OFF)
 
 # Handle and verdict protocol generation, recorded in the build marker.
-set(QOD_NODE_PROTOCOL 6)
+set(QOD_NODE_PROTOCOL 9)
 
 if(NOT DUCKDB_HOME)
   set(DUCKDB_HOME $ENV{DUCKDB_HOME})
@@ -166,6 +166,8 @@ set(QOD_NODE_CORE_SOURCES
   src/locations.cpp
   src/node_config.cpp
   src/node_hooks.cpp
+  src/row_policies.cpp
+  src/row_policy_client.cpp
   src/options.cpp
   src/screen_rules.cpp
   src/secrets.cpp
@@ -238,11 +240,13 @@ if(QOD_NODE_TESTS)
   qod_node_test(crypto_test)
   add_test(NAME crypto COMMAND crypto_test)
   qod_node_test(handle_test)
-  add_test(NAME handle COMMAND handle_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/golden/handle-v4.txt)
+  add_test(NAME handle COMMAND handle_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/golden/handle-v7.txt)
   qod_node_test(authz_test)
   add_test(NAME authz COMMAND authz_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/golden/unavailable-marker-v1.txt)
   qod_node_test(authz_engine_test)
   add_test(NAME authz_engine COMMAND authz_engine_test)
+  qod_node_test(row_policy_engine_test)
+  add_test(NAME row_policy_engine COMMAND row_policy_engine_test)
   qod_node_test(describer_test)
   add_test(NAME describer COMMAND describer_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/golden/descriptions)
   qod_node_test(describer_extension_test)
@@ -257,6 +261,10 @@ if(QOD_NODE_TESTS)
   # A real HTTP server on 127.0.0.1 for the decide client's tests, on every platform.
   add_library(qod_node_test_http STATIC tests/test_http_server.cpp)
   target_link_libraries(qod_node_test_http PUBLIC qod_node_core Threads::Threads)
+  qod_node_test(row_policy_client_test)
+  target_link_libraries(row_policy_client_test PRIVATE qod_node_test_http)
+  add_test(NAME row_policy_client COMMAND row_policy_client_test)
+  add_test(NAME row_policy_wire COMMAND row_policy_client_test wire)
   qod_node_test(verdict_test)
   target_link_libraries(verdict_test PRIVATE Threads::Threads)
   add_test(NAME verdict COMMAND verdict_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/golden/verdict-v1.txt)

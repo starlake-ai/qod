@@ -325,3 +325,26 @@ class ManifestImporterValidationSpec extends AnyFlatSpec with Matchers:
     )
     errorsOf(m) shouldBe Nil
   }
+
+  it should "reject unsupported row policies before manifest writes begin" in
+    List("owner = ${typo}", "getvariable('owner') = owner", "row_number() OVER () = 1").foreach {
+      predicate =>
+        val manifest = baseManifest.copy(
+          tenants = List(ManifestTenant("acme")),
+          roles = List(
+            ManifestRole(
+              "acme",
+              "analyst",
+              rowPolicies = List(ManifestRoleRowPolicy("*", "main", "docs", predicate))
+            )
+          )
+        )
+        val store = emptyStore
+        ManifestImporter
+          .validate(manifest, store)
+          .left
+          .toOption
+          .get
+          .exists(_.contains("invalid row policy")) shouldBe true
+        store.listTenants() shouldBe Nil
+    }

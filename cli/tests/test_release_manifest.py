@@ -301,10 +301,13 @@ def test_main_check_pins_needs_no_release_files(tmp_path, capsys):
 
     _edit(repo, "native/qod-node/CMakeLists.txt", "set(QOD_NODE_PROTOCOL 9", "set(QOD_NODE_PROTOCOL ")
     libs = "2.0.1/duckdb-shared-libs-linux-amd64.tar.gz) echo "
-    _edit(repo, "deploy/docker/quack-node/Dockerfile", libs + "9", libs + "8")
+    docker = (repo / "deploy/docker/quack-node/Dockerfile").read_text(encoding="utf-8")
+    first = docker.split(libs, 1)[1][0]
+    wrong = "0" if first != "0" else "1"
+    _edit(repo, "deploy/docker/quack-node/Dockerfile", libs + first, libs + wrong)
     assert release_manifest.main(["--check-pins", "--repo", str(repo)]) == 1
     err = capsys.readouterr().err
-    assert err.startswith("release_manifest: deploy/docker/quack-node/Dockerfile pins sha256 8")
+    assert err.startswith(f"release_manifest: deploy/docker/quack-node/Dockerfile pins sha256 {wrong}")
     assert "for duckdb-shared-libs-linux-amd64.tar.gz of DuckDB 2.0.1" in err
 
 

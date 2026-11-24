@@ -25,7 +25,9 @@ final case class VerifiedHandle(
     exp: Long,
     ctx: String,
     creds: String,
-    readOnly: List[String]
+    readOnly: List[String],
+    rowPolicies: List[NodeRowPolicy] = Nil,
+    rowPolicyBundle: String = ""
 )
 
 /** Session handles: who a statement on a node runs for, vouched for by the manager (design:
@@ -35,9 +37,9 @@ final case class VerifiedHandle(
   * connection; qod-node verifies it and installs the principal on that connection. A handle is
   * `<base64url(payload)>.<hex HMAC-SHA256(node key, payload bytes)>`, the payload a JSON object
   * (`v`, `node`, `replica`, `principal`, `pool`, `policyVersion`, `ctx`, `creds`, `path`,
-  * `readOnly`, `nonce`, `exp`): the MAC covers the bytes as sent, so the two sides never have to
-  * agree on a canonical form. native/qod-node/src/handle.cpp reads it; a nonce makes it single-use
-  * and `exp` bounds it to [[LifetimeMs]].
+  * `readOnly`, `rowPolicies`, `nonce`, `exp`): the MAC covers the bytes as sent, so the two sides
+  * never have to agree on a canonical form. native/qod-node/src/handle.cpp reads it; a nonce makes
+  * it single-use and `exp` bounds it to [[LifetimeMs]].
   *
   * Each node has its own key, derived from the manager's node-key secret and the node id
   * ([[nodeKey]]), so a handle minted for one node never verifies on another. The key reaches the
@@ -53,11 +55,13 @@ object NodeHandles:
     * node protocol 2's (no enforcement in the engine), version 2 is protocols 3 and 4's (no
     * `readOnly`, so a superuser could write into a read-only catalog there), version 3 is protocol
     * 5's (a DuckLake read at an earlier snapshot described under the name it had then, so another
-    * table's grant could cover it: review M1). Writing 4 keeps such a node unhealthy and never
+    * table's grant could cover it: review M1). Version 4 is protocol 6's, without native RLS.
+    * Version 5 is protocol 7's inline RLS payload. Version 6 is the separately stacked CLS payload.
+    * Version 7 requires signed policy snapshots; writing 7 keeps older nodes unhealthy and never
     * routed to on every backend (Kubernetes pods and fleet servers are not checked by
     * [[ai.starlake.quack.ondemand.runtime.QodNodeBinary]]).
     */
-  val Version: Int = 4
+  val Version: Int = 7
 
   /** Part of what a node answers a statement that carries no current principal (qod-node's
     * kNoPrincipal): the health probe's canary expects it.
@@ -148,7 +152,9 @@ object NodeHandles:
       path: String,
       readOnly: Set[String],
       nowMs: Long,
-      nonce: String = newNonce()
+      nonce: String = newNonce(),
+      rowPolicies: List[NodeRowPolicy] = Nil,
+      rowPolicyBundle: String = ""
   ): MintedHandle =
     require(principal.id.nonEmpty, "no principal is bound to this statement")
     require(policyVersion >= 0L, "a policy version is never negative")
@@ -159,7 +165,17 @@ object NodeHandles:
       readOnly.forall(ReadOnlyAliasPattern.matches),
       "a read-only catalog alias is 1 to 128 of [a-z0-9_]"
     )
-    val exp     = nowMs + LifetimeMs
+    val exp = nowMs + LifetimeMs
+    require(
+      rowPolicies.size <= 256 && rowPolicies.forall(NodeRowPolicy.valid),
+      "invalid node row policies"
+    )
+    require(
+      rowPolicyBundle.isEmpty || (ContextDigestPattern.matches(
+        rowPolicyBundle
+      ) && rowPolicies.isEmpty),
+      "invalid row policy bundle"
+    )
     val payload = Json
       .obj(
         "v"         -> Json.fromInt(Version),
@@ -172,14 +188,16 @@ object NodeHandles:
           "superuser" -> Json.fromBoolean(principal.superuser),
           "system"    -> Json.fromBoolean(principal.system)
         ),
-        "pool"          -> Json.fromString(pool),
-        "policyVersion" -> Json.fromLong(policyVersion),
-        "ctx"           -> Json.fromString(ctx),
-        "creds"         -> Json.fromString(creds),
-        "path"          -> Json.fromString(path),
-        "readOnly"      -> Json.arr(readOnly.toList.sorted.map(Json.fromString)*),
-        "nonce"         -> Json.fromString(nonce),
-        "exp"           -> Json.fromLong(exp)
+        "pool"            -> Json.fromString(pool),
+        "policyVersion"   -> Json.fromLong(policyVersion),
+        "ctx"             -> Json.fromString(ctx),
+        "creds"           -> Json.fromString(creds),
+        "path"            -> Json.fromString(path),
+        "readOnly"        -> Json.arr(readOnly.toList.sorted.map(Json.fromString)*),
+        "rowPolicyBundle" -> Json.fromString(rowPolicyBundle),
+        "rowPolicies" -> Json.arr(rowPolicies.map(summon[io.circe.Encoder[NodeRowPolicy]].apply)*),
+        "nonce"       -> Json.fromString(nonce),
+        "exp"         -> Json.fromLong(exp)
       )
       .noSpaces
       .getBytes(StandardCharsets.UTF_8)
@@ -293,12 +311,24 @@ object NodeHandles:
               _        <- Either.cond(CredsPattern.matches(creds), (), "malformed handle payload")
               readOnly <- field[List[String]](c, "readOnly")
               _        <- Either.cond(wellFormedReadOnly(readOnly), (), "malformed handle payload")
-              p        <- c.downField("principal").success.toRight("malformed handle payload")
-              id       <- field[String](p, "id")
-              name     <- field[String](p, "name")
-              tenant   <- field[Option[String]](p, "tenant")
-              su       <- field[Boolean](p, "superuser")
-              system   <- field[Boolean](p, "system")
+              bundle   <- field[String](c, "rowPolicyBundle")
+              rows     <- field[List[NodeRowPolicy]](c, "rowPolicies")
+              _        <- Either.cond(
+                bundle.isEmpty || (ContextDigestPattern.matches(bundle) && rows.isEmpty),
+                (),
+                "malformed handle payload"
+              )
+              _ <- Either.cond(
+                rows.size <= 256 && rows.forall(NodeRowPolicy.valid),
+                (),
+                "malformed handle payload"
+              )
+              p      <- c.downField("principal").success.toRight("malformed handle payload")
+              id     <- field[String](p, "id")
+              name   <- field[String](p, "name")
+              tenant <- field[Option[String]](p, "tenant")
+              su     <- field[Boolean](p, "superuser")
+              system <- field[Boolean](p, "system")
             yield VerifiedHandle(
               node,
               replica,
@@ -309,7 +339,9 @@ object NodeHandles:
               exp,
               ctx,
               creds,
-              readOnly
+              readOnly,
+              rows,
+              bundle
             )
         }
 

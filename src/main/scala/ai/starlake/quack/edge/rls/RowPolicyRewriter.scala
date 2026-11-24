@@ -365,6 +365,17 @@ object RowPolicyRewriter:
         java.util.regex.Matcher.quoteReplacement(values.getOrElse(name, "NULL"))
     )
 
+  /** The native path uses exactly the gateway's escaped identity literals. Unknown tokens refuse
+    * instead of becoming NULL: NULL is not restrictive in every boolean expression.
+    */
+  def filledPredicate(predicate: String, eff: EffectiveSet): String =
+    val values = tokenValues(eff)
+    require(
+      TokenRegex.findAllIn(predicate).forall(t => values.contains(t.drop(2).dropRight(1))),
+      "row policy contains an unknown identity token"
+    )
+    substitute(predicate, values)
+
 class RowPolicyRewriter(
     catalog: ColumnCatalog,
     unresolvedMode: UnresolvedMode,
@@ -646,7 +657,13 @@ class RowPolicyRewriter(
         )
       val expr: Expression =
         try
-          val each = matched.map(p => substitute(p.predicateSql, values))
+          val each = matched.map { p =>
+            require(
+              RowPolicyIdentity.safeTokenLocations(p.predicateSql),
+              "unsafe identity token location"
+            )
+            substitute(p.predicateSql, values)
+          }
           // Each predicate must read whole on its own: one stored before the validator required
           // it could hold text the checks never saw, a closing parenthesis that joins the next
           // policy's predicate once they are put together included.

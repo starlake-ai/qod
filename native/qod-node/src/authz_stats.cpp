@@ -14,6 +14,7 @@ const std::vector<std::string> &AuthzStatsColumns() {
 	    "verdict_cache_size",
 	    "verdict_cache_evictions",
 	    "credential_sets_size",
+	    "row_policy_refusals",
 	};
 	return columns;
 }
@@ -30,6 +31,7 @@ std::vector<int64_t> AuthzStatsValues(const AuthzStats &stats, const AuthzStatsS
 	    sizes.verdict_cache_size,
 	    stats.verdict_cache_evictions.load(),
 	    sizes.credential_sets_size,
+	    stats.row_policy_refusals.load(),
 	};
 }
 

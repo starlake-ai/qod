@@ -181,7 +181,12 @@ object EdgeRewriters extends LazyLogging:
         .getBoolean("enabled")
     val rlsEnabled =
       com.typesafe.config.ConfigFactory.load().getBoolean("quack-on-demand.rls.enabled")
-    new ai.starlake.quack.edge.policy.ProtectedWriteGuard(catalog, clsEnabled, rlsEnabled)
+    new ai.starlake.quack.edge.policy.ProtectedWriteGuard(
+      catalog,
+      clsEnabled,
+      rlsEnabled,
+      nodeRowPolicies = ai.starlake.quack.edge.rls.RowPolicyEnforcement.onNode
+    )
 
   /** SELECT-path row-filter rewriter, over the same [[columnCatalog]] as the column rewriter and
     * the guard: a predicate naming a column its table does not have fails the policy.
@@ -194,4 +199,8 @@ object EdgeRewriters extends LazyLogging:
         "row-level security is DISABLED (quack-on-demand.rls.enabled=false). " +
           "Every statement bypasses the row-policy rewriter."
       )
-    new RowPolicyRewriter(catalog, unresolvedTableMode(), enabled = rlsEnabled)
+    new RowPolicyRewriter(
+      catalog,
+      unresolvedTableMode(),
+      enabled = rlsEnabled && !ai.starlake.quack.edge.rls.RowPolicyEnforcement.onNode
+    )

@@ -21,7 +21,8 @@ final case class NodeAuthzStats(
     screenCalls: Long,
     verdictCacheSize: Long,
     verdictCacheEvictions: Long,
-    credentialSetsSize: Long
+    credentialSetsSize: Long,
+    rowPolicyRefusals: Long = 0L
 ):
 
   /** The counters in [[NodeAuthzStats.Counters]]' order. */
@@ -33,7 +34,8 @@ final case class NodeAuthzStats(
     decideRefused,
     localRefusals,
     screenCalls,
-    verdictCacheEvictions
+    verdictCacheEvictions,
+    rowPolicyRefusals
   )
 
   /** The sizes in [[NodeAuthzStats.Sizes]]' order. */
@@ -50,7 +52,8 @@ final case class NodeAuthzStats(
     screenCalls + o.screenCalls,
     o.verdictCacheSize,
     verdictCacheEvictions + o.verdictCacheEvictions,
-    o.credentialSetsSize
+    o.credentialSetsSize,
+    rowPolicyRefusals + o.rowPolicyRefusals
   )
 
   /** The counters' increase since `o`, the sizes this reading's. */
@@ -64,7 +67,8 @@ final case class NodeAuthzStats(
     screenCalls - o.screenCalls,
     verdictCacheSize,
     verdictCacheEvictions - o.verdictCacheEvictions,
-    credentialSetsSize
+    credentialSetsSize,
+    rowPolicyRefusals - o.rowPolicyRefusals
   )
 
 object NodeAuthzStats:
@@ -83,13 +87,15 @@ object NodeAuthzStats:
     "screen_calls",
     "verdict_cache_size",
     "verdict_cache_evictions",
-    "credential_sets_size"
+    "credential_sets_size",
+    "row_policy_refusals"
   )
 
   /** The columns that only grow while the node runs, each exported as
     * `qod_node_authz_<counter>_total`.
     */
-  val Counters: List[String] = Columns.take(7) :+ "verdict_cache_evictions"
+  val Counters: List[String] =
+    Columns.take(7) ++ List("verdict_cache_evictions", "row_policy_refusals")
 
   /** The columns that are sizes as of the reading, each exported as the gauge
     * `qod_node_authz_<size>`.
@@ -124,8 +130,8 @@ object NodeAuthzStats:
     catch case _: Throwable => None
 
   private def fromValues(vs: List[Long]): Option[NodeAuthzStats] = vs match
-    case List(a, b, c, d, e, f, g, size, evictions, sets) =>
-      Some(NodeAuthzStats(a, b, c, d, e, f, g, size, evictions, sets))
+    case List(a, b, c, d, e, f, g, size, evictions, sets, rows) =>
+      Some(NodeAuthzStats(a, b, c, d, e, f, g, size, evictions, sets, rows))
     case _ => None
 
   /** What `current` adds to `previous`, the node's last reading: each counter's increase; or, when

@@ -618,7 +618,8 @@ object Main extends IOApp with LazyLogging:
             issued = Some(issuedHandles),
             minted = Some(mintedHandles),
             paths = key => usePaths.get()(key),
-            readOnlyCatalogs = readOnlyCatalogs
+            readOnlyCatalogs = readOnlyCatalogs,
+            nodeRowPolicies = ai.starlake.quack.edge.rls.RowPolicyEnforcement.onNode
           )
     // After the store: the fleet backend claims servers through it (FleetServerStore).
     val backend: QuackBackend = BootFactories.quackBackend(mgrCfg, store, qodNodeBin, nodeKeys)
@@ -2341,7 +2342,11 @@ object Main extends IOApp with LazyLogging:
         internalHost,
         internalPort,
         mgrCfg.nodeAuthz.internalMaxConnections,
-        List(credentialsRoute.routes, decideRoute.routes)
+        List(
+          credentialsRoute.routes,
+          decideRoute.routes,
+          new ai.starlake.quack.edge.authz.RowPolicyRoute(nodeKeys).routes
+        )
       )
       // One managed-object-store client for both the boot probe below and the purge
       // worker further down. Constructed unconditionally: the SDK client it wraps is

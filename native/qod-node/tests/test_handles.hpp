@@ -5,6 +5,7 @@
 
 #include "authz.hpp"
 #include "crypto.hpp"
+#include "json_writer.hpp"
 
 #include <cstdint>
 #include <cstdio>
@@ -35,6 +36,8 @@ struct MintSpec {
 	std::string path;
 	//! The pool's read-only catalogs (decision 24), sorted as the manager writes them; empty: none.
 	std::vector<std::string> read_only;
+	std::vector<qod::RowPolicy> row_policies;
+	std::string row_policy_bundle;
 };
 
 //! `aliases` as a handle's readOnly array (the tests' aliases need no escaping).
@@ -51,15 +54,21 @@ inline std::string MintWith(const MintSpec &spec) {
 	static int counter = 0;
 	char nonce[33];
 	std::snprintf(nonce, sizeof(nonce), "%032x", ++counter);
-	auto payload = std::string("{\"v\":4,\"node\":\"") + spec.node + "\",\"replica\":\"" + spec.replica +
-	               "\",\"principal\":{\"id\":\"" + spec.principal_id + "\",\"name\":\"" + spec.principal_id +
-	               "\",\"tenant\":" + (spec.superuser ? "null" : "\"acme\"") +
-	               ",\"superuser\":" + (spec.superuser ? "true" : "false") +
-	               ",\"system\":" + (spec.system ? "true" : "false") + "}," +
-	               "\"pool\":\"acme/acme_db/bi\",\"policyVersion\":" + std::to_string(spec.policy_version) +
-	               ",\"ctx\":\"" + spec.ctx + "\",\"creds\":\"" + spec.creds + "\",\"path\":\"" + spec.path +
-	               "\",\"readOnly\":" + ReadOnlyJson(spec.read_only) + ",\"nonce\":\"" + nonce +
-	               "\",\"exp\":" + std::to_string(spec.exp) + "}";
+	std::vector<qod::JsonValue> policies;
+	for (auto &p : spec.row_policies) {
+		policies.push_back(qod::JsonObject({{"id", qod::JsonString(p.id)}, {"catalog", qod::JsonString(p.catalog)},
+		    {"schema", qod::JsonString(p.schema)}, {"table", qod::JsonString(p.table)}, {"sql", qod::JsonString(p.sql)}}));
+	}
+	auto payload = std::string("{\"v\":7,\"node\":\"") + spec.node + "\",\"replica\":\"" + spec.replica +
+				   "\",\"principal\":{\"id\":\"" + spec.principal_id + "\",\"name\":\"" + spec.principal_id +
+				   "\",\"tenant\":" + (spec.superuser ? "null" : "\"acme\"") +
+				   ",\"superuser\":" + (spec.superuser ? "true" : "false") +
+				   ",\"system\":" + (spec.system ? "true" : "false") + "}," +
+				   "\"pool\":\"acme/acme_db/bi\",\"policyVersion\":" + std::to_string(spec.policy_version) +
+				   ",\"ctx\":\"" + spec.ctx + "\",\"creds\":\"" + spec.creds + "\",\"path\":\"" + spec.path +
+				   "\",\"readOnly\":" + ReadOnlyJson(spec.read_only) +
+				   ",\"rowPolicies\":" + qod::CanonicalJson(qod::JsonArray(policies)) + ",\"rowPolicyBundle\":\"" +
+				   spec.row_policy_bundle + "\",\"nonce\":\"" + nonce + "\",\"exp\":" + std::to_string(spec.exp) + "}";
 	return qod::ToBase64Url(payload) + "." + qod::Hex(qod::HmacSha256(kKey, payload));
 }
 

@@ -112,9 +112,33 @@ object StaleRowPolicyReport:
         Try(readerOf(d.tenantId, d.name).columnNames(schema, table)).getOrElse(Nil)
     )
 
+  /** Stored expressions are checked even when a wildcard or an absent table prevents column checks.
+    */
+  def invalidLines(roles: List[RbacRole], policies: List[RoleRowPolicy]): List[String] =
+    val byId = roles.map(r => r.id -> r).toMap
+    policies
+      .flatMap { p =>
+        RowPredicateValidator.validate(p.predicateSql) match
+          case _: RowPredicateValidator.Invalid =>
+            byId
+              .get(p.roleId)
+              .map(r =>
+                s"WARN: tenant '${r.tenantId}' role '${r.name}': row policy ${p.id} on " +
+                  s"${p.catalogName}.${p.schemaName}.${p.tableName} is not supported by native RLS; " +
+                  "matching table reads will be denied. Update or delete this policy."
+              )
+          case _ => None
+      }
+      .map(_.map(c => if c.isControl then '?' else c))
+      .sorted
+
   /** Prints [[linesOf]] on stderr. */
   def report(
       store: ControlPlaneStore,
       sup: PoolSupervisor,
       readerOf: (String, String) => DuckLakeCatalogReader
-  ): Unit = linesOf(store, sup, readerOf).foreach(System.err.println)
+  ): Unit =
+    val roles    = store.listTenants().flatMap(t => store.listRoles(t.id))
+    val policies = roles.flatMap(r => store.listRowPolicies(r.id))
+    (linesOf(store, sup, readerOf) ++ invalidLines(roles, policies)).distinct.sorted
+      .foreach(System.err.println)
