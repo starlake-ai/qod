@@ -4,8 +4,16 @@
 
 ### Upgrading
 
-- **Row policies now run exclusively in the native node.** Deploy and restart protocol-7
-  nodes; signed session handles are version 5 and older nodes and handles refuse. The
+- **Native column policies are opt-in.** Deploy and restart protocol-8 nodes (signed
+  handle version 6) before setting `QOD_CLS_ENFORCEMENT=node` on every replica.
+  Gateway CLS remains the default. Native CLS applies compatible masks and denies
+  to bound base-table reads, including reads through views; unsupported types,
+  generated-output/view-scoped policies and writes to covered tables refuse.
+  Unsafe stored masks refuse policy minting, and mask evaluation errors become NULL.
+  See [the design and limits](docs/node-column-security.md).
+
+- **Row policies now run exclusively in the native node.** Deploy and restart protocol-8
+  nodes; signed session handles are version 6 and older nodes and handles refuse. The
   gateway RLS SQL rewriter, its enforcement-mode switch and rewrite metrics are removed.
   `QOD_RLS_ENABLED=false` remains the RLS kill switch. Native enforcement applies base-table
   policies through views and resolved scans; writes to protected tables (INSERT included),

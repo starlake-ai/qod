@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <vector>
 #include "row_policies.hpp"
+#include "column_policies.hpp"
 
 namespace qod {
 
@@ -30,8 +31,8 @@ struct Principal {
 
 //! A verified per-statement handle. The manager mints one for every statement it sends a node, as
 //! `<base64url(payload)>.<hex HMAC-SHA256(node key, payload bytes)>`, the payload a JSON object:
-//! {"v":5,"node":..,"replica":..,"principal":{"id","name","tenant","superuser","system"},
-//!  "pool":..,"policyVersion":..,"ctx":..,"creds":..,"path":..,"readOnly":[..],"rowPolicies":[..],"nonce":..,"exp":..},
+//! {"v":6,"node":..,"replica":..,"principal":{"id","name","tenant","superuser","system"},
+//!  "pool":..,"policyVersion":..,"ctx":..,"creds":..,"path":..,"readOnly":[..],"rowPolicies":[..],"columnPolicies":[..],"nonce":..,"exp":..},
 //! every member required ("ctx", "creds" and "path" since node protocol 3, "readOnly" since 5). The MAC
 //! covers the payload bytes as sent, so no canonical form has to agree between the two sides.
 struct Handle {
@@ -58,6 +59,7 @@ struct Handle {
 	//! ATTACH and DETACH into one is refused, the system's included. Required since node protocol 5.
 	std::vector<std::string> read_only;
 	std::vector<RowPolicy> row_policies;
+	std::vector<ColumnPolicy> column_policies;
 	std::string nonce;
 	//! Epoch milliseconds.
 	int64_t exp = 0;
@@ -73,7 +75,8 @@ struct Handle {
 //! serve.
 //! Version 4 is protocol 6's: its nodes have no native row-policy enforcement. Version 5 requires
 //! rowPolicies even when empty, and keeps an older node from silently serving native-RLS traffic.
-constexpr int64_t kHandleVersion = 5;
+//! Version 6 requires columnPolicies, fencing nodes without native CLS.
+constexpr int64_t kHandleVersion = 6;
 
 //! How far ahead of this node's clock a handle may expire: the manager mints them for 60 s, and the
 //! rest tolerates a manager clock up to 4 minutes ahead of the node's. That is the one direction it

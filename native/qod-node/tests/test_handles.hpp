@@ -37,6 +37,7 @@ struct MintSpec {
 	//! The pool's read-only catalogs (decision 24), sorted as the manager writes them; empty: none.
 	std::vector<std::string> read_only;
 	std::vector<qod::RowPolicy> row_policies;
+	std::vector<qod::ColumnPolicy> column_policies;
 };
 
 //! `aliases` as a handle's readOnly array (the tests' aliases need no escaping).
@@ -58,14 +59,20 @@ inline std::string MintWith(const MintSpec &spec) {
 		policies.push_back(qod::JsonObject({{"id", qod::JsonString(p.id)}, {"catalog", qod::JsonString(p.catalog)},
 		    {"schema", qod::JsonString(p.schema)}, {"table", qod::JsonString(p.table)}, {"sql", qod::JsonString(p.sql)}}));
 	}
-	auto payload = std::string("{\"v\":5,\"node\":\"") + spec.node + "\",\"replica\":\"" + spec.replica +
+	std::vector<qod::JsonValue> columns;
+	for (auto &p : spec.column_policies) {
+		columns.push_back(qod::JsonObject({{"id", qod::JsonString(p.id)}, {"catalog", qod::JsonString(p.catalog)},
+		    {"schema", qod::JsonString(p.schema)}, {"table", qod::JsonString(p.table)},
+		    {"column", qod::JsonString(p.column)}, {"action", qod::JsonString(p.action)}, {"sql", qod::JsonString(p.sql)}}));
+	}
+	auto payload = std::string("{\"v\":6,\"node\":\"") + spec.node + "\",\"replica\":\"" + spec.replica +
 	               "\",\"principal\":{\"id\":\"" + spec.principal_id + "\",\"name\":\"" + spec.principal_id +
 	               "\",\"tenant\":" + (spec.superuser ? "null" : "\"acme\"") +
 	               ",\"superuser\":" + (spec.superuser ? "true" : "false") +
 	               ",\"system\":" + (spec.system ? "true" : "false") + "}," +
 	               "\"pool\":\"acme/acme_db/bi\",\"policyVersion\":" + std::to_string(spec.policy_version) +
 	               ",\"ctx\":\"" + spec.ctx + "\",\"creds\":\"" + spec.creds + "\",\"path\":\"" + spec.path +
-	               "\",\"readOnly\":" + ReadOnlyJson(spec.read_only) + ",\"rowPolicies\":" + qod::CanonicalJson(qod::JsonArray(policies)) + ",\"nonce\":\"" + nonce +
+	               "\",\"readOnly\":" + ReadOnlyJson(spec.read_only) + ",\"rowPolicies\":" + qod::CanonicalJson(qod::JsonArray(policies)) + ",\"columnPolicies\":" + qod::CanonicalJson(qod::JsonArray(columns)) + ",\"nonce\":\"" + nonce +
 	               "\",\"exp\":" + std::to_string(spec.exp) + "}";
 	return qod::ToBase64Url(payload) + "." + qod::Hex(qod::HmacSha256(kKey, payload));
 }

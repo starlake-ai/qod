@@ -712,8 +712,9 @@ void Definition::Table(const BaseTableRef &table, const std::set<std::string> &s
 //! CTEs) and a trigger action's (an INSERT, UPDATE or DELETE).
 class CallNames {
 public:
-	explicit CallNames(ClientContext &context, const std::vector<RowPolicy> *policies = nullptr)
-	    : context_(context), row_policies_(policies) {
+	explicit CallNames(ClientContext &context, const std::vector<RowPolicy> *policies = nullptr,
+	                   const std::vector<ColumnPolicy> *columns = nullptr)
+	    : context_(context), row_policies_(policies), column_policies_(columns) {
 	}
 
 	//! Every statement of `sql`.
@@ -826,10 +827,11 @@ private:
 
 	//! Change rows have no ordinary base scan on which a row-policy filter can be installed.
 	void RefuseUnfilteredChangeFeed(const std::string &name) {
-		if (row_policies_ && !row_policies_->empty() &&
+		if (((row_policies_ && !row_policies_->empty()) || (column_policies_ && !column_policies_->empty())) &&
 		    (name == "ducklake_table_changes" || name == "ducklake_table_insertions" ||
 		     name == "ducklake_table_deletions")) {
-			Unsupported("a DuckLake change feed with row policies; no filterable base-table scan");
+			auto kind = column_policies_ && !column_policies_->empty() ? "column" : "row";
+			Unsupported(std::string("a DuckLake change feed with ") + kind + " policies; no filterable base-table scan");
 		}
 	}
 
@@ -899,6 +901,14 @@ private:
 	}
 
 	void Macro(CatalogEntry &entry, CatalogEntryRetriever &retriever, Rules rules) {
+		if (entry.type == CatalogType::TABLE_MACRO_ENTRY && column_policies_) {
+			for (auto &p : *column_policies_) {
+				if (ColumnPolicyMatches(p, Text(entry.ParentCatalog().GetName()),
+				                        Text(entry.ParentSchema().name), Text(entry.name))) {
+					Unsupported("a column policy scoped to a table macro; scope it to its base tables instead");
+				}
+			}
+		}
 		if (path_.count(&entry) != 0) {
 			Unsupported("a macro that calls itself");
 		}
@@ -952,6 +962,14 @@ private:
 				if (p.table != "*" && RowPolicyMatches(p, Text(view.ParentCatalog().GetName()),
 				                                      Text(view.ParentSchema().name), Text(view.name))) {
 					Unsupported("a row policy scoped to a view; scope it to its base tables instead");
+				}
+			}
+		}
+		if (column_policies_) {
+			for (auto &p : *column_policies_) {
+				if (ColumnPolicyMatches(p, Text(view.ParentCatalog().GetName()),
+				                                         Text(view.ParentSchema().name), Text(view.name))) {
+					Unsupported("a column policy scoped to a view; scope it to its base tables instead");
 				}
 			}
 		}
@@ -1360,6 +1378,7 @@ private:
 
 	ClientContext &context_;
 	const std::vector<RowPolicy> *row_policies_;
+	const std::vector<ColumnPolicy> *column_policies_;
 	//! The views and macros on the walk's current path, for cycles.
 	std::set<const CatalogEntry *> path_;
 	//! How deep query() literals nest on the current path.
@@ -1369,8 +1388,8 @@ private:
 //! The client statement's own statements: every statement of its text, and an EXECUTE's prepared one
 //! (the statement it re-binds now, under the catalog as it is now).
 void JudgeCallNames(ClientContext &context, LogicalOperator &plan, const std::string &statement_text,
-                    const std::vector<RowPolicy> *row_policies) {
-	CallNames names(context, row_policies);
+                    const std::vector<RowPolicy> *row_policies, const std::vector<ColumnPolicy> *column_policies) {
+	CallNames names(context, row_policies, column_policies);
 	names.Sql(statement_text);
 	std::function<void(LogicalOperator &)> executes = [&](LogicalOperator &op) {
 		if (op.type == LogicalOperatorType::LOGICAL_EXECUTE) {
@@ -2556,7 +2575,7 @@ void Walker::Operator(LogicalOperator &op, const std::string &via) {
 	case LogicalOperatorType::LOGICAL_SECURE_VIEW:
 		// A node-created row-filter boundary preserves the caller's grants. It must never
 		// turn the enclosed base-table reads into definer-rights reads through a view.
-		if (!dynamic_cast<RowPolicyBoundary *>(&op)) {
+		if (!dynamic_cast<RowPolicyBoundary *>(&op) && !dynamic_cast<ColumnPolicyBoundary *>(&op)) {
 			child_via = SecureView(op.Cast<LogicalSecureView>(), via);
 		}
 		break;
@@ -3193,7 +3212,8 @@ bool IsLockedSetting(const std::string &name) {
 }
 
 Described Describe(duckdb::ClientContext &context, duckdb::LogicalOperator &plan, const Principal &principal,
-                   const std::string *statement_text, const std::vector<RowPolicy> *row_policies) {
+                   const std::string *statement_text, const std::vector<RowPolicy> *row_policies,
+                   const std::vector<ColumnPolicy> *column_policies) {
 	std::string canonical;
 	std::set<std::string> written;
 	try {
@@ -3204,7 +3224,7 @@ Described Describe(duckdb::ClientContext &context, duckdb::LogicalOperator &plan
 			// Item 32 B: every call name the statement reaches, as written, which the plan may not show:
 			// DuckDB folded calls on constants away while binding. Without a text the caller refuses the
 			// statement (node_hooks, Enforce).
-			JudgeCallNames(context, plan, *statement_text, row_policies);
+			JudgeCallNames(context, plan, *statement_text, row_policies, column_policies);
 		}
 		canonical = walker.Canonical(duckdb::LogicalOperatorToString(plan.type));
 		written = walker.Written();

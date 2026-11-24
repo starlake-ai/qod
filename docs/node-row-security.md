@@ -7,9 +7,9 @@ planner interfaces. The gateway no longer rewrites row-policy queries, and there
 no gateway fallback or enforcement-mode switch. `QOD_RLS_ENABLED=false` disables RLS.
 Every manager replica must use the same setting.
 
-Node protocol 7 and signed handle version 5 are mandatory. Rebuild and vendor every
+Node protocol 8 and signed handle version 6 are mandatory. Rebuild and vendor every
 platform's qod-node binary, deploy the matching node image and fleet CLI, and restart
-the nodes with this release. Version-4 handles and older nodes fail closed. No
+the nodes with this release. Earlier handles and nodes fail closed. No
 policy-table or DuckLake metadata migration is required.
 
 ## Data flow and trust

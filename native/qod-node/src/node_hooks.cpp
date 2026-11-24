@@ -99,7 +99,7 @@ public:
 			throw PermissionException(kHandleRefused + std::string("it was already used"));
 		}
 		current_ = Installed {handle.principal, handle.policy_version, handle.exp, handle.nonce, handle.ctx,
-		                      text,             handle.replica,        handle.path, handle.read_only, handle.row_policies};
+		                      text,             handle.replica,        handle.path, handle.read_only, handle.row_policies, handle.column_policies};
 		installed_ = true;
 		authz_ = &authz;
 	}
@@ -230,7 +230,7 @@ public:
 	void AdmitPrelude() {
 		std::lock_guard<std::mutex> guard(lock_);
 		pending_ = Admitted {"",           current_.principal.id, current_.policy_version,
-		                     current_.ctx, kNeverExpires,         current_.read_only, current_.row_policies};
+		                     current_.ctx, kNeverExpires,         current_.read_only, current_.row_policies, current_.column_policies};
 	}
 
 	//! True when the current statement already runs under a verdict for the plan `fingerprint`
@@ -699,7 +699,7 @@ std::string RefusalMessage(const DecideResult &decided, const NodeAuthz &authz, 
 //! else the decider's (from Task 7's cache or the issuing replica). Throws the refusal.
 Admitted Decide(Gate &gate, const Installed &installed, const Described &described) {
 	Admitted admitted {described.fingerprint, installed.principal.id, installed.policy_version,
-	                   installed.ctx,         kNeverExpires,          installed.read_only, installed.row_policies};
+	                   installed.ctx,         kNeverExpires,          installed.read_only, installed.row_policies, installed.column_policies};
 	if (installed.principal.superuser || installed.principal.system) {
 		return admitted;
 	}
@@ -737,6 +737,7 @@ void Enforce(ClientContext &context, Gate &gate, LogicalOperator &plan) {
 	auto privileged = installed.principal.superuser || installed.principal.system;
 	if (!privileged) {
 		VerifyRowPolicies(plan, installed.row_policies);
+		VerifyColumnPolicies(plan, installed.column_policies);
 	}
 	Described described;
 	try {
@@ -747,7 +748,7 @@ void Enforce(ClientContext &context, Gate &gate, LogicalOperator &plan) {
 			                          "cannot be judged, which QoD does not support");
 		}
 		described = Describe(context, plan, installed.principal, text ? &*text : nullptr,
-		                     &installed.row_policies);
+		                     &installed.row_policies, &installed.column_policies);
 		if (!privileged && !installed.row_policies.empty()) {
 			auto description = ParseJson(described.canonical);
 			for (auto &object : description.Get("objects", JsonValue::Kind::ARRAY).array) {
@@ -763,6 +764,22 @@ void Enforce(ClientContext &context, Gate &gate, LogicalOperator &plan) {
 					                     schema_ddl ? policy.table : object.Get("name", JsonValue::Kind::STRING).string)) {
 						throw PermissionException("QoD: writes to a row-policy table require write-check policies, "
 						                          "which node RLS does not yet support");
+					}
+				}
+			}
+		}
+		if (!privileged && !installed.column_policies.empty()) {
+			auto description = ParseJson(described.canonical);
+			for (auto &object : description.Get("objects", JsonValue::Kind::ARRAY).array) {
+				auto access = object.Get("access", JsonValue::Kind::STRING).string;
+				if (access == "read") continue;
+				for (auto &policy : installed.column_policies) {
+					auto schema_ddl = object.Get("kind", JsonValue::Kind::STRING).string == "schema" &&
+					                  (access == "drop" || access == "alter");
+					if (ColumnPolicyMatches(policy, object.Get("catalog", JsonValue::Kind::STRING).string,
+					                        object.Get("schema", JsonValue::Kind::STRING).string,
+					                        schema_ddl ? policy.table : object.Get("name", JsonValue::Kind::STRING).string)) {
+						throw PermissionException("QoD: writes to a column-policy table are not supported in native CLS");
 					}
 				}
 			}
@@ -803,6 +820,7 @@ void PostBind(PlannerExtensionInput &input, BoundStatement &statement) {
 	Installed installed;
 	if (SessionSnapshot(context, gate.authz->Now(), installed) &&
 	    !installed.principal.superuser && !installed.principal.system && !IsPrelude(*statement.plan)) {
+		ApplyColumnPolicies(context, input.binder, statement.plan, installed.column_policies);
 		ApplyRowPolicies(context, statement.plan, installed.row_policies);
 	}
 	Enforce(context, gate, *statement.plan);

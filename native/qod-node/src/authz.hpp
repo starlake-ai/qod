@@ -66,6 +66,7 @@ struct Installed {
 	//! The handle's read-only catalogs (decision 24): a refresh may change them.
 	std::vector<std::string> read_only;
 	std::vector<RowPolicy> row_policies;
+	std::vector<ColumnPolicy> column_policies;
 };
 
 //! What one verdict admitted: the plan it was taken for and the session it holds for.
@@ -80,6 +81,7 @@ struct Admitted {
 	//! again once they change, since an EXECUTE that DuckDB does not rebind shows no plan.
 	std::vector<std::string> read_only;
 	std::vector<RowPolicy> row_policies;
+	std::vector<ColumnPolicy> column_policies;
 };
 
 constexpr int64_t kNeverExpires = std::numeric_limits<int64_t>::max();

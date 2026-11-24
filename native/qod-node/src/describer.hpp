@@ -89,7 +89,8 @@ void ExpectSessionPath(duckdb::ClientContext &context, const std::string &path);
 //! described", without DuckDB's message.
 Described Describe(duckdb::ClientContext &context, duckdb::LogicalOperator &plan, const Principal &principal,
                    const std::string *statement_text = nullptr,
-                   const std::vector<RowPolicy> *row_policies = nullptr);
+                   const std::vector<RowPolicy> *row_policies = nullptr,
+                   const std::vector<ColumnPolicy> *column_policies = nullptr);
 
 //! CONTRACT Addendum 4 item 32 B, for a statement that failed to bind (ClientContextState::OnPlanningError):
 //! the call names `statement` reaches, and the definitions of the views it reads, judged on `context` as

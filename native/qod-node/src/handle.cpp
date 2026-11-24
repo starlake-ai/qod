@@ -80,6 +80,22 @@ Handle VerifyHandle(const std::string &text, const std::string &node_key, const 
 			}
 			handle.row_policies.push_back(std::move(policy));
 		}
+		for (auto &p : json.Get("columnPolicies", JsonValue::Kind::ARRAY).array) {
+			ColumnPolicy policy {p.Get("id", JsonValue::Kind::STRING).string,
+			                     p.Get("catalog", JsonValue::Kind::STRING).string,
+			                     p.Get("schema", JsonValue::Kind::STRING).string,
+			                     p.Get("table", JsonValue::Kind::STRING).string,
+			                     p.Get("column", JsonValue::Kind::STRING).string,
+			                     p.Get("action", JsonValue::Kind::STRING).string,
+			                     p.Get("sql", JsonValue::Kind::STRING).string};
+			if (policy.id.empty() || policy.catalog.empty() || policy.schema.empty() || policy.table.empty() ||
+			    policy.column.empty() || policy.sql.size() > 4096 || handle.column_policies.size() >= 256 ||
+			    (policy.action != "deny" && policy.action != "mask") ||
+			    (policy.action == "mask" && policy.sql.empty()) || (policy.action == "deny" && !policy.sql.empty())) {
+				throw std::invalid_argument("invalid column policy");
+			}
+			handle.column_policies.push_back(std::move(policy));
+		}
 		handle.exp = json.Get("exp", JsonValue::Kind::INTEGER).integer;
 		auto &principal = json.Get("principal", JsonValue::Kind::OBJECT);
 		handle.principal.id = principal.Get("id", JsonValue::Kind::STRING).string;

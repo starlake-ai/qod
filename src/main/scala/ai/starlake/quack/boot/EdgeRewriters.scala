@@ -62,7 +62,8 @@ object EdgeRewriters extends LazyLogging:
     new ColumnPolicyRewriter(
       catalog = catalog,
       unresolvedMode = unresolvedTableMode(),
-      enabled = clsEnabled
+      enabled = clsEnabled,
+      nativeEnforcement = ai.starlake.quack.edge.cls.ColumnPolicyEnforcement.nativeEnabled()
     )
 
   /** `quack-on-demand.cls.unresolvedTable`: what the column and row policy rewriters do with a

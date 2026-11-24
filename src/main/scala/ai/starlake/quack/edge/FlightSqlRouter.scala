@@ -1186,7 +1186,9 @@ final class FlightSqlRouter(
 
     // Column-policy SQL is normalized consistently for the guard and column rewriter.
     // An RLS-only statement keeps the caller's text (policyText).
-    val policySql = FlightSqlRouter.policyText(sql, effectiveSet)
+    val policySql =
+      if columnPolicyRewriter.nativeEnforcement then sql
+      else FlightSqlRouter.policyText(sql, effectiveSet)
 
     // Protected writes stay refused before CLS rewriting. On reads this guard retains CLS
     // parser checks and historical-name/change-feed refusals; the node applies row filters.

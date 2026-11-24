@@ -28,7 +28,7 @@ class NodeHandlesSpec extends AnyFlatSpec with Matchers:
 
   private def golden(key: String): String =
     Files
-      .readAllLines(Paths.get("native/qod-node/tests/golden/handle-v5.txt"))
+      .readAllLines(Paths.get("native/qod-node/tests/golden/handle-v6.txt"))
       .asScala
       .collectFirst { case l if l.startsWith(s"$key=") => l.drop(key.length + 1) }
       .get
@@ -68,13 +68,13 @@ class NodeHandlesSpec extends AnyFlatSpec with Matchers:
     golden("readOnly") shouldBe "crm,erp_pg"
   }
 
-  it should "write handle version 5, which a node without native RLS refuses" in {
+  it should "write handle version 6, which a node without native CLS refuses" in {
     // A protocol-5 node describes a DuckLake read at an earlier snapshot under the name it had then,
     // so another table's grant could cover it (review M1); it refuses every handle whose v is not 3,
     // the probe's included: so it stays unroutable.
     val minted =
       NodeHandles.mint("s" * 32, "n", "r", Alice, "p", 0L, Ctx0, "", "", Set.empty, 1000L)
-    HandleInspector.payload(minted.text).hcursor.get[Int]("v") shouldBe Right(5)
+    HandleInspector.payload(minted.text).hcursor.get[Int]("v") shouldBe Right(6)
   }
 
   it should "carry the read-only catalogs sorted, and an empty array for none" in {

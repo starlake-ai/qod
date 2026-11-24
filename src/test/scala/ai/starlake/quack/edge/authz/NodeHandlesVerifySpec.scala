@@ -63,13 +63,15 @@ class NodeHandlesVerifySpec extends AnyFlatSpec with Matchers:
       "superuser" -> Json.False,
       "system"    -> Json.False
     ),
-    "pool"          -> Json.fromString("acme/acme_lake/bi"),
-    "policyVersion" -> Json.fromLong(7L),
-    "ctx"           -> Json.fromString("0" * 64),
-    "creds"         -> Json.fromString(""),
-    "readOnly"      -> Json.arr(),
-    "nonce"         -> Json.fromString("0123456789abcdef0123456789abcdef"),
-    "exp"           -> Json.fromLong(Now + 60_000L)
+    "pool"           -> Json.fromString("acme/acme_lake/bi"),
+    "policyVersion"  -> Json.fromLong(7L),
+    "ctx"            -> Json.fromString("0" * 64),
+    "creds"          -> Json.fromString(""),
+    "readOnly"       -> Json.arr(),
+    "rowPolicies"    -> Json.arr(),
+    "columnPolicies" -> Json.arr(),
+    "nonce"          -> Json.fromString("0123456789abcdef0123456789abcdef"),
+    "exp"            -> Json.fromLong(Now + 60_000L)
   )
 
   "verify" should "return what a minted handle carries" in {
@@ -137,6 +139,10 @@ class NodeHandlesVerifySpec extends AnyFlatSpec with Matchers:
       _.readOnly
     ) shouldBe Right(List("crm"))
     List(
+      Payload.mapObject(_.remove("columnPolicies")),
+      Payload.mapObject(
+        _.add("columnPolicies", Json.arr(Json.obj("action" -> Json.fromString("mask"))))
+      ),
       Payload.mapObject(_.remove("ctx")),
       Payload.mapObject(_.add("ctx", Json.fromString("XYZ"))),
       Payload.mapObject(_.remove("creds")),
