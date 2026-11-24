@@ -6,7 +6,7 @@ import org.scalatest.matchers.should.Matchers
 import java.sql.{Connection, DriverManager}
 import scala.util.{Try, Using}
 
-/** The evidence behind the mask allowlist ([[MaskForms]]), on DuckDB 2.0.0 in process: every
+/** The evidence behind the mask allowlist ([[MaskForms]]), on DuckDB 2.0.1 in process: every
   * allowed form, over a column of every type DuckDB has (the column's type is not known when a mask
   * is written), holding the value its type answers most errors on (a type's bounds, text no
   * conversion reads, a VARIANT holding an object or a huge BIGNUM), answers either a result, a
@@ -155,7 +155,8 @@ class MaskFormsEvidenceSpec extends AnyFlatSpec with Matchers:
         "coalesce(c || '*', c)",
         "CAST(c AS INTEGER)",
         "c::VARCHAR[]",
-        "TRY(c IN (1, 2))",
+        // TRY(c IN (1, 2)) leaked on 2.0.0 and answers over every type on 2.0.1; TRY and a
+        // comparison stay refused, as the forms around it still leak.
         "TRY(timezone(c, TIMESTAMP '2020-01-01'))",
         "CASE WHEN c THEN 'a' END",
         "c[CAST(c AS INTEGER)]",

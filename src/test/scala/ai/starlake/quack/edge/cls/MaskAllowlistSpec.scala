@@ -9,7 +9,7 @@ import cats.effect.unsafe.implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-/** A new mask may use only the allowed forms ([[MaskForms]]): those DuckDB 2.0.0 answers, over a
+/** A new mask may use only the allowed forms ([[MaskForms]]): those DuckDB 2.0.1 answers, over a
   * value of any type the column may have, without an error quoting the value. Anything else is
   * refused at create and at update, the refusal naming the part that is not allowed (never the
   * mask) and the allowed forms. A stored mask keeps applying and is reported at boot.

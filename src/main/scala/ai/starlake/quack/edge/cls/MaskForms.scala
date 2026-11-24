@@ -34,7 +34,7 @@ import net.sf.jsqlparser.schema.Column
 import scala.jdk.CollectionConverters._
 
 /** The forms a column mask may be written with: an allowlist, each form admitted because DuckDB
-  * 2.0.0 answers it, over a value of any type the column may have, with a result, a binder error
+  * 2.0.1 answers it, over a value of any type the column may have, with a result, a binder error
   * (the same for every row, before any is read) or an error that quotes no value of the row. A mask
   * DuckDB cannot evaluate on a row answers with DuckDB's error, and its conversion, parsing and
   * overflow errors quote the value they failed on, so a form outside this list could hand the

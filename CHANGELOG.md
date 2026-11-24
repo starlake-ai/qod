@@ -205,7 +205,7 @@
     now binds to the item where it bound to a column of that name.
   - A mask DuckDB cannot evaluate on a row answers with DuckDB's error, and DuckDB's conversion,
     parsing and overflow errors quote the value they failed on: the unmasked value. A new or
-    updated mask may now use only the forms DuckDB 2.0.0 answers, over a value of any type the
+    updated mask may now use only the forms DuckDB 2.0.1 answers, over a value of any type the
     column may have (its type is not known when the mask is written), with no error quoting the
     value; anything else is refused (`400`, naming each part that is not allowed and listing the
     allowed forms). The allowed forms: string and numeric constants, `NULL`, the column; `||` and
