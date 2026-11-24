@@ -4,15 +4,15 @@
 
 ### Upgrading
 
-- **Native row-policy enforcement is opt-in.** Set `QOD_RLS_ENFORCEMENT=node` after
-  deploying and restarting protocol-9 nodes. Signed session handles are now version 7;
-  older nodes and handles refuse. Gateway enforcement remains the default. Native mode
-  applies base-table policies through views and resolved scans; writes to protected tables
-  (INSERT included), view-scoped policies and unsupported predicate forms refuse. See
-  [the design and rollout guide](docs/node-row-security.md). Native RLS now uses signed,
-  paged policy snapshots, rejects unsafe identity-token locations and caller session
-  overrides, and refuses EXPLAIN of protected scans. Invalid stored policies fail only
-  on their own table scopes; fresh objects are not denied by wildcard row policies.
+- **Enabled row policies now run only on qod-node's bound DuckDB plan.** The gateway
+  row-policy SQL rewrite and `QOD_RLS_ENFORCEMENT` selector are removed. `QOD_RLS_ENABLED`
+  remains the kill switch. Deploy and restart protocol-9 nodes; signed handles are version 7.
+  Base-table policies apply through views and resolved scans. Writes to covered target tables
+  (INSERT included), view-scoped policies and unsupported predicates refuse. Table ACLs still
+  govern access; no applicable policy leaves reads unfiltered. Policy snapshots are signed and
+  paged; invalid stored predicates deny only their scopes. Fresh object creation is allowed,
+  caller setting overrides and EXPLAIN of protected scans refuse. See
+  [the design and rollout guide](docs/node-row-security.md).
 
 - **Restart every node after upgrading** so it runs DuckDB 2.0.1 (see Changed): a node an
   earlier release started keeps running DuckDB 2.0.0 until it restarts. On Kubernetes that means

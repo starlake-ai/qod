@@ -21,7 +21,7 @@ import net.sf.jsqlparser.expression.Expression
   * Unlike [[ai.starlake.quack.edge.cls.TransformSqlValidator]] the predicate may reference ANY
   * column (it filters rows of the protected table), so there is no single-column containment check.
   * The canonical form returned keeps the `${...}` tokens intact - they are substituted by
-  * [[RowPolicyRewriter]] at query time, not here.
+  * [[RowPolicyIdentity]] before signing the session handle, not here.
   *
   * Detection works on the PARSED, canonicalised expression with string literals stripped, rather
   * than a node-by-node AST walk: a function or sub-`SELECT` nested inside any wrapper node (e.g.
@@ -70,13 +70,8 @@ object RowPredicateValidator:
     if trimmed.length > MaxLen then
       return Invalid(s"predicateSql exceeds $MaxLen chars (got ${trimmed.length})")
 
-    // Reject splice-unsafe constructs BEFORE parsing: jsqlparser accepts a `--`/`/*` comment or a
-    // bare `;` and silently truncates at it rather than failing the parse (it returns Success on
-    // just the leading fragment), so the parse step below proves nothing about these. Left
-    // unrejected, a trailing `--` comment on a stored predicate later swallows the rewriter's own
-    // closing parenthesis at splice time and forwards the statement unfiltered (see
-    // [[RowPolicyRewriter]] `Failed`) - reject here so a comment-carrying predicate never reaches
-    // storage in the first place.
+    // Preserve the administrative expression contract: reject comments and statement separators
+    // before parsing, because JSqlParser may silently validate only their leading fragment.
     if SqlCommentScan.hasComment(trimmed) then
       return Invalid("comments are not allowed in predicateSql")
     if SqlCommentScan.hasSemicolon(trimmed) then
@@ -87,14 +82,13 @@ object RowPredicateValidator:
     // literal 'NULL', which is harmless for the parse check.
     val probe = TokenRegex.replaceAllIn(trimmed, "NULL")
 
-    // Read as the rewriter reads it at splice time (MisreadNames.stored).
+    // Normalize stored-expression syntax for administrative validation (MisreadNames.stored).
     val read = ai.starlake.quack.edge.cls.MisreadNames.stored(probe)
     if read.refusal.isDefined then return Invalid(read.refusal.get)
     // Read whole: JSqlParser's condition entry point answers the condition before a token it
     // cannot read, and its lexer takes `//` (DuckDB's integer division) for a comment. The text is
-    // stored as written, so a predicate judged on a part of it could filter less than the checks
-    // here saw (a closing parenthesis in it can even join the next policy's predicate at splice
-    // time).
+    // stored as written, so validate all of it. Runtime DuckDB parsing and binding remain an
+    // independent check on the native node.
     val expr: Expression =
       WholeExpression.parseFor("predicateSql", read.text, cond = true) match
         case Right(e)     => e

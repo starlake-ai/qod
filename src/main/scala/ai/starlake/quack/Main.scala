@@ -619,7 +619,8 @@ object Main extends IOApp with LazyLogging:
             minted = Some(mintedHandles),
             paths = key => usePaths.get()(key),
             readOnlyCatalogs = readOnlyCatalogs,
-            nodeRowPolicies = ai.starlake.quack.edge.rls.RowPolicyEnforcement.onNode
+            rowPoliciesEnabled =
+              com.typesafe.config.ConfigFactory.load().getBoolean("quack-on-demand.rls.enabled")
           )
     // After the store: the fleet backend claims servers through it (FleetServerStore).
     val backend: QuackBackend = BootFactories.quackBackend(mgrCfg, store, qodNodeBin, nodeKeys)
@@ -1391,7 +1392,6 @@ object Main extends IOApp with LazyLogging:
           .seconds
       )
       val columnPolicyRewriter = EdgeRewriters.columnPolicyRewriter(columnCatalog)
-      val rowPolicyRewriter    = EdgeRewriters.rowPolicyRewriter(columnCatalog)
       val protectedWriteGuard  = EdgeRewriters.protectedWriteGuard(columnCatalog)
 
       // SQL admin dialect (GRANT/REVOKE, ROW/COLUMN POLICY, ALTER GROUP, admin SHOW forms)
@@ -1572,7 +1572,6 @@ object Main extends IOApp with LazyLogging:
         stmtInstruments,
         classifier,
         columnPolicyRewriter,
-        rowPolicyRewriter,
         activeStatements,
         eventJournal,
         stampWrites = mgrCfg.stampWrites,

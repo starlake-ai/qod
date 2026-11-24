@@ -32,21 +32,23 @@ enum GuardOutcome:
   * CLS table whose masked columns actually appear in the read. Any read it cannot isolate denies
   * fail-closed. Never rewrites; only allows or denies.
   *
-  * A write aimed at a protected table is judged too (owner ruling D27), since neither rewriter
-  * reads a write ([[DirectWrites]]): for a row-policy table only a plain INSERT of new rows is
-  * allowed, and a write to a column-policy table may not read a masked or denied column of it. A
-  * write's RETURNING and ON CONFLICT clauses count as reads. ALTER, DROP and CREATE OR REPLACE of a
-  * table the principal's own row or column policies cover are refused (owner ruling D29).
+  * A write aimed at a protected table is judged too ([[DirectWrites]]). The gateway only admits a
+  * plain INSERT of new rows for a row-policy table; the native node currently refuses all writes to
+  * covered tables, including INSERT, until write-check policies exist. A write to a column-policy
+  * table may not read a masked or denied column of it. A write's RETURNING and ON CONFLICT clauses
+  * count as reads. ALTER, DROP and CREATE OR REPLACE of a table the principal's own row or column
+  * policies cover are refused (owner ruling D29).
   *
-  * On EVERY statement kind, a plain SELECT included, it also denies what the rewriters cannot read
-  * as DuckDB does (spec decision 27): a quoted name holding a dot ([[DottedIdentifierScreen]]), a
-  * call whose target is a string ([[CatalogReachingCalls]]: `query_table('t')`, `query('...')`, a
-  * reading table macro such as `histogram('t', c)`), a SQL-valued setting, a batch that moves the
-  * schema or search path ([[SessionScopeScreen]]: every bare name after it resolves past the policy
-  * keyed on the default schema), and a two-part name headed by an attached catalog
-  * (`acme_tpch.customer`), which DuckDB binds catalog-first while the rewriters and this guard's
-  * policy match read it schema-first (audit F20, F22). A principal without policies is judged by
-  * the node alone.
+  * On CLS reads and on writes, it also denies what the gateway cannot read as DuckDB does (spec
+  * decision 27): a quoted name holding a dot ([[DottedIdentifierScreen]]), a call whose target is a
+  * string ([[CatalogReachingCalls]]: `query_table('t')`, `query('...')`, a reading table macro such
+  * as `histogram('t', c)`), a SQL-valued setting, a batch that moves the schema or search path
+  * ([[SessionScopeScreen]]: every bare name after it resolves past the policy keyed on the default
+  * schema), and a two-part name headed by an attached catalog (`acme_tpch.customer`), which DuckDB
+  * binds catalog-first while the rewriters and this guard's policy match read it schema-first
+  * (audit F20, F22). Native RLS reads use the bound plan instead of these parser screens.
+  * Change-feed and historical-name checks remain because they need additional table identity
+  * support. A principal without policies is judged by the node alone.
   *
   * The guard owns its CLS detection oracle: it builds a `ColumnPolicyRewriter` internally in
   * `UnresolvedMode.Deny`, so a table whose columns the catalog cannot enumerate denies rather than
@@ -59,8 +61,7 @@ enum GuardOutcome:
 final class ProtectedWriteGuard(
     catalog: ColumnCatalog,
     clsEnabled: Boolean,
-    rlsEnabled: Boolean,
-    nodeRowPolicies: Boolean = false
+    rlsEnabled: Boolean
 ):
 
   import GuardOutcome._
@@ -83,13 +84,15 @@ final class ProtectedWriteGuard(
     // The text every policy step reads (MisreadNames.normalize): the column rewriter parses this
     // one, so this guard must too, or a word JSqlParser misreads would hide a read from it alone.
     val colPolicies = if clsEnabled then eff.columnPolicies else Nil
-    val nativeRead  = nodeRowPolicies && kind == StatementKind.Select && !isBatch(statement)
+    val nativeRead  = rlsEnabled && kind == StatementKind.Select && !isBatch(statement)
     val rowPolicies = if rlsEnabled && !nativeRead then eff.rowPolicies else Nil
     val normalized  = ai.starlake.quack.edge.cls.MisreadNames
       .normalized(statement, columnPolicies = colPolicies.nonEmpty && !eff.user.isSuperuser)
     val sql = normalized.text
     if eff.user.isSuperuser then Allow // superuser
-    else if nativeRead && rlsEnabled && colPolicies.isEmpty && eff.rowPolicies.nonEmpty then
+    else if nativeRead && colPolicies.isEmpty && eff.rowPolicies.nonEmpty then
+      // Change-feed rows have no base scan to filter. Historical names still need the existing
+      // identity check: native policy coverage is keyed on today's names too.
       CatalogReachingCalls
         .unfilteredChangeFeed(sql)
         .map(CatalogReachingCalls.denyReason)
@@ -277,7 +280,7 @@ final class ProtectedWriteGuard(
                   .toList
                   .sortBy(names)
                   .find(t => covers(rowKeys, t) || covers(colKeys, t))
-            // Owner ruling D27: the row rewriter never sees a write, so a write aimed at a table
+            // Owner ruling D27: read-side policies cannot validate a write aimed at a table
             // the principal's row policy covers would reach the rows the policy hides. Only a
             // plain INSERT of new rows is let through.
             val rowTarget =

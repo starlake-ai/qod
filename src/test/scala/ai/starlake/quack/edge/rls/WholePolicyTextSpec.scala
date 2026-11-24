@@ -70,39 +70,3 @@ class WholePolicyTextSpec extends AnyFlatSpec with Matchers:
     RowPredicateValidator.validate("note = 'a // b'") shouldBe
       RowPredicateValidator.Valid("note = 'a // b'")
   }
-
-  private val user = RbacUser("u-1", Some("acme"), "alice", "user")
-  private val ctx  = SchemaContext(Some("acme_tpch"), Some("tpch1"), pool = None)
-  private val rw   = RowPolicyRewriterSpec.withNoCatalog(enabled = true)
-
-  private def eff(predicates: String*): EffectiveSet =
-    val policies = predicates.toList.zipWithIndex.map { (p, i) =>
-      RoleRowPolicy(s"rp-$i", "r-1", "*", "tpch1", "customer", p)
-    }
-    EffectiveSet(user, Nil, Nil, Nil, Nil, Nil, policies)
-
-  "a stored predicate read only in part" should "refuse the statement at rewrite time" in {
-    // Stored before the validator required whole text: put together with the next policy's
-    // predicate, its parenthesis would admit every row.
-    rw.rewrite(
-      "SELECT * FROM customer",
-      StatementKind.Select,
-      eff("region = 'eu') OR (true", "region = 'us'"),
-      ctx
-    ) shouldBe a[RowPolicyRewriter.Failed]
-    rw.rewrite(
-      "SELECT * FROM customer",
-      StatementKind.Select,
-      eff("region = 'eu' := 1"),
-      ctx
-    ) shouldBe a[RowPolicyRewriter.Failed]
-    RowPolicyRewriter.predicateColumns("region = 'eu') OR (true", "c", "tpch1", "customer") shouldBe
-      Left(RowPolicyRewriter.PredicateErrorCause)
-    // A whole one still applies.
-    rw.rewrite(
-      "SELECT * FROM customer",
-      StatementKind.Select,
-      eff("region = 'eu'", "region = 'us'"),
-      ctx
-    ) shouldBe a[RowPolicyRewriter.Rewritten]
-  }

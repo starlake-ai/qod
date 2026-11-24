@@ -36,7 +36,7 @@ final class NodeKeys(
     minted: Option[MintedHandles] = None,
     paths: PoolKey => String = _ => "",
     readOnlyCatalogs: ReadOnlyCatalogs,
-    nodeRowPolicies: Boolean = false
+    rowPoliciesEnabled: Boolean = true
 ):
   val rowPolicyBundles = new RowPolicyBundles()
 
@@ -75,8 +75,9 @@ final class NodeKeys(
   def mint(node: RunningNode, principal: NodePrincipal): MintedHandle =
     val ctx           = NodeHandles.contextDigest(principal.context)
     val policyVersion = versions.current(node.poolKey.tenant)
-    val bundle = if nodeRowPolicies then rowPolicyBundles.of(principal, ctx, policyVersion) else ""
-    val m      = NodeHandles.mint(
+    val bundle        =
+      if rowPoliciesEnabled then rowPolicyBundles.of(principal, ctx, policyVersion) else ""
+    val m = NodeHandles.mint(
       secret,
       node.nodeId,
       replica,

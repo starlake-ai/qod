@@ -133,7 +133,7 @@ class QodNodeDecideSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
         paths = key => pools.get(key).flatMap(FlightSqlRouter.usePath).getOrElse(""),
         readOnlyCatalogs = ReadOnlyCatalogs.none,
         versions = ai.starlake.quack.edge.authz.PolicyVersions.zero,
-        nodeRowPolicies = true
+        rowPoliciesEnabled = true
       )
       val decideRoute = new DecideRoute(
         keys,

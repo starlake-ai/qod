@@ -57,7 +57,7 @@ object StaleRowPolicyReport:
                 val consequence =
                   " Every statement reading the table under this role is denied (\"row policy " +
                     "failed to apply\"): update the policy, or delete it."
-                RowPolicyRewriter.predicateColumns(
+                RowPredicateAnalysis.predicateColumns(
                   p.predicateSql,
                   d.catalog,
                   p.schemaName,
@@ -65,7 +65,7 @@ object StaleRowPolicyReport:
                 ) match
                   case Left(cause) =>
                     val why =
-                      if cause == RowPolicyRewriter.UnqualifiableCause then
+                      if cause == RowPredicateAnalysis.UnqualifiableCause then
                         "holds a subquery whose columns are not all qualified by its own FROM " +
                           "items or by the table's name"
                       else "cannot be read as a predicate"

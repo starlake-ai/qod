@@ -2,7 +2,6 @@ package ai.starlake.quack.edge.cls
 
 import ai.starlake.quack.edge.FlightSqlRouter
 import ai.starlake.quack.edge.policy.{GuardOutcome, ProtectedWriteGuard}
-import ai.starlake.quack.edge.rls.RowPolicyRewriter
 import ai.starlake.quack.model.StatementKind
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.state.{RbacUser, RoleColumnPolicy, RoleRowPolicy}
@@ -14,11 +13,10 @@ import java.sql.{Connection, DriverManager}
 import scala.collection.mutable.ListBuffer
 import scala.util.{Try, Using}
 
-/** One text for every policy step (review round 3): the protected-write guard, the column rewriter
-  * and the row rewriter read the statement with every word JSqlParser misreads quoted
-  * (`MisreadNames.normalize`), so none of them judges another statement than the others; and a call
-  * JSqlParser kept fewer arguments of than its text gives (`list(output ORDER BY id)` parsed as
-  * `list()`) is refused, whatever the word.
+/** One text for gateway column-policy steps: the protected-write guard and column rewriter read the
+  * statement with every word JSqlParser misreads quoted (`MisreadNames.normalize`), so none of them
+  * judges another statement than the others; and a call JSqlParser kept fewer arguments of than its
+  * text gives (`list(output ORDER BY id)` parsed as `list()`) is refused, whatever the word.
   */
 class PolicyTextSpec extends AnyFlatSpec with Matchers:
   import ColumnPolicyRewriter._
@@ -26,7 +24,6 @@ class PolicyTextSpec extends AnyFlatSpec with Matchers:
   private val Catalog = "acme_lake"
   private val user    = RbacUser("u-1", Some("acme"), "alice", "user")
   private val ctx     = SchemaContext(Some(Catalog), Some("main"), attachedCatalogs = Set.empty)
-  private val rctx    = ai.starlake.quack.edge.rls.SchemaContext(Some(Catalog), Some("main"), None)
 
   /** Every word the enumeration found (MisreadNames.QuotedWords). */
   private val Words = (MisreadNames.QuotedWords ++ Set("output", "preferring", "xor")).toList.sorted
@@ -38,10 +35,6 @@ class PolicyTextSpec extends AnyFlatSpec with Matchers:
   private val catalog = new ColumnCatalog.MapCatalog(columns)
   private val cls     = new ColumnPolicyRewriter(catalog)
   private val guard   = new ProtectedWriteGuard(catalog, clsEnabled = true, rlsEnabled = true)
-  private val rls     = ai.starlake.quack.edge.rls.RowPolicyRewriterSpec.withNoCatalog()
-
-  private def unaliased(r: RowPolicyRewriter.Outcome): String =
-    r.toString.replaceAll("__qod_rls_[0-9a-f]{32}", "__qod_rls")
 
   private def deny(column: String) =
     RoleColumnPolicy(s"cd-$column", "r-1", "*", "main", "kv", column, "deny", None)
@@ -143,7 +136,7 @@ class PolicyTextSpec extends AnyFlatSpec with Matchers:
     List(s"SELECT id, $w FROM kv", s"SELECT $w k FROM kv", s"SELECT list($w ORDER BY id) FROM kv")
   ) ++ List("SELECT ssn FROM kv WHERE id = $key", "SELECT max(year) FROM kv")
 
-  "the guard, the column rewriter and the row rewriter" should "read one text" in
+  "the guard and the column rewriter" should "read one text" in
     Statements.foreach { raw =>
       val text = MisreadNames.normalized(raw, columnPolicies = true).text
       withClue(raw) {
@@ -156,26 +149,9 @@ class PolicyTextSpec extends AnyFlatSpec with Matchers:
           guard.check(text, StatementKind.Dml, withPolicies, ctx)
         cls.rewrite(raw, StatementKind.Select, withPolicies, ctx).unsafeRunSync() shouldBe
           cls.rewrite(text, StatementKind.Select, withPolicies, ctx).unsafeRunSync()
-        // Each wrap draws a fresh random alias, so the two texts are compared with it erased.
-        unaliased(rls.rewrite(raw, StatementKind.Select, withPolicies, rctx)) shouldBe
-          unaliased(rls.rewrite(text, StatementKind.Select, withPolicies, rctx))
+
       }
     }
-
-  "the row rewriter" should "keep a column JSqlParser misreads (m-r3)" in
-    Using.resource(database()) { conn =>
-      List("SELECT id, minus FROM kv", "SELECT list(output ORDER BY id) AS l FROM kv").foreach {
-        sql =>
-          rls.rewrite(sql, StatementKind.Select, eff(Nil, List(rowPolicy)), rctx) match
-            case RowPolicyRewriter.Rewritten(out) =>
-              withClue(out)(rowsOf(conn, out) shouldBe rowsOf(conn, filtered(sql)))
-            case other => fail(s"$sql: expected Rewritten, got $other")
-      }
-    }
-
-  /** `sql` over the rows the row policy keeps, written by hand. */
-  private def filtered(sql: String): String =
-    sql.replace("FROM kv", "FROM (SELECT * FROM kv WHERE id = 1) AS kv")
 
   private def database(): Connection =
     Class.forName("org.duckdb.DuckDBDriver")

@@ -2,13 +2,12 @@
 
 ## Status and rollout
 
-This implements opt-in read-side RLS in qod-node, using the pinned DuckDB 2.0.1 C++
-planner interfaces. Enable it with `QOD_RLS_ENFORCEMENT=node` (or
-`quack-on-demand.rls.enforcement=node`). The default remains `gateway`.
-`QOD_RLS_ENABLED=false` disables both implementations. Invalid enforcement modes
-refuse boot. Every manager replica must use the same setting.
+Enabled row policies are enforced on qod-node's bound DuckDB plan, using the pinned
+DuckDB 2.0.1 C++ planner interfaces. The gateway SQL rewrite and enforcement selector
+have been removed. `QOD_RLS_ENABLED=false` disables row policies; every manager replica
+must use the same setting.
 
-Node protocol 9 and signed handle version 7 are mandatory, including in gateway mode.
+Node protocol 9 and signed handle version 7 are mandatory.
 Rebuild and vendor every platform's qod-node binary, deploy the matching node image
 and fleet CLI, and restart the nodes before enabling the feature. Older handles and nodes fail closed. No policy-table or DuckLake metadata migration is required.
 
@@ -48,7 +47,7 @@ The node verifies the handle before installing policies on the connection. A sta
 `post_bind` hook visits DuckDB's resolved base-table scans, including scans in plain
 views, literal `query()`, `query_table()`, CTEs and expression subqueries. Coverage
 uses DuckDB's own case-insensitive identifier comparison, with the existing `*`
-wildcards. All matching policies are combined with OR, as in gateway mode.
+wildcards. All matching policies are combined with OR, across all applicable policies.
 
 Each predicate is parsed independently by DuckDB. Combination uses expression trees,
 never concatenated policy SQL. A separate binder with no parent query binds the
@@ -91,7 +90,7 @@ different signed policy vector is installed.
 ## Deliberate limits
 
 - These are base-table policies. An exact policy scoped to a view is refused on reads
-  of that view, including nested reads; move it to the base table or use gateway mode.
+  of that view, including nested reads; move it to the base table.
   Wildcard policies apply to base scans, not to a view's projected aliases.
 - The reader's base-table policies also apply inside a real secure view. The view's
   definer-rights table-grant rules remain unchanged.
@@ -131,7 +130,7 @@ changes, privileged connections, write refusals and a later extension removing t
 filter. DuckLake cases also run when the pinned extension is installed.
 
 Scala tests verify identity expansion, unknown-token refusal, handle signing and
-verification, wire bounds, and the gateway/native guard split. Cross-language golden
+verification, wire bounds, and the native read / protected-write guard split. Cross-language golden
 handles and the existing native authorization tests pin the version transition.
 
 At each DuckDB upgrade, review `post_bind` ordering, generic binding, scan column-id
