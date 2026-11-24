@@ -403,12 +403,17 @@ class JsqltranspilerRewriterSpec extends AnyFlatSpec with Matchers:
   // A covered column the visitor leaves in place reaches the node unmasked. Each of these used to
   // pass through; the residual check refuses them instead.
 
+  // A result name the rewriter gives a changed item is the item as the caller wrote it, a quoted
+  // alias that holds the column's name as text, not a read of it.
+  private def withoutResultNames(sql: String): String =
+    sql.replaceAll("(?i)\\bAS\\s+\"(?:[^\"]|\"\")*\"", "")
+
   private def notForwardedUnmasked(sql: String): Unit =
     val withOrders = schema + ("orders" -> List("o_id", "o_total"))
     rw.rewrite(sql, withOrders, List(maskEmail), Some("acme_tpch"), Some("tpch1")) match
       case RewriteOutcome.Denied(_)      => succeed
       case RewriteOutcome.Rewritten(out) =>
-        out.toLowerCase should not include "c_email"
+        withoutResultNames(out).toLowerCase should not include "c_email"
       case other => fail(s"expected Denied or a masked rewrite, got $other for: $sql")
 
   "a covered column outside a modeled expression" should "never be forwarded unmasked" in {
@@ -481,8 +486,8 @@ class JsqltranspilerRewriterSpec extends AnyFlatSpec with Matchers:
     outcome(sql) match
       case RewriteOutcome.Rewritten(out) =>
         out should include("'***'")
-        out.toLowerCase should not include "c.c_email"
-        out.toLowerCase.replace("o.c_email", "") should not include "c_email"
+        withoutResultNames(out).toLowerCase should not include "c.c_email"
+        withoutResultNames(out).toLowerCase.replace("o.c_email", "") should not include "c_email"
       case other => fail(s"expected a masked rewrite, got $other for: $sql")
 
   "the masking visitor" should "mask IS [NOT] NULL, TRIM, QUALIFY, FILTER and JOIN ON" in {
@@ -696,15 +701,21 @@ class JsqltranspilerRewriterSpec extends AnyFlatSpec with Matchers:
     withClue(sql)(outcome(sql) shouldBe RewriteOutcome.Rewritten(expected))
 
   "a method call on a masked column" should "be masked as the function call it is" in {
-    rewrittenTo("SELECT c_email.lower() FROM customer", "SELECT lower('***') FROM customer")
-    rewrittenTo("SELECT c.c_email.upper() FROM customer c", "SELECT upper('***') FROM customer c")
+    rewrittenTo(
+      "SELECT c_email.lower() FROM customer",
+      "SELECT lower('***') AS \"lower(c_email)\" FROM customer"
+    )
+    rewrittenTo(
+      "SELECT c.c_email.upper() FROM customer c",
+      "SELECT upper('***') AS \"upper(c.c_email)\" FROM customer c"
+    )
     rewrittenTo(
       "SELECT customer.c_email.lower() FROM customer",
-      "SELECT lower('***') FROM customer"
+      "SELECT lower('***') AS \"lower(customer.c_email)\" FROM customer"
     )
     rewrittenTo(
       "SELECT c_email.concat('') FROM customer",
-      "SELECT concat('***', '') FROM customer"
+      "SELECT concat('***', '') AS \"concat(c_email, '')\" FROM customer"
     )
     rewrittenTo(
       "SELECT c_email.substr(1, 3) AS s FROM customer",
@@ -716,7 +727,7 @@ class JsqltranspilerRewriterSpec extends AnyFlatSpec with Matchers:
     )
     rewrittenTo(
       "SELECT c_email.lower().upper() FROM customer",
-      "SELECT upper(lower('***')) FROM customer"
+      "SELECT upper(lower('***')) AS \"upper(lower(c_email))\" FROM customer"
     )
   }
 

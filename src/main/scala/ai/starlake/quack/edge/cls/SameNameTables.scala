@@ -87,6 +87,22 @@ private[cls] object SameNameTables:
               }
             case _ => ()
           }
+          // A result name the rewriter printed from an item reading a renamed table (a scalar
+          // subquery in a select item) names it as the caller wrote it.
+          ResultNames.rewriteAliases(parsed, name => lower(name).contains(marker)) { text =>
+            renamed.foldLeft(text) { case (t, (key, r)) =>
+              val added =
+                if r.aliasAdded then
+                  s"(?i)${java.util.regex.Pattern.quote(key)} AS " +
+                    java.util.regex.Pattern.quote(r.rawBare) + "(?![A-Za-z0-9_])"
+                else "(?!)"
+              t.replaceAll(added, java.util.regex.Matcher.quoteReplacement(r.written))
+                .replaceAll(
+                  "(?i)" + java.util.regex.Pattern.quote(key) + "(?![0-9])",
+                  java.util.regex.Matcher.quoteReplacement(r.written)
+                )
+            }
+          }
           val builder = new java.lang.StringBuilder()
           parsed.accept(new net.sf.jsqlparser.util.deparser.StatementDeParser(builder))
           val out = builder.toString

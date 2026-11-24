@@ -1,20 +1,18 @@
 package ai.starlake.quack.edge.cls
 
 import java.util.Locale
-import ai.starlake.quack.edge.rls.SqlCommentScan
+import ai.starlake.quack.edge.rls.{SqlCommentScan, WholeExpression}
 import net.sf.jsqlparser.expression.Expression
 import net.sf.jsqlparser.expression.{Function => SqlFunction}
-import net.sf.jsqlparser.parser.CCJSqlParserUtil
 import net.sf.jsqlparser.statement.select.Select
 
-import scala.jdk.CollectionConverters._
 import scala.util.{Failure, Success, Try}
 
 /** Strict-containment validator for free-form transform expressions on column policies. Runs once
   * at policy create/update time. Pure (no I/O, no DuckDB connection).
   *
   * A `transform_sql` value must be ONE scalar DuckDB expression that:
-  *   1. Parses via JSqlParser's `parseExpression` entry point.
+  *   1. Parses whole as one expression ([[ai.starlake.quack.edge.rls.WholeExpression]]).
   *   2. References only the protected column, read as the rewriter reads it when it splices the
   *      mask ([[ResidualColumns.references]]: every column node outside a lambda's parameters,
   *      every time keyword but a SQL value function's call, no column reference held as another
@@ -22,6 +20,8 @@ import scala.util.{Failure, Success, Try}
   *   3. Contains no subqueries (parenthesed SELECTs).
   *   4. Calls no side-effect or escape functions (denylist + `pragma_*` prefix).
   *   5. Is bounded in size (<= 1024 chars in canonical form).
+  *   6. Holds only allowed mask forms ([[MaskForms]]), as written and as the rewriter reads the
+  *      stored text: none can answer with an error quoting the unmasked value.
   */
 object TransformSqlValidator:
 
@@ -66,11 +66,13 @@ object TransformSqlValidator:
     if SqlCommentScan.hasSemicolon(trimmed) then
       return Invalid("statement separators (;) are not allowed in transformSql")
 
-    // CCJSqlParserUtil.parseExpression parses an arbitrary scalar expression directly,
-    // without needing a SELECT ... FROM wrapper.
-    val expr: Expression = Try(CCJSqlParserUtil.parseExpression(trimmed)) match
-      case Success(e)  => e
-      case Failure(ex) => return Invalid(s"transformSql does not parse: ${ex.getMessage}")
+    // Read whole: JSqlParser's expression entry point answers the expression before a token it
+    // cannot read (`c => 1` reads as `c`) and its lexer takes `//` for a comment, so a mask could
+    // otherwise be stored shorter than written, the raw column included.
+    val expr: Expression =
+      WholeExpression.parseFor("transformSql", trimmed, cond = false) match
+        case Right(e)     => e
+        case Left(reason) => return Invalid(reason)
 
     val violations = scala.collection.mutable.ListBuffer.empty[String]
     // Every column reference of the expression, as the rewriter reads it when it splices the mask:
@@ -113,50 +115,54 @@ object TransformSqlValidator:
       case _ => ()
     }
 
+    val parts = MaskForms.refusals(expr)
+    if parts.nonEmpty then violations += notAllowed(parts)
+
     if violations.nonEmpty then return Invalid(violations.distinct.mkString("; "))
 
     val canonical = expr.toString
     if canonical.length > MaxLen then
       return Invalid(s"canonical transformSql exceeds $MaxLen chars (got ${canonical.length})")
 
+    // What is stored is the canonical text, and what applies is the rewriter's reading of it
+    // (ResidualColumns.parseStoredExpression): both must read whole and hold only allowed forms.
+    val desugared = MisreadNames.stored(canonical)
+    if desugared.refusal.isDefined then return Invalid(desugared.refusal.get)
+    WholeExpression.parseFor("transformSql", desugared.text, cond = false) match
+      case Left(reason) => return Invalid(reason)
+      case Right(_)     => ()
+    val applied = Try(ResidualColumns.parseStoredExpression(canonical)) match
+      case Success(e) => e
+      case Failure(_) => return Invalid("transformSql does not read back as stored")
+    val appliedParts = MaskForms.refusals(applied)
+    if appliedParts.nonEmpty then return Invalid(notAllowed(appliedParts))
+
     Valid(canonical)
 
-  /** Walk reachable expression nodes depth-first.
-    *
-    * Covers the composite shapes that matter for validation: Function arguments, BinaryExpression,
-    * SignedExpression, Parenthesis, CaseExpression, CastExpression. Subquery nodes (Select
-    * subtypes) are flagged via the visitor and NOT recursed into so that we don't descend into
-    * their internals and produce spurious column violations.
+  /** The refusal of a mask holding parts that are not allowed forms, each named, never the mask. */
+  private def notAllowed(parts: List[String]): String =
+    s"transformSql uses ${parts.take(5).mkString("; ")}, which is not an allowed mask form; " +
+      s"a mask may use only ${MaskForms.Allowed}"
+
+  /** The parts of a stored mask a create would now refuse as not allowed forms, for the boot
+    * report: Some(parts), each a fixed phrase or a function name, never the mask's text, or
+    * Some(Nil) when it is refused for another reason; None when a create would admit it.
     */
-  // Parenthesis is deprecated in jsqlparser 5.x but kept defensively: dropping the
-  // case would skip traversal of a parenthesized subtree, and a missed subtree here
-  // is a CLS validation gap (an expression escaping the protected-column check).
-  @scala.annotation.nowarn("msg=class Parenthesis")
+  def refusedParts(transformSql: String, protectedColumn: String): Option[List[String]] =
+    validate(transformSql, protectedColumn) match
+      case Valid(_)   => None
+      case Invalid(_) =>
+        val trimmed = Option(transformSql).map(_.trim).getOrElse("")
+        Some(
+          WholeExpression.parse(trimmed, cond = false) match
+            case Right(e)     => MaskForms.refusals(e)
+            case Left(reason) => List(reason)
+        )
+
+  /** Visits every node of `start`, at any depth: every child JSqlParser keeps
+    * ([[StarExpansion.nodes]], the shared reflective walk), so a subscript's or a slice's indexes,
+    * a COLLATE operand, a lambda's body, an IN list, a CASE operand, a call's ORDER BY or FILTER
+    * and a subquery's own nodes are all seen.
+    */
   private def walk(start: Expression)(visit: PartialFunction[Any, Unit]): Unit =
-    val stack = scala.collection.mutable.Stack[Any](start)
-    while stack.nonEmpty do
-      val node = stack.pop()
-      if visit.isDefinedAt(node) then visit(node)
-      node match
-        case fn: SqlFunction =>
-          if fn.getParameters != null then fn.getParameters.asScala.foreach(stack.push)
-        case b: net.sf.jsqlparser.expression.BinaryExpression =>
-          stack.push(b.getLeftExpression); stack.push(b.getRightExpression)
-        case u: net.sf.jsqlparser.expression.SignedExpression =>
-          stack.push(u.getExpression)
-        case p: net.sf.jsqlparser.expression.Parenthesis =>
-          stack.push(p.getExpression)
-        case c: net.sf.jsqlparser.expression.CaseExpression =>
-          if c.getSwitchExpression != null then stack.push(c.getSwitchExpression)
-          if c.getElseExpression != null then stack.push(c.getElseExpression)
-          if c.getWhenClauses != null then
-            c.getWhenClauses.asScala.foreach { w =>
-              stack.push(w.getWhenExpression)
-              stack.push(w.getThenExpression)
-            }
-        case cast: net.sf.jsqlparser.expression.CastExpression =>
-          stack.push(cast.getLeftExpression)
-        case _: Select =>
-          // Visited above; do NOT recurse - we reject subqueries wholesale.
-          ()
-        case _ => ()
+    StarExpansion.nodes(start).foreach(node => if visit.isDefinedAt(node) then visit(node))

@@ -753,6 +753,12 @@ object Main extends IOApp with LazyLogging:
         .Try(ai.starlake.quack.ondemand.rbac.NonAsciiPolicyNameReport.report(store))
         .failed
         .foreach(e => logger.warn(s"non-ASCII policy name report: ${e.getClass.getSimpleName}"))
+      // Stored masks a create or an update would now refuse (most of all one that can raise an
+      // error quoting the unmasked value): they keep applying, each reported for an operator.
+      scala.util
+        .Try(ai.starlake.quack.edge.cls.StoredMaskReport.report(store))
+        .failed
+        .foreach(e => logger.warn(s"stored mask report: ${e.getClass.getSimpleName}"))
       manifestFedStore.foreach { fs =>
         scala.util
           .Try {

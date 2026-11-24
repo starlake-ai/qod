@@ -310,12 +310,22 @@ object RowPolicyRewriter:
         List(fold(catalog), fold(schema), fold(table))
       )
     try
-      val expr =
-        CCJSqlParserUtil.parseCondExpression("(" + substitute(predicateSql, Map.empty) + ")")
+      val one = substitute(predicateSql, Map.empty)
+      if wholePredicate(one).isLeft then throw new IllegalArgumentException("not whole")
+      val expr = CCJSqlParserUtil.parseCondExpression("(" + one + ")")
       Right(qualifyPredicate(expr, qualifiers, freshAlias()) - "rowid")
     catch
       case _: UnqualifiablePredicate      => Left(UnqualifiableCause)
       case scala.util.control.NonFatal(_) => Left(PredicateErrorCause)
+
+  /** A predicate, its tokens substituted, read as the rewriter reads it and whole
+    * ([[WholeExpression]]): Left when a part of it would go unread.
+    */
+  private def wholePredicate(substituted: String): Either[String, Unit] =
+    val stored = ai.starlake.quack.edge.cls.MisreadNames.stored(substituted)
+    stored.refusal match
+      case Some(reason) => Left(reason)
+      case None         => WholeExpression.parse(stored.text, cond = true).map(_ => ())
 
   /** SQL-escape a scalar value into a quoted literal: `O'Brien` -> `'O''Brien'`. */
   private def lit(v: String): String = "'" + v.replace("'", "''") + "'"
@@ -413,7 +423,13 @@ class RowPolicyRewriter(
             }
             val walker =
               new DeepWalker(eff, ctx, values, changed, scoping.cteReferences, clauses)
+            // DuckDB names an unaliased item after its expression: an item holding a subquery over
+            // a wrapped table would be named after the filtered view, predicate and random alias
+            // included. Items the walk changes are named after their text before it (ResultNames);
+            // one the column policy rewriter already named keeps that name.
+            val names = ai.starlake.quack.edge.cls.ResultNames.before(stmt)
             walker.walk(stmt)
+            if changed.get() then ai.starlake.quack.edge.cls.ResultNames.nameChanged(names)
             // Completeness (audit F21): a policy table in a position the walk holds no slot for
             // (a PIVOT / UNPIVOT source) would reach the node unfiltered. Refused, never passed.
             if policyReads.exists(t => !walker.wrappedTables.contains(t)) then
@@ -630,8 +646,14 @@ class RowPolicyRewriter(
         )
       val expr: Expression =
         try
-          val predicate =
-            matched.map(p => "(" + substitute(p.predicateSql, values) + ")").mkString(" OR ")
+          val each = matched.map(p => substitute(p.predicateSql, values))
+          // Each predicate must read whole on its own: one stored before the validator required
+          // it could hold text the checks never saw, a closing parenthesis that joins the next
+          // policy's predicate once they are put together included.
+          each.foreach { one =>
+            if wholePredicate(one).isLeft then throw new IllegalArgumentException("not whole")
+          }
+          val predicate = each.map(one => "(" + one + ")").mkString(" OR ")
           // Read as DuckDB reads it, by the function stored masks are read with: a method call in
           // it is the plain call DuckDB makes of it (MisreadNames.stored); one it cannot write so
           // fails the policy closed.

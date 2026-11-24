@@ -146,7 +146,8 @@ class SqlValueNameColumnSpec extends AnyFlatSpec with Matchers:
   /** `outcome` with `word` written as the ordinary column `ssn`. */
   private def asSsn(outcome: Outcome, word: String): Outcome =
     def plain(s: String) =
-      List("\"" + word + "\"", word, word.toUpperCase).foldLeft(s)(_.replace(_, "ssn"))
+      List("\"\"" + word + "\"\"", "\"" + word + "\"", word, word.toUpperCase)
+        .foldLeft(s)(_.replace(_, "ssn"))
     outcome match
       case Rewritten(sql) => Rewritten(plain(sql))
       case Denied(reason) => Denied(plain(reason))

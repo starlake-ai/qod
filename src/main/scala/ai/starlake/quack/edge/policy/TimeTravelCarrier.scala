@@ -150,6 +150,11 @@ object TimeTravelCarrier:
           seen += k
       }
     }
+    // A result name the column policy rewriter printed from an item holding a pinned read (a
+    // scalar subquery in a select item) carries the placeholder: it reads the caller's clause.
+    ai.starlake.quack.edge.cls.ResultNames.rewriteAliases(stmt, _.contains(Marker)) { text =>
+      clauses.indices.foldLeft(text)((t, k) => t.replace(placeholder(k), clauses(k)))
+    }
     seen.size == clauses.size && !stmt.toString.contains(Marker)
 
   /** [[restore]] on rewritten text: None when it does not parse or the restore fails. */
