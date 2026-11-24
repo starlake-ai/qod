@@ -300,12 +300,17 @@ def test_main_check_pins_needs_no_release_files(tmp_path, capsys):
     assert "node protocol" in capsys.readouterr().err
 
     _edit(repo, "native/qod-node/CMakeLists.txt", "set(QOD_NODE_PROTOCOL 9", "set(QOD_NODE_PROTOCOL ")
-    libs = "2.0.1/duckdb-shared-libs-linux-amd64.tar.gz) echo "
-    _edit(repo, "deploy/docker/quack-node/Dockerfile", libs + "9", libs + "8")
+    dockerfile = "deploy/docker/quack-node/Dockerfile"
+    version, pins = release_manifest.dockerfile_duckdb_pins(repo / dockerfile, dockerfile)
+    asset = "duckdb-shared-libs-linux-amd64.tar.gz"
+    expected = pins[(version, asset)]
+    corrupted = ("0" if expected[0] != "0" else "1") + expected[1:]
+    libs = f"{version}/{asset}) echo "
+    _edit(repo, dockerfile, libs + expected, libs + corrupted)
     assert release_manifest.main(["--check-pins", "--repo", str(repo)]) == 1
     err = capsys.readouterr().err
-    assert err.startswith("release_manifest: deploy/docker/quack-node/Dockerfile pins sha256 8")
-    assert "for duckdb-shared-libs-linux-amd64.tar.gz of DuckDB 2.0.1" in err
+    assert err.startswith(f"release_manifest: {dockerfile} pins sha256 {corrupted}")
+    assert f"for {asset} of DuckDB {version}" in err
 
 
 def test_main_refuses_a_manifest_without_its_release_files(capsys):
