@@ -1,4 +1,5 @@
 #include "node_hooks.hpp"
+#include "protected_scan.hpp"
 
 #include "authz_stats.hpp"
 #include "credentials.hpp"
@@ -769,6 +770,7 @@ void Enforce(ClientContext &context, Gate &gate, LogicalOperator &plan) {
 			VerifyRowPolicies(plan, installed.row_policies);
 			VerifyColumnPolicies(plan, installed.column_policies);
 		}
+		VerifyProtectedScans(plan);
 		if (!privileged && !installed.row_policies.empty()) {
 			std::function<bool(LogicalOperator &)> protected_scan = [&](LogicalOperator &op) {
 				if (dynamic_cast<RowPolicyBoundary *>(&op))
@@ -867,11 +869,12 @@ void PostBind(PlannerExtensionInput &input, BoundStatement &statement) {
 		return;
 	}
 	Installed installed;
-	if (SessionSnapshot(context, gate.authz->Now(), installed) && !installed.principal.superuser &&
-	    !installed.principal.system && !IsPrelude(*statement.plan)) {
+	if (SessionSnapshot(context, gate.authz->Now(), installed) && !IsPrelude(*statement.plan)) {
+		auto privileged = installed.principal.superuser || installed.principal.system;
 		// Placement errors happen before Enforce's description/verification boundary. Count
 		// them here, and leave later refusals to Enforce so every refusal increments once.
 		try {
+			if (!privileged) {
 			ApplyColumnPolicies(context, input.binder, statement.plan, installed.column_policies);
 			ApplyRowPolicies(context, statement.plan, installed.row_policies,
 						 [&](const RowPolicy &p, const std::string &cause) {
@@ -884,6 +887,10 @@ void PostBind(PlannerExtensionInput &input, BoundStatement &statement) {
 																	{"cause", JsonString(cause)}}))
 									   << std::endl;
 						 });
+			}
+			// Every principal: a connector's own mandatory scope is sealed even when no policy applies.
+			ApplyProtectedScans(context, *statement.plan,
+			                    privileged ? std::vector<ColumnPolicy> {} : installed.column_policies);
 		} catch (PermissionException &) {
 			gate.authz->Stats().local_refusals++;
 			throw;

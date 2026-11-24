@@ -169,6 +169,7 @@ set(QOD_NODE_CORE_SOURCES
   src/row_policies.cpp
   src/column_policies.cpp
   src/policy_client.cpp
+  src/protected_scan.cpp
   src/options.cpp
   src/screen_rules.cpp
   src/secrets.cpp

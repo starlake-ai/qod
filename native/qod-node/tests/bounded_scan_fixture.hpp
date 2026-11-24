@@ -12,6 +12,15 @@
 #include "duckdb/main/extension.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/parser/qualified_name.hpp"
+#include "duckdb/planner/expression/bound_cast_expression.hpp"
+#include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression/bound_comparison_expression.hpp"
+#include "duckdb/planner/expression/bound_conjunction_expression.hpp"
+#include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/planner/expression/bound_operator_expression.hpp"
+#include "duckdb/planner/operator/logical_get.hpp"
+#include "protected_scan.hpp"
 
 #include <string>
 #include <vector>
@@ -34,7 +43,7 @@ inline column_t ScoreColumn() {
 	return VIRTUAL_COLUMN_START + 7;
 }
 
-struct FixtureBindData : public FunctionData {
+struct FixtureBindData : public FunctionData, public qod::ProtectedScan {
 	FixtureBindData(TableCatalogEntry &table_p, idx_t k_p) : table(table_p), k(k_p) {
 	}
 	TableCatalogEntry &table;
@@ -49,12 +58,83 @@ struct FixtureBindData : public FunctionData {
 		copy->uses = uses;
 		copy->lowered = lowered;
 		copy->owners = owners;
+		copy->CopySealFrom(*this);
 		return std::move(copy);
 	}
 	bool Equals(const FunctionData &other_p) const override {
 		auto &other = other_p.Cast<FixtureBindData>();
 		return &table == &other.table && k == other.k && uses == other.uses && lowered == other.lowered &&
-		       owners == other.owners;
+		       owners == other.owners && SealedDigest() == other.SealedDigest();
+	}
+
+	bool IsBounded() const override {
+		return true;
+	}
+
+	std::vector<qod::FieldUse> FieldUses() const override {
+		std::vector<qod::FieldUse> result;
+		for (auto &column : uses) {
+			result.push_back({column, qod::FieldUse::Kind::Filter});
+		}
+		return result;
+	}
+
+	//! Exact only for TRY(CAST(owner = '<literal>' AS BOOLEAN)) terms joined by OR (the shape
+	//! ApplyRowPolicies binds), with owner being table column 1. Anything else is not lowered.
+	qod::LoweringResult AcceptRowPolicies(ClientContext &, const LogicalGet &get, const std::vector<qod::RowPolicy> &,
+	                                      const std::vector<unique_ptr<Expression>> &predicates) override {
+		owners.clear();
+		lowered = false;
+		if (predicates.empty()) {
+			return {true, ""};
+		}
+		if (predicates.size() != 1) {
+			return {false, "policy_unsupported"};
+		}
+		std::vector<const Expression *> terms;
+		auto &root = *predicates[0];
+		if (root.GetExpressionClass() == ExpressionClass::BOUND_CONJUNCTION &&
+		    root.GetExpressionType() == ExpressionType::CONJUNCTION_OR) {
+			for (auto &child : root.Cast<BoundConjunctionExpression>().GetChildren()) {
+				terms.push_back(child.get());
+			}
+		} else {
+			terms.push_back(&root);
+		}
+		for (auto term : terms) {
+			// DuckDB 2.0.1: casts and comparisons are function expressions (helper structs).
+			if (term->GetExpressionType() == ExpressionType::OPERATOR_TRY) {
+				term = term->Cast<BoundOperatorExpression>().GetChildren()[0].get();
+			}
+			if (BoundCastExpression::IsCast(*term)) {
+				term = &BoundCastExpression::Child(term->Cast<BoundFunctionExpression>());
+			}
+			if (term->GetExpressionType() != ExpressionType::COMPARE_EQUAL || !BoundComparisonExpression::IsComparison(*term)) {
+				return {false, "policy_unsupported"};
+			}
+			auto &cmp = term->Cast<BoundFunctionExpression>();
+			auto &left = BoundComparisonExpression::Left(cmp);
+			auto *right_expr = &BoundComparisonExpression::Right(cmp);
+			// The binder leaves CAST('lit' AS VARCHAR) on the literal; an identity cast is transparent.
+			while (BoundCastExpression::IsCast(*right_expr) &&
+			       BoundCastExpression::TargetType(right_expr->Cast<BoundFunctionExpression>()) ==
+			           BoundCastExpression::SourceType(right_expr->Cast<BoundFunctionExpression>())) {
+				right_expr = &BoundCastExpression::Child(right_expr->Cast<BoundFunctionExpression>());
+			}
+			auto &right = *right_expr;
+			if (left.GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF ||
+			    right.GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
+				return {false, "policy_unsupported"};
+			}
+			auto &ref = left.Cast<BoundColumnRefExpression>();
+			auto slot = ref.Binding().column_index.GetIndex();
+			if (slot >= get.GetColumnIds().size() || get.GetColumnIds()[slot].GetPrimaryIndex() != 1) {
+				return {false, "policy_unsupported"};
+			}
+			owners.push_back(right.Cast<BoundConstantExpression>().GetValue().ToString());
+		}
+		lowered = true;
+		return {true, ""};
 	}
 };
 
@@ -125,6 +205,9 @@ inline virtual_column_map_t FixtureVirtualColumns(ClientContext &, optional_ptr<
 }
 
 inline unique_ptr<GlobalTableFunctionState> FixtureInit(ClientContext &, TableFunctionInitInput &input) {
+	if (auto data = dynamic_cast<const FixtureBindData *>(input.bind_data.get())) {
+		data->RequireSealed();
+	}
 	auto state = make_uniq<FixtureState>();
 	state->column_ids = input.column_ids;
 	return std::move(state);
@@ -149,6 +232,8 @@ inline void FixtureScan(ClientContext &, TableFunctionInput &input, DataChunk &o
 		if (out >= k) {
 			break;
 		}
+		//! The score reflects the row's place in the full relevance list, admitted or not.
+		++rank;
 		if (protected_data && protected_data->lowered) {
 			bool admitted = false;
 			for (auto &owner : protected_data->owners) {
@@ -158,7 +243,6 @@ inline void FixtureScan(ClientContext &, TableFunctionInput &input, DataChunk &o
 				continue;
 			}
 		}
-		++rank;
 		for (idx_t c = 0; c < state.column_ids.size(); ++c) {
 			auto id = state.column_ids[c];
 			Value value;
@@ -201,6 +285,7 @@ public:
 	void Load(ExtensionLoader &loader) override {
 		loader.RegisterFunction(FixtureFunction("qod_test_bounded_scan", FixtureBind, true));
 		loader.RegisterFunction(FixtureFunction("qod_test_unprotected_bounded", FixtureUnprotectedBind));
+		qod::RegisterBoundedFunction("qod_test_unprotected_bounded");
 	}
 	std::string Name() override {
 		return "qod_test_bounded_scan";
