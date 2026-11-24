@@ -1,6 +1,6 @@
 package ai.starlake.quack.ondemand.runtime
 
-import ai.starlake.quack.edge.authz.{NodeHandles, NodeKeys, RowPolicyRoute, Verdict, Verdicts}
+import ai.starlake.quack.edge.authz.{NodeHandles, NodeKeys, PolicyRoute, Verdict, Verdicts}
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import com.sun.net.httpserver.{HttpExchange, HttpServer}
@@ -49,9 +49,9 @@ final class StubDecideServer private (secret: String, server: HttpServer):
 
   /** Serve the manager's real signed snapshot endpoint alongside the stand-in decider. */
   def serveRowPolicies(keys: NodeKeys): Unit =
-    val app = new RowPolicyRoute(keys).routes.orNotFound
+    val app = new PolicyRoute(keys).routes.orNotFound
     server.createContext(
-      "/api/internal/authz/row-policies",
+      "/api/internal/authz/policies",
       exchange =>
         try
           val headers = exchange.getRequestHeaders.asScala.toList.flatMap((name, values) =>

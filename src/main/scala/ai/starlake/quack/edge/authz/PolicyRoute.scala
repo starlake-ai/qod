@@ -9,10 +9,10 @@ import java.security.MessageDigest
 import java.util.Base64
 
 /** A node may fetch only the immutable bundle vouched for by its signed handle. */
-final class RowPolicyRoute(keys: NodeKeys, clock: () => Long = () => System.currentTimeMillis()):
+final class PolicyRoute(keys: NodeKeys, clock: () => Long = () => System.currentTimeMillis()):
   val routes: HttpRoutes[IO] = HttpRoutes.of[IO] {
-    case req @ POST -> Root / "api" / "internal" / "authz" / "row-policies" =>
-      NodeCalls.serve(req, 64 * 1024)((_, _) => (Status.Unauthorized, "row policy call refused"))(
+    case req @ POST -> Root / "api" / "internal" / "authz" / "policies" =>
+      NodeCalls.serve(req, 64 * 1024)((_, _) => (Status.Unauthorized, "policy call refused"))(
         answer
       )
   }
@@ -21,7 +21,7 @@ final class RowPolicyRoute(keys: NodeKeys, clock: () => Long = () => System.curr
     val key      = keys.key(node)
     val expected = NodeHandles.hex(NodeHandles.hmac(key, body))
     if !MessageDigest.isEqual(expected.getBytes(US_ASCII), signature.getBytes(US_ASCII)) then
-      (Status.Unauthorized, "row policy call refused")
+      (Status.Unauthorized, "policy call refused")
     else
       val request = for
         json   <- parse(new String(body, UTF_8)).left.map(_ => "malformed request")
@@ -30,10 +30,10 @@ final class RowPolicyRoute(keys: NodeKeys, clock: () => Long = () => System.curr
         handle <- NodeHandles.verify(text, key, node, clock())
       yield (handle, offset, text)
       request match
-        case Left(_) => (Status.Unauthorized, "row policy call refused")
-        case Right((h, offset, text)) if keys.rowPolicyBundles.owns(h.nonce, text) =>
-          keys.rowPolicyBundles.page(h.rowPolicyBundle, offset) match
-            case None       => (Status.ServiceUnavailable, "row policy snapshot unavailable; retry")
+        case Left(_) => (Status.Unauthorized, "policy call refused")
+        case Right((h, offset, text)) if keys.policyBundles.owns(h.nonce, text) =>
+          keys.policyBundles.page(h.policyBundle, offset) match
+            case None       => (Status.ServiceUnavailable, "policy snapshot unavailable; retry")
             case Some(page) =>
               val bytes = CanonicalJson.render(page).getBytes(UTF_8)
               (
@@ -41,4 +41,4 @@ final class RowPolicyRoute(keys: NodeKeys, clock: () => Long = () => System.curr
                 Base64.getUrlEncoder.withoutPadding.encodeToString(bytes) + "." +
                   NodeHandles.hex(NodeHandles.hmac(key, bytes))
               )
-        case Right(_) => (Status.Unauthorized, "row policy handle was not minted by this replica")
+        case Right(_) => (Status.Unauthorized, "policy handle was not minted by this replica")

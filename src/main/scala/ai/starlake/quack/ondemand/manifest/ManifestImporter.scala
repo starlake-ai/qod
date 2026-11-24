@@ -91,6 +91,24 @@ object ManifestImporter extends LazyLogging:
       importClientSecret(t, existing).left.foreach(err => errs += err)
     }
 
+    // Validate every definition before any tenant, role or policy row changes. Imports share
+    // the exact REST/SQL definition contract; an invalid mask never enters query-time transport.
+    m.roles.foreach { role =>
+      role.columnPolicies.foreach { p =>
+        ai.starlake.quack.edge.cls.ColumnPolicyDefinition
+          .validate(
+            p.catalog,
+            p.schema,
+            p.table,
+            p.column,
+            p.action,
+            p.transformSql
+          )
+          .left
+          .foreach(reason => errs += s"role '${role.name}' column policy '${p.column}': $reason")
+      }
+    }
+
     // Dup detection
     def dup[A, K](xs: List[A], key: A => K, label: String): Unit =
       xs.groupBy(key).collect {
@@ -988,7 +1006,22 @@ object ManifestImporter extends LazyLogging:
                     tableName = mcp.table,
                     columnName = mcp.column,
                     action = mcp.action,
-                    transformSql = mcp.transformSql
+                    transformSql = ai.starlake.quack.edge.cls.ColumnPolicyDefinition
+                      .validate(
+                        mcp.catalog,
+                        mcp.schema,
+                        mcp.table,
+                        mcp.column,
+                        mcp.action,
+                        mcp.transformSql
+                      )
+                      .fold(
+                        _ =>
+                          throw new IllegalStateException(
+                            "column policy changed after manifest validation"
+                          ),
+                        identity
+                      )
                   )
                 )
               }

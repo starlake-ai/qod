@@ -124,13 +124,13 @@ class NodeRowPolicySpec extends AnyFlatSpec with Matchers:
         )
         .toOption
         .get
-      if handle.rowPolicyBundle.isEmpty then Nil
+      if handle.policyBundle.isEmpty then Nil
       else
-        keys.rowPolicyBundles
-          .page(handle.rowPolicyBundle, 0)
+        keys.policyBundles
+          .page(handle.policyBundle, 0)
           .get
           .hcursor
-          .get[List[NodeRowPolicy]]("rows")
+          .get[List[NodeRowPolicy]]("policies")
           .toOption
           .get
     rows(enabled) shouldBe NodeRowPolicy.of(p)

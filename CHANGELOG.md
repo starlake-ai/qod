@@ -4,9 +4,21 @@
 
 ### Upgrading
 
+- **Native column policies are opt-in.** Deploy and restart protocol-10 nodes (signed
+  handle version 8) before setting `QOD_CLS_ENFORCEMENT=node` on every replica.
+  Gateway CLS remains the default. Native CLS applies compatible masks and denies
+  to bound base-table reads, including reads through views; unsupported types,
+  generated-output/view-scoped policies and writes to covered tables refuse.
+  Invalid new masks are rejected on every write/import path. Unusable stored masks
+  become scoped denies; mask evaluation errors become NULL.
+  Policy preparation is cached by context and version. Both policy kinds use one
+  signed, paged snapshot with a small handle, and wildcard policies target base tables
+  without blocking unrelated views or built-in macros. Native refusals count once.
+  See [the design and limits](docs/node-column-security.md).
+
 - **Enabled row policies now run only on qod-node's bound DuckDB plan.** The gateway
   row-policy SQL rewrite and `QOD_RLS_ENFORCEMENT` selector are removed. `QOD_RLS_ENABLED`
-  remains the kill switch. Deploy and restart protocol-9 nodes; signed handles are version 7.
+  remains the kill switch. Deploy and restart protocol-10 nodes; signed handles are version 8.
   Base-table policies apply through views and resolved scans. Writes to covered target tables
   (INSERT included), view-scoped policies and unsupported predicates refuse. Table ACLs still
   govern access; no applicable policy leaves reads unfiltered. Policy snapshots are signed and

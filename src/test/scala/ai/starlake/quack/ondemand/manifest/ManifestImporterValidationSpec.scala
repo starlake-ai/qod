@@ -326,6 +326,47 @@ class ManifestImporterValidationSpec extends AnyFlatSpec with Matchers:
     errorsOf(m) shouldBe Nil
   }
 
+  it should "reject invalid column policies before an import writes any role or tenant" in {
+    val valid = ManifestRoleColumnPolicy("memory", "main", "docs", "secret", "mask", Some("'***'"))
+    val invalid = List(
+      valid.copy(transformSql = Some("CAST(secret AS INTEGER)")),
+      valid.copy(column = "*"),
+      valid.copy(catalog = ""),
+      valid.copy(action = "unknown"),
+      valid.copy(action = "deny"),
+      valid.copy(transformSql = None)
+    )
+    invalid.foreach { policy =>
+      val store    = emptyStore
+      val manifest = baseManifest.copy(
+        tenants = List(ManifestTenant(name = "acme")),
+        roles = List(ManifestRole(tenant = "acme", name = "masked", columnPolicies = List(policy)))
+      )
+      ManifestImporter.validate(manifest, store).isLeft shouldBe true
+      ManifestImporter.apply(manifest, store, requireEncryption = false).isLeft shouldBe true
+      store.listTenants() shouldBe empty
+      store.listRoles("acme") shouldBe empty
+    }
+  }
+
+  it should "canonicalize a valid imported mask using the definition validator" in {
+    val store  = emptyStore
+    val policy = ManifestRoleColumnPolicy(
+      "memory",
+      "main",
+      "docs",
+      "secret",
+      "mask",
+      Some("  upper(secret)  ")
+    )
+    val manifest = baseManifest.copy(
+      tenants = List(ManifestTenant(name = "acme")),
+      roles = List(ManifestRole(tenant = "acme", name = "masked", columnPolicies = List(policy)))
+    )
+    ManifestImporter.apply(manifest, store, requireEncryption = false).isRight shouldBe true
+    val role = store.listRoles("acme").find(_.name == "masked").get
+    store.listColumnPolicies(role.id).head.transformSql shouldBe Some("upper(secret)")
+  }
   it should "reject unsupported row policies before manifest writes begin" in
     List("owner = ${typo}", "getvariable('owner') = owner", "row_number() OVER () = 1").foreach {
       predicate =>

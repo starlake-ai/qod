@@ -620,7 +620,9 @@ object Main extends IOApp with LazyLogging:
             paths = key => usePaths.get()(key),
             readOnlyCatalogs = readOnlyCatalogs,
             rowPoliciesEnabled =
-              com.typesafe.config.ConfigFactory.load().getBoolean("quack-on-demand.rls.enabled")
+              com.typesafe.config.ConfigFactory.load().getBoolean("quack-on-demand.rls.enabled"),
+            nativeColumnPoliciesEnabled =
+              ai.starlake.quack.edge.cls.ColumnPolicyEnforcement.nativeEnabled()
           )
     // After the store: the fleet backend claims servers through it (FleetServerStore).
     val backend: QuackBackend = BootFactories.quackBackend(mgrCfg, store, qodNodeBin, nodeKeys)
@@ -2344,7 +2346,7 @@ object Main extends IOApp with LazyLogging:
         List(
           credentialsRoute.routes,
           decideRoute.routes,
-          new ai.starlake.quack.edge.authz.RowPolicyRoute(nodeKeys).routes
+          new ai.starlake.quack.edge.authz.PolicyRoute(nodeKeys).routes
         )
       )
       // One managed-object-store client for both the boot probe below and the purge

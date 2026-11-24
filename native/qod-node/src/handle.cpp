@@ -26,8 +26,10 @@ bool IsCatalogAlias(const std::string &alias) {
 
 } // namespace
 
-Handle VerifyHandle(const std::string &text, const std::string &node_key, const std::string &node_id,
-                    int64_t now_ms) {
+Handle VerifyHandle(const std::string &text, const std::string &node_key, const std::string &node_id, int64_t now_ms) {
+	if (text.size() > kMaxEncodedHandleBytes) {
+		throw std::invalid_argument("handle exceeds the payload byte budget");
+	}
 	auto dot = text.find('.');
 	if (dot == std::string::npos || text.find('.', dot + 1) != std::string::npos) {
 		throw std::invalid_argument("malformed handle");
@@ -41,6 +43,9 @@ Handle VerifyHandle(const std::string &text, const std::string &node_key, const 
 		payload = FromBase64Url(text.substr(0, dot));
 	} catch (std::invalid_argument &) {
 		throw std::invalid_argument("malformed handle payload");
+	}
+	if (payload.size() > kMaxHandlePayloadBytes) {
+		throw std::invalid_argument("handle exceeds the payload byte budget");
 	}
 	auto expected = HmacSha256(node_key, payload);
 	if (!ConstantTimeEquals(FromHex(mac_hex), std::string(reinterpret_cast<const char *>(expected.data()), 32))) {
@@ -69,21 +74,34 @@ Handle VerifyHandle(const std::string &text, const std::string &node_key, const 
 			handle.read_only.push_back(alias.string);
 		}
 		for (auto &p : json.Get("rowPolicies", JsonValue::Kind::ARRAY).array) {
-			RowPolicy policy {p.Get("id", JsonValue::Kind::STRING).string,
-			                  p.Get("catalog", JsonValue::Kind::STRING).string,
-			                  p.Get("schema", JsonValue::Kind::STRING).string,
-			                  p.Get("table", JsonValue::Kind::STRING).string,
-			                  p.Get("sql", JsonValue::Kind::STRING).string};
+			RowPolicy policy {
+			    p.Get("id", JsonValue::Kind::STRING).string, p.Get("catalog", JsonValue::Kind::STRING).string,
+			    p.Get("schema", JsonValue::Kind::STRING).string, p.Get("table", JsonValue::Kind::STRING).string,
+			    p.Get("sql", JsonValue::Kind::STRING).string};
 			if (policy.id.empty() || policy.catalog.empty() || policy.schema.empty() || policy.table.empty() ||
-			    policy.sql.empty() || policy.sql.size() > 65536 || handle.row_policies.size() >= 256) {
+			    policy.sql.empty() || policy.sql.size() > 65536) {
 				throw std::invalid_argument("invalid row policy");
 			}
 			handle.row_policies.push_back(std::move(policy));
 		}
-		handle.row_policy_bundle = json.Get("rowPolicyBundle", JsonValue::Kind::STRING).string;
-		if (!handle.row_policy_bundle.empty() &&
-			(handle.row_policy_bundle.size() != 64 || !IsLowerHex(handle.row_policy_bundle) ||
-			 !handle.row_policies.empty())) {
+		for (auto &p : json.Get("columnPolicies", JsonValue::Kind::ARRAY).array) {
+			ColumnPolicy policy {
+			    p.Get("id", JsonValue::Kind::STRING).string,     p.Get("catalog", JsonValue::Kind::STRING).string,
+			    p.Get("schema", JsonValue::Kind::STRING).string, p.Get("table", JsonValue::Kind::STRING).string,
+			    p.Get("column", JsonValue::Kind::STRING).string, p.Get("action", JsonValue::Kind::STRING).string,
+			    p.Get("sql", JsonValue::Kind::STRING).string};
+			if (policy.id.empty() || policy.catalog.empty() || policy.schema.empty() || policy.table.empty() ||
+			    policy.column.empty() || policy.sql.size() > 4096 ||
+			    (policy.action != "deny" && policy.action != "mask") ||
+			    (policy.action == "mask" && policy.sql.empty()) || (policy.action == "deny" && !policy.sql.empty())) {
+				throw std::invalid_argument("invalid column policy");
+			}
+			handle.column_policies.push_back(std::move(policy));
+		}
+		handle.policy_bundle = json.Get("policyBundle", JsonValue::Kind::STRING).string;
+		if (!handle.policy_bundle.empty() &&
+			(handle.policy_bundle.size() != 64 || !IsLowerHex(handle.policy_bundle) ||
+			 (!handle.row_policies.empty() || !handle.column_policies.empty()))) {
 			throw std::invalid_argument("invalid row policy bundle");
 		}
 		handle.exp = json.Get("exp", JsonValue::Kind::INTEGER).integer;

@@ -7,7 +7,7 @@ DuckDB 2.0.1 C++ planner interfaces. The gateway SQL rewrite and enforcement sel
 have been removed. `QOD_RLS_ENABLED=false` disables row policies; every manager replica
 must use the same setting.
 
-Node protocol 9 and signed handle version 7 are mandatory.
+Node protocol 10 and signed handle version 8 are mandatory.
 Rebuild and vendor every platform's qod-node binary, deploy the matching node image
 and fleet CLI, and restart the nodes before enabling the feature. Older handles and nodes fail closed. No policy-table or DuckLake metadata migration is required.
 
@@ -26,7 +26,7 @@ scope. They deny only matching table access, without breaking unrelated statemen
 Boot diagnostics and administrator logs identify the policy without its predicate.
 
 Production handles carry a SHA-256 reference to an immutable policy snapshot instead
-of embedding every expanded predicate. The private `/api/internal/authz/row-policies`
+of embedding every expanded predicate. The private `/api/internal/authz/policies`
 endpoint checks the request HMAC, signed handle, and the exact handle's issuance by
 this replica. It serves signed pages of at most 64 policies and 512 KiB of encoded
 entries, keeping responses under the HTTP 1 MiB bound. The node verifies the page

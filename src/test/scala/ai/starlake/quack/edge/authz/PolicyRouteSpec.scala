@@ -2,7 +2,7 @@ package ai.starlake.quack.edge.authz
 
 import ai.starlake.quack.model.{PoolKey, Role, RunningNode}
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
-import ai.starlake.quack.ondemand.state.{RbacUser, RoleRowPolicy}
+import ai.starlake.quack.ondemand.state.{RbacUser, RoleColumnPolicy, RoleRowPolicy}
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import io.circe.Json
@@ -16,7 +16,7 @@ import java.nio.charset.StandardCharsets.UTF_8
 import java.time.Instant
 import java.util.Base64
 
-class RowPolicyRouteSpec extends AnyFlatSpec with Matchers:
+class PolicyRouteSpec extends AnyFlatSpec with Matchers:
   private val pool = PoolKey("acme", "db", "bi")
   private val node =
     RunningNode("n-1", pool, Role.Dual, "127.0.0.1", 1, "t", None, None, Instant.EPOCH)
@@ -37,9 +37,10 @@ class RowPolicyRouteSpec extends AnyFlatSpec with Matchers:
     clock = () => clock,
     versions = PolicyVersions.zero,
     readOnlyCatalogs = ReadOnlyCatalogs.none,
-    rowPoliciesEnabled = true
+    rowPoliciesEnabled = true,
+    nativeColumnPoliciesEnabled = true
   )
-  private val route                                   = new RowPolicyRoute(keys, () => clock)
+  private val route                                   = new PolicyRoute(keys, () => clock)
   private def mint(rows: List[RoleRowPolicy]): String =
     keys.handle(node, NodePrincipal.of(Some(effective(rows)), pool, DecidePurpose.Live))
   private def call(handle: String, offset: Int = 0, badSignature: Boolean = false) =
@@ -50,7 +51,7 @@ class RowPolicyRouteSpec extends AnyFlatSpec with Matchers:
     val sig =
       if badSignature then "0" * 64
       else NodeHandles.hex(NodeHandles.hmac(keys.key(node.nodeId), bytes))
-    val request = Request[IO](Method.POST, uri"/api/internal/authz/row-policies")
+    val request = Request[IO](Method.POST, uri"/api/internal/authz/policies")
       .withEntity(bytes)
       .putHeaders(
         Header.Raw(CIString("X-QoD-Node"), node.nodeId),
@@ -64,13 +65,13 @@ class RowPolicyRouteSpec extends AnyFlatSpec with Matchers:
     parts(1) shouldBe NodeHandles.hex(NodeHandles.hmac(keys.key(node.nodeId), bytes))
     parse(new String(bytes, UTF_8)).toOption.get
 
-  "row policy snapshots" should "page more than 256 policies behind a small signed handle" in {
+  "policy snapshots" should "page more than 256 policies behind a small signed handle" in {
     val handle = mint((1 to 600).map(i => policy(i)).toList)
     handle.getBytes(UTF_8).length should be < 2048
     val verified =
       NodeHandles.verify(handle, keys.key(node.nodeId), node.nodeId, clock).toOption.get
     verified.rowPolicies shouldBe Nil
-    verified.rowPolicyBundle.length shouldBe 64
+    verified.policyBundle.length shouldBe 64
     var offset = 0
     var count  = 0
     while offset >= 0 do
@@ -78,17 +79,48 @@ class RowPolicyRouteSpec extends AnyFlatSpec with Matchers:
       status shouldBe Status.Ok
       text.getBytes(UTF_8).length should be < 1024 * 1024
       val data = page(text)
-      data.hcursor.get[String]("bundle").toOption.get shouldBe verified.rowPolicyBundle
-      count += data.hcursor.get[List[Json]]("rows").toOption.get.size
+      data.hcursor.get[String]("bundle").toOption.get shouldBe verified.policyBundle
+      count += data.hcursor.get[List[Json]]("policies").toOption.get.size
       offset = data.hcursor.get[Int]("next").toOption.get
     count shouldBe 600
+  }
+
+  it should "retain native column policies while paging the complete row policy snapshot" in {
+    val columns = (1 to 600)
+      .map(i =>
+        RoleColumnPolicy(s"c-$i", "r-1", s"db_$i", "main", "docs", "secret", "mask", Some("'***'"))
+      )
+      .toList
+    val e        = effective((1 to 600).map(i => policy(i)).toList).copy(columnPolicies = columns)
+    val handle   = keys.handle(node, NodePrincipal.of(Some(e), pool, DecidePurpose.Live))
+    val verified =
+      NodeHandles.verify(handle, keys.key(node.nodeId), node.nodeId, clock).toOption.get
+    handle.getBytes(UTF_8).length should be < 2048
+    verified.columnPolicies shouldBe Nil
+    verified.rowPolicies shouldBe Nil
+    verified.policyBundle.length shouldBe 64
+    var offset      = 0
+    var count       = 0
+    var columnCount = 0
+    while offset >= 0 do
+      val (status, text) = call(handle, offset)
+      status shouldBe Status.Ok
+      val json    = page(text)
+      val entries = json.hcursor.get[List[Json]]("policies").toOption.get
+      count += entries.count(_.hcursor.get[String]("kind").contains("row"))
+      val masks = entries.filter(_.hcursor.get[String]("kind").contains("column"))
+      masks.foreach(_.hcursor.get[String]("sql") shouldBe Right("'***'"))
+      columnCount += masks.size
+      offset = json.hcursor.get[Int]("next").toOption.get
+    count shouldBe 600
+    columnCount shouldBe 600
   }
 
   it should "mark an invalid stored predicate on its own scope without failing handle minting" in {
     val handle         = mint(List(policy(1, "owner = ${typo}"), policy(2)))
     val (status, text) = call(handle)
     status shouldBe Status.Ok
-    val rows = page(text).hcursor.get[List[NodeRowPolicy]]("rows").toOption.get
+    val rows = page(text).hcursor.get[List[NodeRowPolicy]]("policies").toOption.get
     rows.head.sql shouldBe NodeRowPolicy.InvalidPredicate
     rows(1).sql shouldBe "owner = 'alice'"
     rows.head.table shouldBe "docs1"
@@ -110,7 +142,7 @@ class RowPolicyRouteSpec extends AnyFlatSpec with Matchers:
       "",
       Set.empty,
       clock,
-      rowPolicyBundle = h.rowPolicyBundle
+      policyBundle = h.policyBundle
     )
     call(forged.text)._1 shouldBe Status.Unauthorized
   }
@@ -132,7 +164,7 @@ class RowPolicyRouteSpec extends AnyFlatSpec with Matchers:
       status shouldBe Status.Ok
       response.getBytes(UTF_8).length should be < 1024 * 1024
       val json    = page(response)
-      val entries = json.hcursor.get[List[NodeRowPolicy]]("rows").toOption.get
+      val entries = json.hcursor.get[List[NodeRowPolicy]]("policies").toOption.get
       bytes += entries.map(_.sql.getBytes(UTF_8).length).sum
       count += entries.size
       offset = json.hcursor.get[Int]("next").toOption.get
@@ -149,9 +181,9 @@ class RowPolicyRouteSpec extends AnyFlatSpec with Matchers:
     val second = handle("second")
     val a      = NodeHandles.verify(first, keys.key(node.nodeId), node.nodeId, clock).toOption.get
     val b      = NodeHandles.verify(second, keys.key(node.nodeId), node.nodeId, clock).toOption.get
-    a.rowPolicyBundle should not be b.rowPolicyBundle
+    a.policyBundle should not be b.policyBundle
     page(call(second)._2).hcursor
-      .get[List[NodeRowPolicy]]("rows")
+      .get[List[NodeRowPolicy]]("policies")
       .toOption
       .get
       .head

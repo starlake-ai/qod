@@ -9,8 +9,8 @@ import ai.starlake.quack.edge.authz.{
   MintedHandles,
   NodeKeys,
   NodePrincipal,
-  ReadOnlyCatalogs,
-  RowPolicyRoute
+  PolicyRoute,
+  ReadOnlyCatalogs
 }
 import ai.starlake.quack.edge.authz.location.{LocationRules, LocationRulesSource}
 import ai.starlake.quack.edge.config.OpaConfig
@@ -21,7 +21,13 @@ import ai.starlake.quack.model.{PoolKey, RoleDistribution, Tenant, TenantDbKind}
 import ai.starlake.quack.ondemand.PoolState
 import ai.starlake.quack.observability.metrics.{AuthzInstruments, MetricsBindings, OpaInstruments}
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
-import ai.starlake.quack.ondemand.state.{RbacRole, RbacUser, RolePermission, RoleRowPolicy}
+import ai.starlake.quack.ondemand.state.{
+  RbacRole,
+  RbacUser,
+  RoleColumnPolicy,
+  RolePermission,
+  RoleRowPolicy
+}
 import cats.effect.IO
 import cats.syntax.all.*
 import cats.effect.unsafe.implicits.global
@@ -133,7 +139,8 @@ class QodNodeDecideSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
         paths = key => pools.get(key).flatMap(FlightSqlRouter.usePath).getOrElse(""),
         readOnlyCatalogs = ReadOnlyCatalogs.none,
         versions = ai.starlake.quack.edge.authz.PolicyVersions.zero,
-        rowPoliciesEnabled = true
+        rowPoliciesEnabled = true,
+        nativeColumnPoliciesEnabled = true
       )
       val decideRoute = new DecideRoute(
         keys,
@@ -143,7 +150,7 @@ class QodNodeDecideSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
         key => pools.get(key).flatMap(FlightSqlRouter.usePath).getOrElse(""),
         AuthzInstruments.noop
       )
-      val app = (decideRoute.routes <+> new RowPolicyRoute(keys).routes).orNotFound
+      val app = (decideRoute.routes <+> new PolicyRoute(keys).routes).orNotFound
       server.createContext(
         "/",
         exchange =>
@@ -327,6 +334,27 @@ class QodNodeDecideSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
       .unsafeRunSync()
       .get
       .rowPolicyRefusals should be > 0L
+    as(AllTables, MemoryPool, "SELECT count(*) FROM docs") shouldBe Right(List("2"))
+  }
+
+  it should "filter raw rows and mask columns from one signed manager snapshot" in {
+    val combined = AllTables.copy(
+      rowPolicies =
+        List(RoleRowPolicy("rp-combined", "r-all", "*", "main", "docs", "owner = 'alice'")),
+      columnPolicies = List(
+        RoleColumnPolicy(
+          "cp-combined",
+          "r-all",
+          "*",
+          "main",
+          "docs",
+          "owner",
+          "mask",
+          Some("'***'")
+        )
+      )
+    )
+    as(combined, MemoryPool, "SELECT id, owner FROM docs") shouldBe Right(List("1,***"))
     as(AllTables, MemoryPool, "SELECT count(*) FROM docs") shouldBe Right(List("2"))
   }
 

@@ -101,7 +101,8 @@ object PolicyPipelineFixture:
       /** The control plane under the supervisor; a spec seeds principals into it. */
       store: InMemoryControlPlaneStore = new InMemoryControlPlaneStore(),
       /** Mounts the production protected-write guard over `columnCatalog` (CLS and RLS on). */
-      guarded: Boolean = false
+      guarded: Boolean = false,
+      nativeCls: Boolean = false
   ): Harness =
     val backend = new QuackBackend:
       def allowsLocalFiles   = true
@@ -170,7 +171,8 @@ object PolicyPipelineFixture:
       new SessionRegistry,
       tracker,
       new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral()),
-      columnPolicyRewriter = new ColumnPolicyRewriter(columnCatalog, enabled = true),
+      columnPolicyRewriter =
+        new ColumnPolicyRewriter(columnCatalog, enabled = true, nativeEnforcement = nativeCls),
       metadataFilterRewriter = metadataFilter,
       protectedWriteGuard =
         if guarded then new ProtectedWriteGuard(columnCatalog, clsEnabled = true, rlsEnabled = true)

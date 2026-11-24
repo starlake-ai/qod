@@ -61,22 +61,19 @@ object NodeRowPolicy:
       p.sql.getBytes(java.nio.charset.StandardCharsets.UTF_8).length <= 65536
 
   def of(principal: NodePrincipal): List[NodeRowPolicy] =
-    if principal.superuser || principal.system then Nil
-    else
-      principal.context.toList.flatMap { c =>
-        val e = ai.starlake.quack.ondemand.rbac.Attenuation.attenuatedBy(
-          c.effective,
-          c.restriction.getOrElse(ai.starlake.quack.ondemand.auth.TokenRestriction.Unrestricted)
+    NodePrincipal.policyEffectiveSet(principal).toList.flatMap(ofEffective)
+
+  private[authz] def ofEffective(
+      e: ai.starlake.quack.ondemand.rbac.EffectiveSet
+  ): List[NodeRowPolicy] =
+    e.rowPolicies
+      .sortBy(_.id)
+      .map(p =>
+        NodeRowPolicy(
+          p.id,
+          p.catalogName,
+          p.schemaName,
+          p.tableName,
+          prepare(p.predicateSql, e, p.id, p.catalogName, p.schemaName, p.tableName)
         )
-        e.rowPolicies
-          .sortBy(_.id)
-          .map(p =>
-            NodeRowPolicy(
-              p.id,
-              p.catalogName,
-              p.schemaName,
-              p.tableName,
-              prepare(p.predicateSql, e, p.id, p.catalogName, p.schemaName, p.tableName)
-            )
-          )
-      }
+      )

@@ -146,7 +146,7 @@ def test_build_manifest_refuses_a_pypi_answer_without_this_releases_wheel(releas
     ("rel", "old", "new", "message"),
     [
         ("project/Versions.scala", 'val duckdb         = "', 'val duckdb         = "9.', "the build links"),
-        ("native/qod-node/CMakeLists.txt", "set(QOD_NODE_PROTOCOL ", "set(QOD_NODE_PROTOCOL 9", "node protocol"),
+        ("native/qod-node/CMakeLists.txt", "set(QOD_NODE_PROTOCOL ", "set(QOD_NODE_PROTOCOL 10", "node protocol"),
         ("cli/src/qod_cli/launcher.py", 'DUCKDB_CLI_VERSION = "', 'DUCKDB_CLI_VERSION = "9.', "provisions DuckDB 9."),
     ],
 )
@@ -295,20 +295,22 @@ def test_main_check_pins_needs_no_release_files(tmp_path, capsys):
 
     repo = _fake_repo(tmp_path)
     cmake = repo / "native/qod-node/CMakeLists.txt"
-    cmake.write_text(cmake.read_text(encoding="utf-8").replace("set(QOD_NODE_PROTOCOL ", "set(QOD_NODE_PROTOCOL 9", 1))
+    cmake.write_text(cmake.read_text(encoding="utf-8").replace("set(QOD_NODE_PROTOCOL ", "set(QOD_NODE_PROTOCOL 10", 1))
     assert release_manifest.main(["--check-pins", "--repo", str(repo)]) == 1
     assert "node protocol" in capsys.readouterr().err
 
-    _edit(repo, "native/qod-node/CMakeLists.txt", "set(QOD_NODE_PROTOCOL 9", "set(QOD_NODE_PROTOCOL ")
-    libs = "2.0.1/duckdb-shared-libs-linux-amd64.tar.gz) echo "
-    docker = (repo / "deploy/docker/quack-node/Dockerfile").read_text(encoding="utf-8")
-    first = docker.split(libs, 1)[1][0]
-    wrong = "0" if first != "0" else "1"
-    _edit(repo, "deploy/docker/quack-node/Dockerfile", libs + first, libs + wrong)
+    _edit(repo, "native/qod-node/CMakeLists.txt", "set(QOD_NODE_PROTOCOL 10", "set(QOD_NODE_PROTOCOL ")
+    dockerfile = "deploy/docker/quack-node/Dockerfile"
+    version, pins = release_manifest.dockerfile_duckdb_pins(repo / dockerfile, dockerfile)
+    asset = "duckdb-shared-libs-linux-amd64.tar.gz"
+    expected = pins[(version, asset)]
+    corrupted = ("0" if expected[0] != "0" else "1") + expected[1:]
+    libs = f"{version}/{asset}) echo "
+    _edit(repo, dockerfile, libs + expected, libs + corrupted)
     assert release_manifest.main(["--check-pins", "--repo", str(repo)]) == 1
     err = capsys.readouterr().err
-    assert err.startswith(f"release_manifest: deploy/docker/quack-node/Dockerfile pins sha256 {wrong}")
-    assert "for duckdb-shared-libs-linux-amd64.tar.gz of DuckDB 2.0.1" in err
+    assert err.startswith(f"release_manifest: {dockerfile} pins sha256 {corrupted}")
+    assert f"for {asset} of DuckDB {version}" in err
 
 
 def test_main_refuses_a_manifest_without_its_release_files(capsys):

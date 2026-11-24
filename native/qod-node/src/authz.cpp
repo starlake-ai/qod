@@ -60,7 +60,7 @@ std::string RefreshRefusal(const Installed *current, const Handle &next) {
 NodeAuthz::NodeAuthz(std::string node_id, std::string node_key, Clock clock, AuthzLimits limits)
 	: node_id_(std::move(node_id)), node_key_(std::move(node_key)), clock_(std::move(clock)),
 	  decider_(node_id_, node_key_, limits, clock_, stats_), credentials_(node_id_, node_key_, limits, clock_),
-	  row_policies_(node_id_, node_key_, limits.decide_timeout_ms, clock_) {}
+	  policies_(node_id_, node_key_, limits.decide_timeout_ms, clock_) {}
 
 Handle NodeAuthz::Verify(const std::string &text) const {
 	return VerifyHandle(text, node_key_, node_id_, Now());
@@ -144,14 +144,14 @@ std::string FinalizeRefusal(bool installed, bool privileged, bool has_verdict) {
 bool ExpiredInPlanning(const Admitted *pending, const Installed &current, int64_t now_ms) {
 	return pending && pending->principal_id == current.principal.id &&
 	       pending->policy_version == current.policy_version && pending->ctx == current.ctx &&
-	       pending->read_only == current.read_only && pending->row_policies == current.row_policies &&
+	       pending->read_only == current.read_only && pending->row_policies == current.row_policies && pending->column_policies == current.column_policies &&
 	       pending->expires_at <= now_ms;
 }
 
 bool RebindRequired(const Admitted *stored, const Installed &current, int64_t now_ms) {
 	return !stored || stored->principal_id != current.principal.id ||
 	       stored->policy_version != current.policy_version || stored->ctx != current.ctx ||
-	       stored->read_only != current.read_only || stored->row_policies != current.row_policies ||
+	       stored->read_only != current.read_only || stored->row_policies != current.row_policies || stored->column_policies != current.column_policies ||
 	       stored->expires_at <= now_ms;
 }
 
