@@ -196,7 +196,7 @@ jobs:
         if: matrix.platform == 'linux-x86_64'
         uses: sbt/setup-sbt@v1
 
-      - name: Test signed row policies through the real manager and node
+      - name: Test signed row and column policies through the real manager and node
         if: matrix.platform == 'linux-x86_64'
         env:
           SBT_OPTS: '-Xss8M -Xmx4G'
@@ -214,7 +214,7 @@ jobs:
           cp libquackwire/binaries/linux-x86_64/libquackwire.so src/main/resources/native/linux-x86_64/
           cp libquackwire/binaries/VERSION src/main/resources/native/
           sbt -no-colors 'set Compile / resourceGenerators := Seq.empty' \
-            'testOnly ai.starlake.quack.ondemand.runtime.QodNodeDecideSpec ai.starlake.quack.edge.authz.RowPolicyRouteSpec' \
+            'testOnly ai.starlake.quack.ondemand.runtime.QodNodeDecideSpec ai.starlake.quack.edge.authz.PolicyRouteSpec' \
             2>&1 | tee "$RUNNER_TEMP/row-policy-integration.log"
           ! grep -Eq '\*\*\* (CANCELED|ABORTED) \*\*\*' "$RUNNER_TEMP/row-policy-integration.log"
 
