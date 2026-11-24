@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.15.0
 
 ### Upgrading
 
@@ -153,8 +153,9 @@
   applies in every clause, and the protected-write guard and the row policy rewriter read the
   statement the same way, so an `INSERT ... SELECT` or `CREATE TABLE ... AS SELECT` can no longer
   copy such a column out. Under column or row policies, a statement whose parse keeps fewer
-  arguments of a call than its text gives is refused. A SQL value name (`current_date`, `current_user`, `user`,
-  `localtime` and the others) binds the column when the select's own FROM has it and the function
+  arguments of a call than its text gives is refused. A SQL value name (`current_date`,
+  `current_user`, `user`, `localtime` and the others) binds the column when the select's own FROM
+  has it and the function
   otherwise, except inside an aggregate's arguments (a method call such as `user.max()` included),
   where DuckDB can bind an enclosing query's column: there it is refused when an enclosing table
   has a protected column of that name. Read
@@ -177,8 +178,9 @@
   whenever its qualifier may name a column, a table or an alias of the statement. A call's
   dotted name is judged whole: only `<fn>`, `main.<fn>` and `system.main.<fn>` are DuckDB's own
   functions, and a name with a part left over after `main` or `system.main` (`main.t.max()`, the
-  table `main.t`) is a method call, refused with `FILTER`, `OVER` or `WITHIN GROUP` after it. A call qualified by another
-  schema or catalog that nothing in scope is named after (a function of the tenant's own) is left
+  table `main.t`) is a method call, refused with `FILTER`, `OVER` or `WITHIN GROUP` after it. A
+  call qualified by another schema or catalog that nothing in scope is named after (a function of
+  the tenant's own) is left
   as written. Also refused: a method call followed by `FILTER`, `OVER` or `WITHIN GROUP` on
   anything but a name, and one with `DISTINCT` or `ALL` in its arguments or on a typed literal, a
   cast, a `CASE` or a name of more than two parts. Write those as function calls. A statement whose
@@ -339,6 +341,8 @@
   type, instead of being read as `sql`. A misspelled `sourceType` in a manifest is therefore
   refused with `unknown sourceType '<value>' (expected one of: ...), or its module is not loaded`.
   A NULL or blank stored value still reads as `sql`.
+- The Compare tab of a catalog table picks Schema or Data with two mutually exclusive checkboxes
+  instead of two buttons.
 
 ### Fixed
 
@@ -367,7 +371,8 @@
   exist, and storage paths (`folder`, data files) are left out of a member's replies. A member
   holding any row policy gets `-1` for every row and file count (`rowCount` and `dataFileCount`,
   and a commit's `rowsAdded`, `rowsRemoved`, `filesAdded` and `filesRemoved`): the catalog counts
-  the whole table, so the numbers would tell how many rows the policy hides. Admins get what they got. The `iceberg` arguments still need an admin.
+  the whole table, so the numbers would tell how many rows the policy hides. Admins get what they
+  got. The `iceberg` arguments still need an admin.
 - **`list_snapshots` answers a plain tenant member** (the follow-up #297 left). It read with the
   admin gate, so a member got `tenant_forbidden` there too. A member now reaches the database as
   the four tools above do, and gets only the snapshots that touched a table their grants cover

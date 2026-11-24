@@ -135,14 +135,17 @@
       ]
     },
     {
-      "version": "0.14.3",
+      "version": "0.15.0",
       "changesets": [],
       "min_from_version": "0.10.0",
       "rollback_without_restore": true,
       "rollback_blocked_by": [],
-      "notes": "https://github.com/starlake-ai/quack-on-demand/blob/v0.14.3/CHANGELOG.md",
+      "notes": "https://github.com/starlake-ai/qod/blob/v0.15.0/CHANGELOG.md#upgrading",
       "steps": [
-        { "when": "after", "boot_refuses_until_done": false, "text": "Restart every node so it runs DuckDB 2.0.1: a node an earlier release started keeps running DuckDB 2.0.0 until it restarts. On Kubernetes that means the new node image; fleet servers need this release's qod fleet join. Rebuild and deploy protocol-10 qod-node binaries with the manager (handle version 8); older nodes refuse. Upgrade every manager replica together with its nodes; CLS now runs only in the node. Review the native CLS type and policy-scope limits. QOD_CLS_ENFORCEMENT and QOD_CLS_UNRESOLVED_TABLE are retired; QOD_CLS_ENABLED=false remains the kill switch." }
+        { "when": "during", "boot_refuses_until_done": false, "text": "Upgrade every manager replica together with its nodes: column and row policies now run only on qod-node (node protocol 10, signed handle version 8), and a node of an earlier protocol refuses this release's handles. The gateway's CLS and RLS rewriting is gone; QOD_CLS_ENABLED=false and QOD_RLS_ENABLED=false remain the kill switches." },
+        { "when": "after", "boot_refuses_until_done": false, "text": "Restart every node so it runs DuckDB 2.0.1 and node protocol 10: a node an earlier release started keeps running DuckDB 2.0.0 until it restarts. On Kubernetes that means the new node image; fleet servers need this release's qod fleet join, which bundles the 2.0.1 qod-node. No catalog migrates." },
+        { "when": "after", "boot_refuses_until_done": false, "text": "Unset QOD_CLS_ENFORCEMENT, QOD_CLS_UNRESOLVED_TABLE and QOD_RLS_ENFORCEMENT: they were removed and are ignored. Review the native policy limits (docs/node-column-security.md, docs/node-row-security.md): writes to a table a column or row policy covers, view-scoped policies, unsupported column types and unsupported predicates are now refused." },
+        { "when": "after", "boot_refuses_until_done": false, "text": "Read the boot output and fix each stderr WARN: line it prints for a row policy naming a column its table no longer has (it now denies every statement reading that table under its role), a stored mask outside the allowed forms, and a stored row predicate or mask the parser read only in part (a predicate so stored now denies its table). Update or delete each policy named." }
       ]
     }
   ]
