@@ -129,36 +129,32 @@ final class CatalogHandlers(
       )
     }
 
-  /** The MCP `list_snapshots` page of a plain member
-    * (`DuckLakeCatalogReader.listSnapshotsForMember`): same gate and `limit` bounds as
-    * [[listSnapshots]], no REST route.
+  /** The MCP `list_snapshots` read of a plain member
+    * (`DuckLakeCatalogReader.listSnapshotsForMember`): the newest `limit` snapshots, and the
+    * snapshots `taggedIds` name wherever they sit in the history (for the member's tags), both read
+    * under the one gate, so the call audits once. `underPolicy`: the member holds a column or a row
+    * policy, so a table whose name history is not stable is left out as well. Same gate and `limit`
+    * bounds as [[listSnapshots]], no REST route.
     */
   def listSnapshotsForMember(
       tenant: String,
       tenantDb: String,
       limit: Option[Int],
+      taggedIds: Set[Long],
+      underPolicy: Boolean,
       apiKey: Option[String]
-  )(scopeOf: SessionScope.Resolver): Res[List[DuckLakeCatalogReader.MemberSnapshot]] =
+  )(
+      scopeOf: SessionScope.Resolver
+  ): Res[(List[DuckLakeCatalogReader.MemberSnapshot], List[DuckLakeCatalogReader.MemberSnapshot])] =
     gated("snapshots", tenant, tenantDb, apiKey)(scopeOf) { (tid, db) =>
       Right(
-        if !isDuckLake(tid, db) then Nil
-        else resolveReader(tid, db).listSnapshotsForMember(limit.getOrElse(200).max(1).min(1000))
-      )
-    }
-
-  /** The snapshots `ids` name, read as [[listSnapshotsForMember]] reads them, for the tags of a
-    * plain member's MCP `list_snapshots`: same gate, no REST route.
-    */
-  def listSnapshotsByIdsForMember(
-      tenant: String,
-      tenantDb: String,
-      ids: Set[Long],
-      apiKey: Option[String]
-  )(scopeOf: SessionScope.Resolver): Res[List[DuckLakeCatalogReader.MemberSnapshot]] =
-    gated("snapshots", tenant, tenantDb, apiKey)(scopeOf) { (tid, db) =>
-      Right(
-        if !isDuckLake(tid, db) then Nil
-        else resolveReader(tid, db).listSnapshotsByIdsForMember(ids)
+        if !isDuckLake(tid, db) then (Nil, Nil)
+        else
+          val reader = resolveReader(tid, db)
+          (
+            reader.listSnapshotsForMember(limit.getOrElse(200).max(1).min(1000), underPolicy),
+            reader.listSnapshotsByIdsForMember(taggedIds, underPolicy)
+          )
       )
     }
 

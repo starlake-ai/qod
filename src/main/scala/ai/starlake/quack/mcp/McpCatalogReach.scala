@@ -52,7 +52,8 @@ private[mcp] final class McpCatalogReach(sup: PoolSupervisor, scopeOf: SessionSc
       tenant: String,
       database: String
   ): Either[String, Reach] =
-    if asAdmin(apiKey, tenant) then Right(Reach(scopeOf, None, countsRows = true))
+    if asAdmin(apiKey, tenant) then
+      Right(Reach(scopeOf, None, countsRows = true, underPolicy = false))
     else
       val tid = tenantId(tenant)
       // The one spelling pool keys and `findTenantDb` hold.
@@ -64,7 +65,10 @@ private[mcp] final class McpCatalogReach(sup: PoolSupervisor, scopeOf: SessionSc
           Some(BranchHandlers.seenBy(eff, alias)),
           // Fail closed: any row policy withholds counts on every table, rather than matching
           // each policy's table (wildcards, name folding) here a second time.
-          countsRows = eff.rowPolicies.isEmpty
+          countsRows = eff.rowPolicies.isEmpty,
+          // The node's own condition for judging a time-travel read by the stability of the
+          // table's name (ProtectedWriteGuard.check): any column or row policy of the principal.
+          underPolicy = eff.columnPolicies.nonEmpty || eff.rowPolicies.nonEmpty
         )
       }
 
@@ -133,7 +137,8 @@ object McpCatalogReach:
   final case class Reach(
       scopeOf: SessionScope.Resolver,
       sees: Option[(String, String) => Boolean],
-      countsRows: Boolean
+      countsRows: Boolean,
+      underPolicy: Boolean
   ):
     def visible(schema: String, table: String): Boolean = sees.forall(_(schema, table))
 
@@ -164,12 +169,13 @@ object McpCatalogReach:
           )
         )
 
-    /** A member's snapshots: those that touched a table they can see, naming only those tables and
-      * no raw change text (it lists the whole database's activity). The counts and the commit
-      * message are the whole snapshot's, so they are withheld when it also touched a table the
-      * member cannot see or when some entry of its changes named no table the reader resolved (fail
-      * closed: that entry may be a hidden table's); the counts also for a member who does not count
-      * rows. The author stays.
+    /** A member's snapshots (the reader names each table as it is today, and leaves out a dropped
+      * one, or under a column or row policy one whose name history is not stable): those that
+      * touched a table they can see, naming only those tables and no raw change text (it lists the
+      * whole database's activity). The counts and the commit message are the whole snapshot's, so
+      * they are withheld when it also touched a table the member cannot see or when some entry of
+      * its changes named no table the reader resolved (fail closed: that entry may be a hidden
+      * table's); the counts also for a member who does not count rows. The author stays.
       */
     def snapshots(ss: List[MemberSnapshot]): List[CatalogSnapshotEntry] =
       if !isMember then ss.map(_.entry)

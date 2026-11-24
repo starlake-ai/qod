@@ -419,7 +419,10 @@ MCP troubleshooting:
   policy, so count with `run_sql`. `list_snapshots` shows a plain user only the snapshots
   that touched a table they can read (a write, inlined included, a flush or a maintenance
   on it counts; a schema-only DDL snapshot does not), so possibly fewer than `limit`, which
-  applies to the newest 1000 snapshots at most. It names only those tables. When a snapshot
+  applies to the newest 1000 snapshots at most. It names only those tables, each by its
+  current name, and a snapshot of a dropped table is hidden. While they hold a column or a row
+  policy, a snapshot of a table whose name has been another table's or whose columns were
+  renamed is hidden too, as for time travel. When a snapshot
   also touched a table they cannot read or has a change that names no table, its
   `commitMessage` is null and its counts are `-1`; the counts are also `-1` on every
   snapshot while they hold a row policy. Their tags are those on any snapshot they can see,

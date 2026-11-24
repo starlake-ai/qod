@@ -336,7 +336,12 @@
   the four tools above do, and gets only the snapshots that touched a table their grants cover
   for reading, each naming only those tables, with `changes` empty (the raw text lists the whole
   database's activity). Inlined writes and maintenance (a flush, a merge) on a table they read
-  count as touching it; a snapshot of a schema-only DDL, or with no table, does not. When the
+  count as touching it; a snapshot of a schema-only DDL, or with no table, does not. A table is
+  judged by the name it has now, the one its stable id stands for (as the node judges a read at
+  any snapshot): a snapshot of a dropped table is hidden from a member, and a table renamed away
+  from a name they can read stays out of their sight. A member holding a column or a row policy
+  also loses the snapshots of a table whose name has been another table's or whose columns were
+  renamed, as for time travel. When the
   snapshot also touched a table they cannot read or has a change that names no table (a view, a
   verb a later version adds), its `commitMessage` is null and `rowsAdded`, `filesAdded` and
   `filesRemoved` are `-1`; the counts are also `-1` on every snapshot for a member holding a row

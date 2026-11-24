@@ -30,6 +30,8 @@ import ai.starlake.quack.ondemand.state.{
   UserGrant,
   UserStore
 }
+import ai.starlake.quack.ondemand.telemetry.testkit.RecordingTelemetryStore
+import ai.starlake.quack.ondemand.telemetry.{AuditActions, AuditRecorder}
 import ai.starlake.quack.security.{ManagerServerHarness, SecurityFixtures}
 import io.circe.Json
 import io.circe.parser.parse
@@ -96,7 +98,9 @@ class McpEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll w
   private def withHarness(
       mcpEnabled: Boolean = true,
       prepare: SecurityFixtures.Fixture => Unit = _ => (),
-      catalogReader: Option[(String, String) => DuckLakeCatalogReader] = None
+      catalogReader: Option[(String, String) => DuckLakeCatalogReader] = None,
+      audit: AuditRecorder = AuditRecorder.noop,
+      auditCatalogReads: Boolean = false
   )(body: ManagerServerHarness.Harness => Unit): Unit =
     TestPostgres.ensureReachable()
     val fix = SecurityFixtures.freshStore()
@@ -108,7 +112,9 @@ class McpEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll w
       patUserOf =
         Some((tenant, username) => users.userIdOf(tenant, username).flatMap(users.userById)),
       patAuth = Some(patAuth),
-      mcpEnabled = mcpEnabled
+      mcpEnabled = mcpEnabled,
+      audit = audit,
+      auditCatalogReads = auditCatalogReads
     )
     try body(h)
     finally h.shutdown()
@@ -308,15 +314,28 @@ class McpEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll w
 
   /** A catalog of two schemas: `sales.orders` (bob's grant below), `sales.secret`, `hr.salaries`,
     * whose history is `snaps` (newest first); the ids in `unaccounted` have a change no table was
-    * attributed to. It reads a member's snapshots by window or by ids, like the real reader.
+    * attributed to. It reads a member's snapshots by window or by ids, like the real reader. Under
+    * a policy, a table whose name history is not stable (`stableName` false) is left out of a
+    * snapshot, which then counts as one with a change no visible table is attributed to.
     */
   private def memberCatalogOf(
       snaps: List[CatalogSnapshotEntry] = catalogSnapshots,
-      unaccounted: Set[Long] = Set.empty
+      unaccounted: Set[Long] = Set.empty,
+      stableName: ((String, String)) => Boolean = _ => true
   ): (String, String) => DuckLakeCatalogReader = (_, _) =>
     new DuckLakeCatalogReader(null):
       private def asMember(s: CatalogSnapshotEntry) =
         DuckLakeCatalogReader.MemberSnapshot(s, accounted = !unaccounted(s.snapshotId))
+      private def asMember(s: CatalogSnapshotEntry, underPolicy: Boolean) =
+        if !underPolicy then DuckLakeCatalogReader.MemberSnapshot(s, !unaccounted(s.snapshotId))
+        else
+          val kept = s.affectedTables.filter(t => nameHistoryStable(t.schema, t.name))
+          DuckLakeCatalogReader.MemberSnapshot(
+            s.copy(affectedTables = kept),
+            accounted = !unaccounted(s.snapshotId) && kept.size == s.affectedTables.size
+          )
+      override def nameHistoryStable(schema: String, name: String): Boolean =
+        stableName((schema, name))
       override def listSnapshots(
           limit: Int,
           before: Option[Long],
@@ -327,10 +346,21 @@ class McpEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll w
       override def listSnapshotsForMember(limit: Int): List[DuckLakeCatalogReader.MemberSnapshot] =
         lastSnapshotWindow.set(limit)
         snaps.take(limit).map(asMember)
+      override def listSnapshotsForMember(
+          limit: Int,
+          underPolicy: Boolean
+      ): List[DuckLakeCatalogReader.MemberSnapshot] =
+        lastSnapshotWindow.set(limit)
+        snaps.take(limit).map(asMember(_, underPolicy))
       override def listSnapshotsByIdsForMember(
           ids: Set[Long]
       ): List[DuckLakeCatalogReader.MemberSnapshot] =
         snaps.filter(s => ids(s.snapshotId)).map(asMember)
+      override def listSnapshotsByIdsForMember(
+          ids: Set[Long],
+          underPolicy: Boolean
+      ): List[DuckLakeCatalogReader.MemberSnapshot] =
+        snaps.filter(s => ids(s.snapshotId)).map(asMember(_, underPolicy))
       private def entry(schema: String, table: String) =
         CatalogTableEntry(schema, table, 10L, 1, Some(s"s3://lake/$schema/$table/"))
       private val tables = Map(
@@ -538,6 +568,10 @@ class McpEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll w
     * on snapshot 1 (orders), 2 (secret alone) and 0 (no resolved table).
     */
   private def duckLakeWithTags(fix: SecurityFixtures.Fixture): Unit =
+    duckLakeTagged("visible-tag" -> 1L, "hidden-tag" -> 2L, "unresolved-tag" -> 0L)(fix)
+
+  /** The tenant-db as a DuckLake one, with the tags `tags` (name -> snapshot id). */
+  private def duckLakeTagged(tags: (String, Long)*)(fix: SecurityFixtures.Fixture): Unit =
     fix.store.upsertTenantDb(
       TenantDb(
         id = SecurityFixtures.TenantDbId,
@@ -548,17 +582,16 @@ class McpEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll w
         dataPath = ""
       )
     )
-    List("visible-tag" -> 1L, "hidden-tag" -> 2L, "unresolved-tag" -> 0L).foreach {
-      (name, snapshotId) =>
-        fix.store.createSnapshotTag(
-          SnapshotTag(
-            id = s"tag-$name",
-            tenant = SecurityFixtures.TenantId,
-            tenantDb = SecurityFixtures.TenantDbName,
-            name = name,
-            snapshotId = snapshotId
-          )
+    tags.foreach { (name, snapshotId) =>
+      fix.store.createSnapshotTag(
+        SnapshotTag(
+          id = s"tag-$name",
+          tenant = SecurityFixtures.TenantId,
+          tenantDb = SecurityFixtures.TenantDbName,
+          name = name,
+          snapshotId = snapshotId
         )
+      )
     }
 
   private def snapshotsForBob(fix: SecurityFixtures.Fixture): Unit =
@@ -1006,6 +1039,20 @@ class McpEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll w
       }
     }
 
+  it should "hide every snapshot and tag of a table whose name history is not stable from a member holding a row policy" in
+    withHarness(
+      prepare = snapshotsForFilteredBob,
+      catalogReader = Some(memberCatalogOf(stableName = _ => false))
+    ) { h =>
+      val bob         = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.BobUsername)
+      val (err, text) = callTool(h, bob, "list_snapshots", acmeMain)
+      withClue(text) {
+        err shouldBe false
+        parsedSnapshots(text) shouldBe ((Map.empty[Long, Json], Nil))
+        text should not include "commit 1"
+      }
+    }
+
   /** The newest 59 snapshots touch `sales.secret` alone (ids 60 to 2), then comes the one of
     * `sales.orders` (1) and the unresolved one (0): beyond a member's window of 50 for `limit` 1.
     */
@@ -1098,7 +1145,7 @@ class McpEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll w
   private def touching(stored: Map[Long, CatalogSnapshotEntry], tid: Long): Set[Long] =
     stored.keySet.filter(id => stored(id).changes.split(",").exists(_.endsWith(s":$tid")))
 
-  it should "judge a renamed table by its name at each snapshot, so a grant on the new name shows no earlier snapshot (real DuckLake)" in
+  it should "judge a renamed table by the name it has now, so a grant on that name shows its whole history, the rename included (real DuckLake)" in
     withCatalog(
       "mcpsnapsrename",
       """CREATE SCHEMA lake.sales;
@@ -1120,29 +1167,47 @@ class McpEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll w
       val writes    = touching(stored, ordersId)
       val oldWrites = writes.filter(_ <= beforeRename)
       val newWrites = writes.filter(_ > renameId)
+      // The entries that name the table by name: its creation under the old name and, in this
+      // DuckLake, the rename (a `created_table` under the new name).
+      val byName = stored.keySet.filter(id =>
+        List("\"sales\".\"orders_old\"", "\"sales\".\"orders\"").exists(stored(id).changes.contains)
+      )
+      val history = writes ++ byName
       withHarness(prepare = snapshotsForBob, catalogReader = Some((_, _) => reader)) { h =>
         val bob        = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.BobUsername)
         val alice      = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.AliceUsername)
         val (err, txt) = callTool(h, bob, "list_snapshots", acmeMain)
         val (_, admin) = callTool(h, alice, "list_snapshots", acmeMain)
         val (snaps, _) = parsedSnapshots(txt)
-        info(s"rename snapshot $renameId shown to the member: ${snaps.contains(renameId)}")
         withClue(s"stored ${stored.values.map(s => s.snapshotId -> s.changes)}: $txt") {
           err shouldBe false
           // The table was written under both names.
           oldWrites should not be empty
           newWrites should not be empty
-          parsedSnapshots(admin)._1.keySet should contain allElementsOf (oldWrites ++ newWrites)
-          // bob's grant names sales.orders: the snapshots of sales.orders_old are not his.
-          snaps.keySet.intersect(oldWrites) shouldBe empty
-          snaps.keySet should contain allElementsOf newWrites
-          snaps.values.foreach(s => tablesOf(s) shouldBe List("sales" -> "orders"))
+          history should contain(renameId)
+          parsedSnapshots(admin)._1.keySet should contain allElementsOf history
+          // bob's grant names sales.orders, the table's name now: the whole history of that table
+          // is his, under that name, each snapshot with its counts (it touched his table alone).
+          snaps.keySet shouldBe history
+          snaps.foreach { (id, s) =>
+            tablesOf(s) shouldBe List("sales" -> "orders")
+            countsOf(s) shouldBe
+              List(
+                stored(id).rowsAdded,
+                stored(id).filesAdded.toLong,
+                stored(id).filesRemoved.toLong
+              )
+          }
+          // The rename snapshot is his, always: named orders, its message as stored.
+          snaps.keySet should contain(renameId)
+          tablesOf(snaps(renameId)) shouldBe List("sales" -> "orders")
+          stringOf(snaps(renameId), "commitMessage") shouldBe stored(renameId).commitMessage
           txt should not include "orders_old"
         }
       }
     }
 
-  it should "show a member whose grant still names a dropped table the snapshots that wrote and dropped it (real DuckLake, current behaviour)" in
+  it should "hide from a member every snapshot of a table dropped since, though their grant still names it, and keep them for an admin (real DuckLake)" in
     withCatalog(
       "mcpsnapsdrop",
       """CREATE SCHEMA lake.sales;
@@ -1162,17 +1227,281 @@ class McpEndToEndSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll w
       val writes = touching(stored, ordersId).filter(_ <= lastLive)
       withHarness(prepare = snapshotsForBob, catalogReader = Some((_, _) => reader)) { h =>
         val bob        = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.BobUsername)
+        val alice      = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.AliceUsername)
         val (err, txt) = callTool(h, bob, "list_snapshots", acmeMain)
-        val (snaps, _) = parsedSnapshots(txt)
+        val (_, admin) = callTool(h, alice, "list_snapshots", acmeMain)
         withClue(s"stored ${stored.values.map(s => s.snapshotId -> s.changes)}: $txt") {
           err shouldBe false
           writes should not be empty
-          snaps.keySet should contain allElementsOf writes
-          snaps.keySet should contain(dropId)
-          snaps.values.foreach(s => tablesOf(s) shouldBe List("sales" -> "orders"))
+          // The node refuses a dropped table to a member at any snapshot: none of its history.
+          parsedSnapshots(txt) shouldBe ((Map.empty[Long, Json], Nil))
           txt should not include "secret"
+          // An admin keeps every snapshot, the writes and the drop included.
+          parsedSnapshots(admin)._1.keySet shouldBe stored.keySet
+          parsedSnapshots(admin)._1.keySet should contain allElementsOf (writes + dropId)
         }
       }
+    }
+
+  // Maintainer's review of #321: a member's table is the one its stable id names today, a dropped
+  // table is hidden, and under a column or row policy a table whose name history is not stable is
+  // hidden too (the node's time-travel rule).
+
+  private def bobPat   = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.BobUsername)
+  private def alicePat = mintPat(Some(SecurityFixtures.TenantId), SecurityFixtures.AliceUsername)
+
+  /** bob reads `sales.orders` (under a row policy with `rowPolicy`) of the real catalog `reader`, a
+    * DuckLake tenant-db tagged with `tags` only.
+    */
+  private def withReader(
+      reader: DuckLakeCatalogReader,
+      rowPolicy: Boolean = false,
+      tags: Seq[(String, Long)] = Nil,
+      audit: AuditRecorder = AuditRecorder.noop,
+      auditCatalogReads: Boolean = false
+  )(body: ManagerServerHarness.Harness => Unit): Unit =
+    def prepare(fix: SecurityFixtures.Fixture): Unit =
+      duckLakeTagged(tags*)(fix)
+      if rowPolicy then grantBobOrdersFiltered(fix) else grantBobOrders(fix)
+    withHarness(
+      prepare = prepare,
+      catalogReader = Some((_, _) => reader),
+      audit = audit,
+      auditCatalogReads = auditCatalogReads
+    )(body)
+
+  /** The review's scenario: `orders` written, renamed `payroll`, then a new `orders` made and
+    * written. `body` gets the reader, the rename snapshot and the stored snapshots.
+    */
+  private def renamedAway(prefix: String)(
+      body: (DuckLakeCatalogReader, Long, Map[Long, CatalogSnapshotEntry]) => Unit
+  ): Unit =
+    withCatalog(
+      prefix,
+      """CREATE SCHEMA lake.sales;
+        |CREATE TABLE lake.sales.orders (id INTEGER, v VARCHAR);
+        |INSERT INTO lake.sales.orders VALUES (1, 'payroll a');
+        |INSERT INTO lake.sales.orders SELECT range, 'payroll bulk' FROM range(1000);
+        |""".stripMargin
+    ) { (reader, _) =>
+      runSqlOnCatalog("ALTER TABLE lake.sales.orders RENAME TO payroll;")
+      val renameId = reader.maxSnapshotId().get
+      runSqlOnCatalog(
+        """CREATE TABLE lake.sales.orders (id INTEGER, v VARCHAR);
+          |INSERT INTO lake.sales.orders VALUES (9, 'new orders');
+          |""".stripMargin
+      )
+      body(reader, renameId, reader.listSnapshots(limit = 1000).map(s => s.snapshotId -> s).toMap)
+    }
+
+  it should "show a member the new orders and nothing of the payroll it was renamed from, the rename included (real DuckLake)" in
+    renamedAway("mcpsnapcurrename") { (reader, renameId, stored) =>
+      val schemaId = stored.keySet.filter(id => stored(id).changes.startsWith("created_schema")).max
+      val payroll  = stored.keySet.filter(id => id > schemaId && id <= renameId)
+      val newOrders = stored.keySet.filter(_ > renameId)
+      withReader(reader) { h =>
+        val (err, txt) = callTool(h, bobPat, "list_snapshots", acmeMain)
+        val (_, admin) = callTool(h, alicePat, "list_snapshots", acmeMain)
+        val (snaps, _) = parsedSnapshots(txt)
+        withClue(s"stored ${stored.values.map(s => s.snapshotId -> s.changes)}: $txt") {
+          err shouldBe false
+          payroll.size should be >= 4
+          newOrders.size shouldBe 2
+          // The admin keeps every snapshot; the rename snapshot names the table it made, payroll.
+          parsedSnapshots(admin)._1.keySet should contain allElementsOf payroll
+          tablesOf(parsedSnapshots(admin)._1(renameId)) shouldBe List("sales" -> "payroll")
+          // bob's grant names sales.orders, the table made after the rename: its snapshots are
+          // his, under that name. None of payroll's, the rename's included.
+          snaps.keySet shouldBe newOrders
+          snaps.values.foreach(sn => tablesOf(sn) shouldBe List("sales" -> "orders"))
+          txt should not include "payroll"
+        }
+      }
+    }
+
+  it should "hide the history of an orders whose name was another table's from a member holding a row policy on it (real DuckLake)" in
+    renamedAway("mcpsnapcurpolicy") { (reader, _, stored) =>
+      withReader(reader, rowPolicy = true) { h =>
+        val (err, txt) = callTool(h, bobPat, "list_snapshots", acmeMain)
+        withClue(s"stored ${stored.values.map(s => s.snapshotId -> s.changes)}: $txt") {
+          err shouldBe false
+          // The name has been another table's: as for time travel under a policy, none of it.
+          parsedSnapshots(txt) shouldBe ((Map.empty[Long, Json], Nil))
+          txt should not include "payroll"
+        }
+      }
+    }
+
+  it should "keep the history of a table whose column was renamed from a member holding no policy, and hide it under a row policy (real DuckLake)" in
+    withCatalog(
+      "mcpsnapcurcolumn",
+      """CREATE SCHEMA lake.sales;
+        |CREATE TABLE lake.sales.orders (id INTEGER, v VARCHAR);
+        |INSERT INTO lake.sales.orders VALUES (1, 'a');
+        |""".stripMargin
+    ) { (reader, _) =>
+      runSqlOnCatalog(
+        """ALTER TABLE lake.sales.orders RENAME COLUMN v TO label;
+          |INSERT INTO lake.sales.orders VALUES (2, 'b');
+          |""".stripMargin
+      )
+      reader.nameHistoryStable("sales", "orders") shouldBe false
+      val stored   = reader.listSnapshots(limit = 1000).map(s => s.snapshotId -> s).toMap
+      val ordersId = reader.currentTableInfo("sales", "orders").get._1
+      val orders   = touching(stored, ordersId) ++ stored.keySet.filter(id =>
+        stored(id).changes.contains("\"sales\".\"orders\"")
+      )
+      withReader(reader) { h =>
+        val (err, txt) = callTool(h, bobPat, "list_snapshots", acmeMain)
+        val (snaps, _) = parsedSnapshots(txt)
+        withClue(s"stored ${stored.values.map(s => s.snapshotId -> s.changes)}: $txt") {
+          err shouldBe false
+          orders.size should be >= 3
+          snaps.keySet shouldBe orders
+          snaps.values.foreach(sn => tablesOf(sn) shouldBe List("sales" -> "orders"))
+        }
+      }
+      // The same member under a row policy loses it all: a column's name has changed.
+      withReader(reader, rowPolicy = true) { h =>
+        val (err, txt) = callTool(h, bobPat, "list_snapshots", acmeMain)
+        withClue(txt) {
+          err shouldBe false
+          parsedSnapshots(txt) shouldBe ((Map.empty[Long, Json], Nil))
+        }
+      }
+    }
+
+  it should "keep a snapshot of a stable table that also touched a dropped one, its counts and message withheld (real DuckLake)" in
+    withCatalog(
+      "mcpsnapcurmixed",
+      """CREATE SCHEMA lake.sales;
+        |CREATE TABLE lake.sales.orders (id INTEGER, v VARCHAR);
+        |CREATE TABLE lake.sales.gone (id INTEGER, v VARCHAR);
+        |BEGIN;
+        |CALL ducklake_set_commit_message('lake', 'tenant:acme/user:alice', 'orders and gone');
+        |INSERT INTO lake.sales.orders SELECT range, 'both' FROM range(1000);
+        |INSERT INTO lake.sales.gone SELECT range, 'both' FROM range(1000);
+        |COMMIT;
+        |INSERT INTO lake.sales.gone SELECT range, 'alone' FROM range(1000);
+        |INSERT INTO lake.sales.orders SELECT range, 'alone' FROM range(1000);
+        |""".stripMargin
+    ) { (reader, _) =>
+      runSqlOnCatalog("DROP TABLE lake.sales.gone;")
+      val stored = reader.listSnapshots(limit = 1000).map(s => s.snapshotId -> s).toMap
+      val both   = stored.keySet.filter(id => stored(id).commitMessage.contains("orders and gone"))
+      withReader(reader) { h =>
+        val (err, text) = callTool(h, bobPat, "list_snapshots", acmeMain)
+        val (snaps, _)  = parsedSnapshots(text)
+        withClue(s"stored ${stored.values.map(s => s.snapshotId -> s.changes)}: $text") {
+          err shouldBe false
+          both should have size 1
+          // The shared snapshot shows orders alone and nothing else of it.
+          snaps.keySet should contain(both.head)
+          tablesOf(snaps(both.head)) shouldBe List("sales" -> "orders")
+          countsOf(snaps(both.head)) shouldBe withheldCounts
+          stringOf(snaps(both.head), "commitMessage") shouldBe None
+          // His: orders' creation, the shared write, orders' own write. The dropped table's own
+          // creation, write and drop are not.
+          snaps.keySet.size shouldBe 3
+          snaps.values.foreach(s => tablesOf(s) shouldBe List("sales" -> "orders"))
+          text should not include "gone"
+        }
+      }
+    }
+
+  /** Test texts are written with `'` for `"`. */
+  private def q(text: String): String = text.replace('\'', '"')
+
+  /** bob may connect to `sales` and reads the tables `names` of it, no policy. */
+  private def bobReadsSales(names: String*)(fix: SecurityFixtures.Fixture): Unit =
+    duckLakeTagged()(fix)
+    fix.store.insertPoolPermission(
+      PoolPermission(
+        id = "pp-bob-sales",
+        tenantId = SecurityFixtures.TenantId,
+        poolId = Some(SecurityFixtures.PoolId),
+        userId = Some(fix.bobUserId)
+      )
+    )
+    fix.store.upsertRole(RbacRole("r-named", SecurityFixtures.TenantId, "named_reader"))
+    names.zipWithIndex.foreach { (name, i) =>
+      fix.store.insertRolePermission(
+        RolePermission(s"rp-named-$i", "r-named", "*", "sales", name, "RO")
+      )
+    }
+    fix.store.addUserRole(fix.bobUserId, "r-named")
+
+  it should "judge a table whose name holds a quote, a doubled quote or a comma by that exact name (real DuckLake)" in
+    withCatalog("mcpsnapquotes", "CREATE SCHEMA lake.sales;") { (reader, _) =>
+      def run(sql: String): Long =
+        runSqlOnCatalog(q(sql))
+        reader.maxSnapshotId().get
+      val createdOk  = run("CREATE TABLE lake.sales.'o''k' (id INTEGER);")   // o"k
+      val createdOOk = run("CREATE TABLE lake.sales.'o''''k' (id INTEGER);") // o""k
+      val createdAB  = run("CREATE TABLE lake.sales.'a,b' (id INTEGER);")
+      val insertAB   = run("INSERT INTO lake.sales.'a,b' VALUES (1), (2);")
+      List(createdOk, createdOOk, createdAB, insertAB).distinct should have size 4
+      val stored = reader.listSnapshots(limit = 1000).map(s => s.snapshotId -> s).toMap
+      def storedCounts(id: Long) =
+        List(stored(id).rowsAdded, stored(id).filesAdded.toLong, stored(id).filesRemoved.toLong)
+      val okAndComma = bobReadsSales("o\"k", "a,b")
+      withHarness(prepare = okAndComma, catalogReader = Some((_, _) => reader)) { h =>
+        val (err, txt) = callTool(h, bobPat, "list_snapshots", acmeMain)
+        val (snaps, _) = parsedSnapshots(txt)
+        withClue(s"stored ${stored.values.map(s => s.snapshotId -> s.changes)}: $txt") {
+          err shouldBe false
+          // o"k's creation is his; o""k's, a table he cannot read, is not.
+          snaps.keySet shouldBe Set(createdOk, createdAB, insertAB)
+          tablesOf(snaps(createdOk)) shouldBe List("sales" -> "o\"k")
+          // A table named with a comma is attributed: counts as stored, not withheld.
+          List(createdAB, insertAB).foreach { id =>
+            tablesOf(snaps(id)) shouldBe List("sales" -> "a,b")
+            countsOf(snaps(id)) shouldBe storedCounts(id)
+          }
+        }
+      }
+      withHarness(prepare = bobReadsSales("o\"\"k"), catalogReader = Some((_, _) => reader)) { h =>
+        val (err, txt) = callTool(h, bobPat, "list_snapshots", acmeMain)
+        val (snaps, _) = parsedSnapshots(txt)
+        withClue(s"stored ${stored.values.map(s => s.snapshotId -> s.changes)}: $txt") {
+          err shouldBe false
+          // Granted the table literally named o""k: its creation only, never o"k's.
+          snaps.keySet shouldBe Set(createdOOk)
+          tablesOf(snaps(createdOOk)) shouldBe List("sales" -> "o\"\"k")
+          countsOf(snaps(createdOOk)) shouldBe storedCounts(createdOOk)
+        }
+      }
+    }
+
+  it should "write one CatalogRead row per list_snapshots call, for a member as for an admin, whatever the tags (real DuckLake)" in
+    withCatalog(
+      "mcpsnapcuraudit",
+      """CREATE SCHEMA lake.sales;
+        |CREATE TABLE lake.sales.orders (id INTEGER, v VARCHAR);
+        |INSERT INTO lake.sales.orders VALUES (1, 'a');
+        |INSERT INTO lake.sales.orders SELECT range, 'bulk' FROM range(1000);
+        |""".stripMargin
+    ) { (reader, _) =>
+      val newest = reader.maxSnapshotId().get
+      val rows   = List("alice" -> (() => alicePat), "bob" -> (() => bobPat)).map { (who, pat) =>
+        val store = new RecordingTelemetryStore
+        withReader(
+          reader,
+          tags = Seq("newest" -> newest),
+          audit = new AuditRecorder(store, _ => None),
+          auditCatalogReads = true
+        ) { h =>
+          val (err, text) = callTool(h, pat(), "list_snapshots", acmeMain)
+          withClue(s"$who: $text") {
+            err shouldBe false
+            parsedSnapshots(text)._2 shouldBe List("newest")
+          }
+        }
+        who -> store.events.count(e =>
+          e.action == AuditActions.CatalogRead && e.detail.get("endpoint").contains("snapshots")
+        )
+      }
+      rows shouldBe List("alice" -> 1, "bob" -> 1)
     }
 
   "mcp admin surface" should "drive the full provisioning flow" in withHarness() { h =>

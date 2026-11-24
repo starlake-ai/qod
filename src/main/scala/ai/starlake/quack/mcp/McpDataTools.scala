@@ -8,7 +8,6 @@ import ai.starlake.quack.ondemand.api.{
   CatalogHandlers,
   CatalogHistoryHandlers,
   CatalogPreviewHandlers,
-  CatalogTagEntry,
   ErrorResponse,
   ExecCaller,
   IcebergCatalogHandlers,
@@ -547,7 +546,10 @@ final class McpDataTools(
         "SELECT ... FROM t AT (VERSION => <snapshotId>), or reference a tag's snapshotId. " +
         "Unless you are an admin, you see only the snapshots that touched a table you can read " +
         "(a write, inlined included, a flush or a maintenance on it counts; a schema-only DDL " +
-        "snapshot does not), with only those tables named and no raw change text. When a " +
+        "snapshot does not), with only those tables named and no raw change text. A table is " +
+        "judged by the name it has now, and a snapshot of a dropped table is hidden. While you " +
+        "hold a column or a row policy, a snapshot of a table whose name has been another " +
+        "table's or whose columns were renamed is hidden too, as for time travel. When a " +
         "snapshot also touched a table you cannot read or has a change that names no table, its " +
         "commitMessage is null and rowsAdded, filesAdded and filesRemoved are -1 (withheld); " +
         "the counts are also -1 while you hold a row policy. You may get fewer than limit: it " +
@@ -579,60 +581,48 @@ final class McpDataTools(
               // `limit` once the snapshots they cannot see are gone.
               val wanted = int(args, "limit").getOrElse(DefaultSnapshots).max(1).min(MaxSnapshots)
               val window = (wanted.toLong * SnapshotWindowFactor).min(MaxSnapshots).toInt
-              val listed =
-                if reach.isMember then
-                  IO.blocking(
-                    bridge(
-                      catalog.listSnapshotsForMember(tenant, database, Some(window), key)(
-                        reach.scopeOf
+              if reach.isMember then
+                // The tags first, so the one gated read below also reads the snapshots they name
+                // (a tag may sit on a snapshot older than the window): one audit row per call.
+                tags.list(tenant, database, key)(reach.scopeOf).map(bridge).flatMap {
+                  case Left(err) => IO.pure(Left(err))
+                  case Right(ts) =>
+                    IO.blocking(
+                      bridge(
+                        catalog.listSnapshotsForMember(
+                          tenant,
+                          database,
+                          Some(window),
+                          ts.map(_.snapshotId).toSet,
+                          reach.underPolicy,
+                          key
+                        )(reach.scopeOf)
                       )
-                    ).map(ms => reach.snapshots(ms).take(wanted))
-                  )
-                else
-                  IO.blocking(
+                    ).map(_.map { case (page, taggedSnaps) =>
+                      Json.obj(
+                        "snapshots" -> reach.snapshots(page).take(wanted).asJson,
+                        "tags"      -> reach
+                          .tags(ts, reach.snapshots(taggedSnaps).map(_.snapshotId).toSet)
+                          .asJson
+                      )
+                    })
+                }
+              else
+                for
+                  snaps <- IO.blocking(
                     bridge(
                       catalog.listSnapshots(tenant, database, int(args, "limit"), None, None, key)(
                         reach.scopeOf
                       )
                     )
                   )
-              for
-                snaps  <- listed
-                tagged <- tags.list(tenant, database, key)(reach.scopeOf).map(bridge)
-                seen   <- tagged.fold(
-                  e => IO.pure(Left(e)),
-                  ts => visibleTagged(reach, tenant, database, key, ts)
-                )
-              yield for
-                s <- snaps
-                t <- tagged
-                v <- seen
-              yield Json.obj(
-                "snapshots" -> s.asJson,
-                "tags"      -> reach.tags(t, v).asJson
-              )
+                  tagged <- tags.list(tenant, database, key)(reach.scopeOf).map(bridge)
+                yield for
+                  s <- snaps
+                  t <- tagged
+                yield Json.obj("snapshots" -> s.asJson, "tags" -> t.asJson)
           }
   )
-
-  /** The snapshots a member's tags name that the member may see, read directly (a tag may sit on a
-    * snapshot older than the page). Not read for an admin.
-    */
-  private def visibleTagged(
-      reach: McpCatalogReach.Reach,
-      tenant: String,
-      database: String,
-      key: Option[String],
-      ts: List[CatalogTagEntry]
-  ): IO[Either[String, Set[Long]]] =
-    if !reach.isMember || ts.isEmpty then IO.pure(Right(Set.empty))
-    else
-      IO.blocking(
-        bridge(
-          catalog.listSnapshotsByIdsForMember(tenant, database, ts.map(_.snapshotId).toSet, key)(
-            reach.scopeOf
-          )
-        ).map(ms => reach.snapshots(ms).map(_.snapshotId).toSet)
-      )
 
   // ---------- my_usage ----------
 
