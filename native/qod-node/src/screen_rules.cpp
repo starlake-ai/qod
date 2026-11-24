@@ -1,5 +1,7 @@
 #include "screen_rules.hpp"
 
+#include "linked_function_classes.hpp"
+
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -1236,7 +1238,8 @@ private:
 		}
 		auto &call = function->Cast<FunctionExpression>();
 		auto name = StringUtil::Lower(call.FunctionName().GetIdentifierName());
-		if (!IsJudgedCall(name) && !IsRefusedCall(name) && !Contains(kAdmittedTableFunctions, name)) {
+		if (!IsJudgedCall(name) && !IsRefusedCall(name) && !Contains(kAdmittedTableFunctions, name) &&
+		    !IsLinkedAdmittedTableFunction(name)) {
 			Reach(ReachedName::Kind::TABLE_CALL, call.GetQualifiedName());
 			Refuse("table function " + name + " is not available to non-superusers");
 		}

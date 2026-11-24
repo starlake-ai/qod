@@ -155,6 +155,7 @@ set(QOD_NODE_CORE_SOURCES
   src/decide_client.cpp
   src/describer.cpp
   src/function_classes.cpp
+  src/linked_function_classes.cpp
   src/functions_list.cpp
   src/handle.cpp
   src/http_post.cpp
@@ -237,6 +238,8 @@ if(QOD_NODE_TESTS)
       set_target_properties(${name} PROPERTIES BUILD_RPATH ${DUCKDB_LIB_DIR})
     endif()
   endfunction()
+  qod_node_test(linked_function_classes_test)
+  add_test(NAME linked_function_classes COMMAND linked_function_classes_test)
   qod_node_test(sql_script_test)
   add_test(NAME sql_script COMMAND sql_script_test)
   qod_node_test(crypto_test)
