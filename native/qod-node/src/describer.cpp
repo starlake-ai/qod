@@ -821,8 +821,8 @@ private:
 
 	[[noreturn]] static void NotOwn(const std::string &lower, CatalogEntry &entry) {
 		throw PermissionException("QoD: function " + lower + " is not classified: it resolves to " +
-		                          Text(entry.ParentCatalog().GetName()) + "." + Text(entry.ParentSchema().name) +
-		                          "." + Text(entry.name) + ", which is not DuckDB's own");
+		                          Text(entry.ParentCatalog().GetName()) + "." + Text(entry.ParentSchema().name) + "." +
+		                          Text(entry.name) + ", which is not DuckDB's own");
 	}
 
 	//! Change rows have no ordinary base scan on which a row-policy filter can be installed.
@@ -831,7 +831,8 @@ private:
 		    (name == "ducklake_table_changes" || name == "ducklake_table_insertions" ||
 		     name == "ducklake_table_deletions")) {
 			auto kind = column_policies_ && !column_policies_->empty() ? "column" : "row";
-			Unsupported(std::string("a DuckLake change feed with ") + kind + " policies; no filterable base-table scan");
+			Unsupported(std::string("a DuckLake change feed with ") + kind +
+			            " policies; no filterable base-table scan");
 		}
 	}
 
@@ -901,10 +902,10 @@ private:
 	}
 
 	void Macro(CatalogEntry &entry, CatalogEntryRetriever &retriever, Rules rules) {
-		if (entry.type == CatalogType::TABLE_MACRO_ENTRY && column_policies_) {
+		if (entry.type == CatalogType::TABLE_MACRO_ENTRY && !BuiltIn(entry) && column_policies_) {
 			for (auto &p : *column_policies_) {
-				if (ColumnPolicyMatches(p, Text(entry.ParentCatalog().GetName()),
-				                        Text(entry.ParentSchema().name), Text(entry.name))) {
+				if (p.table != "*" && ColumnPolicyMatches(p, Text(entry.ParentCatalog().GetName()),
+				                                          Text(entry.ParentSchema().name), Text(entry.name))) {
 					Unsupported("a column policy scoped to a table macro; scope it to its base tables instead");
 				}
 			}
@@ -960,15 +961,15 @@ private:
 		if (row_policies_) {
 			for (auto &p : *row_policies_) {
 				if (p.table != "*" && RowPolicyMatches(p, Text(view.ParentCatalog().GetName()),
-				                                      Text(view.ParentSchema().name), Text(view.name))) {
+				                                       Text(view.ParentSchema().name), Text(view.name))) {
 					Unsupported("a row policy scoped to a view; scope it to its base tables instead");
 				}
 			}
 		}
 		if (column_policies_) {
 			for (auto &p : *column_policies_) {
-				if (ColumnPolicyMatches(p, Text(view.ParentCatalog().GetName()),
-				                                         Text(view.ParentSchema().name), Text(view.name))) {
+				if (p.table != "*" && ColumnPolicyMatches(p, Text(view.ParentCatalog().GetName()),
+				                                          Text(view.ParentSchema().name), Text(view.name))) {
 					Unsupported("a column policy scoped to a view; scope it to its base tables instead");
 				}
 			}
@@ -1372,8 +1373,8 @@ private:
 		default:
 			break;
 		}
-		ParsedExpressionIterator::EnumerateChildren(expr,
-		                                            [&](const ParsedExpression &child) { Expr(child, retriever, rules); });
+		ParsedExpressionIterator::EnumerateChildren(
+		    expr, [&](const ParsedExpression &child) { Expr(child, retriever, rules); });
 	}
 
 	ClientContext &context_;
@@ -1408,8 +1409,7 @@ void JudgeCallNames(ClientContext &context, LogicalOperator &plan, const std::st
 
 class Walker {
 public:
-	Walker(ClientContext &context, const Principal &principal, const std::string *statement_text,
-	       LogicalOperator &plan)
+	Walker(ClientContext &context, const Principal &principal, const std::string *statement_text, LogicalOperator &plan)
 	    : context_(context), principal_(principal), statement_text_(statement_text), core_(&plan) {
 		// The statement itself under the wrappers that only carry it (decision 19 looks for its root).
 		while ((core_->type == LogicalOperatorType::LOGICAL_PREPARE ||
@@ -1447,9 +1447,9 @@ private:
 
 	// ---- objects
 	void AddObject(const std::string &kind, const std::string &access, const std::string &catalog,
-	               const std::string &catalog_type, bool temporary, const std::string &schema,
-	               const std::string &name, const std::set<std::string> &columns, const std::string &via,
-	               bool renamed = false, bool dropped = false, bool replaced = false);
+	               const std::string &catalog_type, bool temporary, const std::string &schema, const std::string &name,
+	               const std::set<std::string> &columns, const std::string &via, bool renamed = false,
+	               bool dropped = false, bool replaced = false);
 	void InSchema(const std::string &kind, const std::string &access, SchemaCatalogEntry &schema,
 	              const std::string &name, const std::set<std::string> &columns, const std::string &via);
 	void AddEntry(const std::string &kind, const std::string &access, InCatalogEntry &entry,
@@ -1604,13 +1604,12 @@ void Walker::Returning(TableCatalogEntry &table, const std::string &via) {
 void Walker::DefaultQualification(Identifier &catalog, Identifier &schema) {
 	auto &fallback = ClientData::Get(context_).catalog_search_path->GetDefault();
 	if (catalog.empty() || IsInvalidCatalog(catalog)) {
-		catalog = fallback.GetCatalog().empty() || IsInvalidCatalog(fallback.GetCatalog())
-		              ? DefaultDatabase()
-		              : fallback.GetCatalog();
+		catalog = fallback.GetCatalog().empty() || IsInvalidCatalog(fallback.GetCatalog()) ? DefaultDatabase()
+		                                                                                   : fallback.GetCatalog();
 	}
 	if (schema.empty() || IsInvalidSchema(schema)) {
 		schema = fallback.GetSchema().empty() || IsInvalidSchema(fallback.GetSchema()) ? Identifier::DefaultSchema()
-		                                                                                : fallback.GetSchema();
+		                                                                               : fallback.GetSchema();
 	}
 }
 
@@ -1645,8 +1644,8 @@ void Walker::Named(const std::string &kind, const std::string &access, const Qua
 	auto schema = name.Schema();
 	DefaultQualification(catalog, schema);
 	auto found = Catalog::GetCatalogEntry(context_, catalog);
-	AddObject(kind, access, Text(catalog), found ? found->GetCatalogType() : "",
-	          found && found->IsTemporaryCatalog(), Text(schema), Text(name.Name()), {}, via);
+	AddObject(kind, access, Text(catalog), found ? found->GetCatalogType() : "", found && found->IsTemporaryCatalog(),
+	          Text(schema), Text(name.Name()), {}, via);
 }
 
 //! CREATE / DROP / ALTER SCHEMA: `name` is the schema's path, [catalog, schema] once DuckDB resolved it
@@ -1768,8 +1767,8 @@ optional_ptr<TableCatalogEntry> Walker::CurrentDuckLakeTable(TableCatalogEntry &
 //! as bound.
 void Walker::DuckLakeRead(LogicalGet &get, TableCatalogEntry &bound, const std::set<std::string> &columns,
                           const std::string &via) {
-	auto bound_name = Text(bound.ParentCatalog().GetName()) + "." + Text(bound.ParentSchema().name) + "." +
-	                  Text(bound.name);
+	auto bound_name =
+	    Text(bound.ParentCatalog().GetName()) + "." + Text(bound.ParentSchema().name) + "." + Text(bound.name);
 	auto current = CurrentDuckLakeTable(bound);
 	if (!current) {
 		if (Trusted()) {
@@ -1809,8 +1808,9 @@ void Walker::DuckLakeRead(LogicalGet &get, TableCatalogEntry &bound, const std::
 		}
 		if (!matched) {
 			if (!Trusted()) {
-				Unsupported("a read of " + bound_name + " at a snapshot whose columns cannot be matched to its current "
-				                                        "columns");
+				Unsupported("a read of " + bound_name +
+				            " at a snapshot whose columns cannot be matched to its current "
+				            "columns");
 			}
 			AddEntry("table", "read", bound, columns, via);
 			return;
@@ -1832,7 +1832,8 @@ constexpr idx_t kMaxDuckLakeHistory = 100000;
 constexpr idx_t kMaxDuckLakeOidChecks = 32;
 
 [[noreturn]] void TooLongHistory(const std::string &name) {
-	throw PermissionException("QoD: " + name + " has too long a history to judge at that snapshot; only superusers "
+	throw PermissionException("QoD: " + name +
+	                          " has too long a history to judge at that snapshot; only superusers "
 	                          "read it");
 }
 
@@ -1882,8 +1883,8 @@ std::string AsciiFolded(const std::string &column) {
 //! attributed to the client, and the client's plan never names the metadata catalog). `ok` false when they
 //! cannot be read.
 std::vector<DuckLakeTableVersion> DuckLakeTableVersions(ClientContext &context, const std::string &prefix,
-                                                       const std::string &schema, const std::string &bound_name,
-                                                       bool &ok) {
+                                                        const std::string &schema, const std::string &bound_name,
+                                                        bool &ok) {
 	ok = false;
 	std::vector<DuckLakeTableVersion> versions;
 	if (prefix.empty()) {
@@ -1901,10 +1902,9 @@ std::vector<DuckLakeTableVersion> DuckLakeTableVersions(ClientContext &context, 
 	while (auto rows = result->Fetch()) {
 		CheckInterrupt(context);
 		for (idx_t row = 0; row < rows->size(); row++) {
-			versions.push_back(DuckLakeTableVersion {rows->GetValue(0, row).GetValue<int64_t>(),
-			                                         rows->GetValue(1, row).GetValue<int64_t>(),
-			                                         rows->GetValue(2, row).GetValue<int64_t>(),
-			                                         rows->GetValue(3, row).ToString()});
+			versions.push_back(DuckLakeTableVersion {
+			    rows->GetValue(0, row).GetValue<int64_t>(), rows->GetValue(1, row).GetValue<int64_t>(),
+			    rows->GetValue(2, row).GetValue<int64_t>(), rows->GetValue(3, row).ToString()});
 		}
 	}
 	if (versions.size() > kMaxDuckLakeHistory) {
@@ -1926,16 +1926,16 @@ int64_t DuckLakeSnapshotAt(ClientContext &context, const std::string &prefix, co
 		Value value;
 		auto found = context.TryGetCurrentSetting(Identifier(setting), value);
 		if (found && !value.IsNull()) {
-			auto set = internal.Query(std::string("SET SESSION ") + setting + " = " +
-			                          SQLString::ToString(value.ToString()));
+			auto set =
+			    internal.Query(std::string("SET SESSION ") + setting + " = " + SQLString::ToString(value.ToString()));
 			if (set->HasError()) {
 				return -1;
 			}
 		}
 	}
 	auto result = internal.Query("SELECT coalesce(max(snapshot_id), -1) FROM " + prefix +
-	                             ".ducklake_snapshot WHERE snapshot_time <= " +
-	                             SQLString::ToString(ts.ToString()) + "::TIMESTAMPTZ");
+	                             ".ducklake_snapshot WHERE snapshot_time <= " + SQLString::ToString(ts.ToString()) +
+	                             "::TIMESTAMPTZ");
 	if (result->HasError()) {
 		return -1;
 	}
@@ -2030,7 +2030,9 @@ void Walker::DroppedDuckLakeRead(LogicalGet &get, TableCatalogEntry &bound, cons
 	for (auto &version : versions) {
 		by_id[version.id].push_back(version);
 	}
-	auto live = [&](int64_t id) { return by_id[id].back().end < 0; };
+	auto live = [&](int64_t id) {
+		return by_id[id].back().end < 0;
+	};
 	// The table: the one the bound name names at the AT clause's snapshot (a TIMESTAMP resolved to the snapshot
 	// DuckLake reads at it), else among the dropped ones that held it.
 	int64_t table_id = -1;
@@ -2135,11 +2137,11 @@ void Walker::DroppedDuckLakeRead(LogicalGet &get, TableCatalogEntry &bound, cons
 	auto last_name = catalog_name + "." + schema_name + "." + last.name;
 	optional_ptr<CatalogEntry> holder;
 	try {
-		holder = Catalog::GetEntry(context_,
-		                           EntryLookupInfo(CatalogType::TABLE_ENTRY,
-		                                           QualifiedName(catalog.GetName(), bound.ParentSchema().name,
-		                                                         Identifier(last.name))),
-		                           OnEntryNotFound::RETURN_NULL);
+		holder = Catalog::GetEntry(
+		    context_,
+		    EntryLookupInfo(CatalogType::TABLE_ENTRY,
+		                    QualifiedName(catalog.GetName(), bound.ParentSchema().name, Identifier(last.name))),
+		    OnEntryNotFound::RETURN_NULL);
 	} catch (std::exception &) {
 		// Something holds the name that is no table: it is taken all the same.
 		holder = &bound;
@@ -2783,9 +2785,8 @@ void Walker::CheckSession() {
 		}
 		for (auto set : {CatalogType::TABLE_ENTRY, CatalogType::INDEX_ENTRY, CatalogType::TABLE_FUNCTION_ENTRY,
 		                 CatalogType::COPY_FUNCTION_ENTRY, CatalogType::PRAGMA_FUNCTION_ENTRY,
-		                 CatalogType::SCALAR_FUNCTION_ENTRY, CatalogType::SEQUENCE_ENTRY,
-		                 CatalogType::COLLATION_ENTRY, CatalogType::COORDINATE_SYSTEM_ENTRY, CatalogType::TYPE_ENTRY,
-		                 CatalogType::SCHEMA_ENTRY}) {
+		                 CatalogType::SCALAR_FUNCTION_ENTRY, CatalogType::SEQUENCE_ENTRY, CatalogType::COLLATION_ENTRY,
+		                 CatalogType::COORDINATE_SYSTEM_ENTRY, CatalogType::TYPE_ENTRY, CatalogType::SCHEMA_ENTRY}) {
 			schema.Scan(context_, set, [&](CatalogEntry &entry) {
 				// Item 21: an index changes no rows a query returns and no query names one.
 				if (!entry.internal && entry.type != CatalogType::TABLE_ENTRY &&
@@ -2893,8 +2894,8 @@ void Walker::Expr(duckdb::Expression &expr, const std::string &via) {
 		// The sequence a constant argument names, resolved at bind (NextValBind): a write for nextval and
 		// setval, a read for currval. A NULL argument binds no sequence and the call returns NULL.
 		auto name = Text(qualified.Name());
-		if (Text(qualified.Catalog()) == "system" &&
-		    (name == "nextval" || name == "setval" || name == "currval") && function.BindInfo()) {
+		if (Text(qualified.Catalog()) == "system" && (name == "nextval" || name == "setval" || name == "currval") &&
+		    function.BindInfo()) {
 			AddEntry("sequence", name == "currval" ? "read" : "update",
 			         function.BindInfo()->Cast<NextvalBindData>().sequence, {}, via);
 		}

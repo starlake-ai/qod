@@ -258,9 +258,64 @@ int main() {
 	        "policies on generated columns");
 	handle.column_policies = {wildcard};
 	install();
-	Refused("wildcard covering view aliases refuses", Run(user, "SELECT renamed FROM v"),
-	        "column policy scoped to a view");
+	Expect("wildcard masks base source through view aliases", Run(user, "SELECT renamed FROM v"), "wildcard,wildcard");
 
+	// A wildcard names physical source columns; unrelated view/macro names are not policy targets.
+	auto no_column = deny;
+	no_column.catalog = "*";
+	no_column.schema = "*";
+	no_column.table = "*";
+	no_column.column = "ssn";
+	handle.column_policies = {no_column};
+	install();
+	Expect("wildcard without source column does not block a view", Run(user, "SELECT id FROM v ORDER BY id"), "1,2");
+	handle.column_policies.clear();
+	install();
+	auto histogram = Run(user, "SELECT * FROM histogram('docs', id)");
+	handle.column_policies = {no_column};
+	install();
+	Expect("built-in table macro is not a wildcard policy target", Run(user, "SELECT * FROM histogram('docs', id)"),
+	       histogram);
+	handle.column_policies = {deny};
+	install();
+	auto before = authz->Stats().local_refusals.load();
+	Refused("built-in macro retains body checks", Run(user, "SELECT * FROM histogram('docs', secret)"),
+	        "query_table()");
+	Expect("deny increments local refusal once", std::to_string(authz->Stats().local_refusals.load() - before), "1");
+	before = authz->Stats().local_refusals.load();
+	Refused("counted column deny", Run(user, "SELECT secret FROM docs"), "column is denied");
+	Expect("column deny increments once", std::to_string(authz->Stats().local_refusals.load() - before), "1");
+	handle.column_policies = {mask, conflict};
+	install();
+	before = authz->Stats().local_refusals.load();
+	Refused("counted conflict", Run(user, "SELECT secret FROM docs"), "conflicting column masks");
+	Expect("conflict increments local refusal once", std::to_string(authz->Stats().local_refusals.load() - before),
+	       "1");
+	handle.column_policies = {incompatible};
+	install();
+	before = authz->Stats().local_refusals.load();
+	Refused("counted binding refusal", Run(user, "SELECT secret FROM docs"), "original column type");
+	Expect("binding refusal increments once", std::to_string(authz->Stats().local_refusals.load() - before), "1");
+	handle.column_policies = {mask};
+	install();
+	tamper = 1;
+	before = authz->Stats().local_refusals.load();
+	Refused("counted boundary tampering", Run(user, "SELECT secret FROM docs"), "placement could not be verified");
+	tamper = 0;
+	Expect("verification refusal increments once", std::to_string(authz->Stats().local_refusals.load() - before), "1");
+	handle.column_policies.clear();
+	for (int i = 0; i < 300; ++i) {
+		auto unrelated = deny;
+		unrelated.catalog = "db_" + std::to_string(i);
+		unrelated.id = "policy_" + std::to_string(i);
+		handle.column_policies.push_back(unrelated);
+	}
+	install();
+	Expect("more than 256 unrelated policies permit SELECT 1", Run(user, "SELECT 1"), "1");
+	Expect("unrelated catalogs do not mask this pool", Run(user, "SELECT secret FROM docs WHERE id=1"), "raw-alice");
+	handle.column_policies.push_back(deny);
+	install();
+	Refused("large set retains applicable deny", Run(user, "SELECT secret FROM docs WHERE id=1"), "column is denied");
 	auto loaded = Run(setup, "LOAD ducklake");
 	if (loaded.rfind("ERROR: ", 0) != 0) {
 		auto dir = std::filesystem::temp_directory_path() / ("qod-column-policy-" + std::to_string(qod::SystemNowMs()));

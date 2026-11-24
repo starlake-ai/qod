@@ -37,7 +37,8 @@ final class NodeKeys(
     paths: PoolKey => String = _ => "",
     readOnlyCatalogs: ReadOnlyCatalogs,
     rowPoliciesEnabled: Boolean = true,
-    nativeColumnPoliciesEnabled: Boolean = false
+    nativeColumnPoliciesEnabled: Boolean = false,
+    policySnapshots: NodePolicySnapshots = new NodePolicySnapshots()
 ):
   require(secret.nonEmpty, "the node-key secret is empty")
 
@@ -53,6 +54,14 @@ final class NodeKeys(
     */
   private val statementNonces: Cache[DecideContext, java.util.Set[String]] =
     Caffeine.newBuilder().weakKeys().executor(_.run()).build[DecideContext, java.util.Set[String]]()
+
+  // A statement may mint several fresh handles (probe, stamp, execution, COMMIT). Its
+  // immutable context has one digest; weak identity keys retain no completed statements.
+  private val contextDigests = Caffeine
+    .newBuilder()
+    .weakKeys()
+    .executor(_.run())
+    .build[DecideContext, String]()
 
   /** The key of node `nodeId`, as its secret file holds it. */
   def keyHex(nodeId: String): String = NodeHandles.nodeKeyHex(secret, nodeId)
@@ -72,21 +81,25 @@ final class NodeKeys(
     * endpoint recorded for its statement (decision 25).
     */
   def mint(node: RunningNode, principal: NodePrincipal): MintedHandle =
-    val ctx = NodeHandles.contextDigest(principal.context)
-    val m   = NodeHandles.mint(
+    val ctx = principal.context.fold(NodeHandles.contextDigest(None))(c =>
+      contextDigests.get(c, _ => NodeHandles.contextDigest(Some(c)))
+    )
+    val version  = versions.current(node.poolKey.tenant)
+    val snapshot =
+      policySnapshots.of(principal, ctx, version, rowPoliciesEnabled, nativeColumnPoliciesEnabled)
+    val m = NodeHandles.mint(
       secret,
       node.nodeId,
       replica,
       principal,
       NodeHandles.pool(node.poolKey),
-      policyVersion = versions.current(node.poolKey.tenant),
+      policyVersion = version,
       ctx = ctx,
       creds = if principal.system then "" else creds.digest(principal.id),
       path = paths(node.poolKey),
       readOnly = if principal.system then Set.empty else readOnlyCatalogs.of(node.poolKey),
       nowMs = clock(),
-      rowPolicies = if rowPoliciesEnabled then NodeRowPolicy.of(principal) else Nil,
-      columnPolicies = if nativeColumnPoliciesEnabled then NodeColumnPolicy.of(principal) else Nil
+      preparedPolicies = Some(snapshot)
     )
     // The statement's own record of its nonces: what its "authorization unavailable" marker is
     // checked against, whatever the bounded registries below still hold.

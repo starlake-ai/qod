@@ -61,3 +61,14 @@ object NodePrincipal:
       case Some(e) =>
         of(effectiveSet).copy(context = Some(DecideContext(e, poolKey, e.restriction, purpose)))
       case None => of(effectiveSet)
+
+  /** The complete policy-bearing context. Token attenuation must not drop restrictions attached to
+    * roles whose grants were removed. Native source binding decides policy applicability.
+    */
+  private[authz] def policyEffectiveSet(principal: NodePrincipal): Option[EffectiveSet] =
+    Option.unless(principal.superuser || principal.system)(principal.context).flatten.map { c =>
+      ai.starlake.quack.ondemand.rbac.Attenuation.attenuatedBy(
+        c.effective,
+        c.restriction.getOrElse(ai.starlake.quack.ondemand.auth.TokenRestriction.Unrestricted)
+      )
+    }

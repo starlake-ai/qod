@@ -62,6 +62,10 @@ object NodeHandles:
     */
   val Version: Int = 6
 
+  /** A wire/memory bound, not a policy-count limit across the user's databases. */
+  val MaxPayloadBytes: Int         = 2 * 1024 * 1024
+  private val MaxEncodedBytes: Int = ((MaxPayloadBytes + 2) / 3) * 4 + 65
+
   /** Part of what a node answers a statement that carries no current principal (qod-node's
     * kNoPrincipal): the health probe's canary expects it.
     */
@@ -153,7 +157,8 @@ object NodeHandles:
       nowMs: Long,
       nonce: String = newNonce(),
       rowPolicies: List[NodeRowPolicy] = Nil,
-      columnPolicies: List[NodeColumnPolicy] = Nil
+      columnPolicies: List[NodeColumnPolicy] = Nil,
+      preparedPolicies: Option[NodePolicySnapshot] = None
   ): MintedHandle =
     require(principal.id.nonEmpty, "no principal is bound to this statement")
     require(policyVersion >= 0L, "a policy version is never negative")
@@ -166,14 +171,11 @@ object NodeHandles:
     )
     val exp = nowMs + LifetimeMs
     require(
-      rowPolicies.size <= 256 && rowPolicies.forall(NodeRowPolicy.valid),
-      "invalid node row policies"
+      preparedPolicies.isEmpty || (rowPolicies.isEmpty && columnPolicies.isEmpty),
+      "supply one source of node policies"
     )
-    require(
-      columnPolicies.size <= 256 && columnPolicies.forall(NodeColumnPolicy.valid),
-      "invalid node column policies"
-    )
-    val payload = Json
+    val policies = preparedPolicies.getOrElse(NodePolicySnapshot(rowPolicies, columnPolicies))
+    val payload  = Json
       .obj(
         "v"         -> Json.fromInt(Version),
         "node"      -> Json.fromString(nodeId),
@@ -185,21 +187,20 @@ object NodeHandles:
           "superuser" -> Json.fromBoolean(principal.superuser),
           "system"    -> Json.fromBoolean(principal.system)
         ),
-        "pool"          -> Json.fromString(pool),
-        "policyVersion" -> Json.fromLong(policyVersion),
-        "ctx"           -> Json.fromString(ctx),
-        "creds"         -> Json.fromString(creds),
-        "path"          -> Json.fromString(path),
-        "readOnly"      -> Json.arr(readOnly.toList.sorted.map(Json.fromString)*),
-        "rowPolicies" -> Json.arr(rowPolicies.map(summon[io.circe.Encoder[NodeRowPolicy]].apply)*),
-        "columnPolicies" -> Json.arr(
-          columnPolicies.map(summon[io.circe.Encoder[NodeColumnPolicy]].apply)*
-        ),
-        "nonce" -> Json.fromString(nonce),
-        "exp"   -> Json.fromLong(exp)
+        "pool"           -> Json.fromString(pool),
+        "policyVersion"  -> Json.fromLong(policyVersion),
+        "ctx"            -> Json.fromString(ctx),
+        "creds"          -> Json.fromString(creds),
+        "path"           -> Json.fromString(path),
+        "readOnly"       -> Json.arr(readOnly.toList.sorted.map(Json.fromString)*),
+        "rowPolicies"    -> policies.rowJson,
+        "columnPolicies" -> policies.columnJson,
+        "nonce"          -> Json.fromString(nonce),
+        "exp"            -> Json.fromLong(exp)
       )
       .noSpaces
       .getBytes(StandardCharsets.UTF_8)
+    require(payload.length <= MaxPayloadBytes, "node policy handle exceeds the payload byte budget")
     val text = Base64.getUrlEncoder.withoutPadding.encodeToString(payload) + "." +
       hex(hmac(nodeKey(secret, nodeId), payload))
     MintedHandle(text, nonce, exp)
@@ -266,13 +267,16 @@ object NodeHandles:
       expectedNode: String,
       nowMs: Long
   ): Either[String, VerifiedHandle] =
+    if text.length > MaxEncodedBytes then return Left("handle exceeds the payload byte budget")
     text.split("\\.", -1).toList match
       case List(body, mac) if MacText.matches(mac) =>
         val payload =
           try Some(Base64.getUrlDecoder.decode(body))
           catch case _: IllegalArgumentException => None
         payload match
-          case None        => Left("malformed handle")
+          case None                                          => Left("malformed handle")
+          case Some(bytes) if bytes.length > MaxPayloadBytes =>
+            Left("handle exceeds the payload byte budget")
           case Some(bytes) =>
             val expected = hex(hmac(nodeKey, bytes)).getBytes(StandardCharsets.US_ASCII)
             if !MessageDigest.isEqual(expected, mac.getBytes(StandardCharsets.US_ASCII)) then
@@ -312,13 +316,13 @@ object NodeHandles:
               _        <- Either.cond(wellFormedReadOnly(readOnly), (), "malformed handle payload")
               rows     <- field[List[NodeRowPolicy]](c, "rowPolicies")
               _        <- Either.cond(
-                rows.size <= 256 && rows.forall(NodeRowPolicy.valid),
+                rows.forall(NodeRowPolicy.valid),
                 (),
                 "malformed handle payload"
               )
               columns <- field[List[NodeColumnPolicy]](c, "columnPolicies")
               _       <- Either.cond(
-                columns.size <= 256 && columns.forall(NodeColumnPolicy.valid),
+                columns.forall(NodeColumnPolicy.valid),
                 (),
                 "malformed handle payload"
               )

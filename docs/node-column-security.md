@@ -9,9 +9,8 @@ replica. The default remains `gateway`. Invalid modes refuse boot.
 
 Node protocol **8** and signed handle version **6** are mandatory in both modes.
 Rebuild and vendor every platform's node binary, deploy matching node images and
-fleet launchers, and restart the nodes. Earlier nodes and handles refuse. This PR
-must remain draft until those binaries are supplied. No policy-table or DuckLake
-metadata migration is needed.
+fleet launchers, and restart the nodes. Earlier nodes and handles refuse.
+No policy-table or DuckLake metadata migration is needed.
 
 The contract is: apply the policies correctly or refuse. SQL still binds against
 its original source schema. A query that fails that binding is not rescued by
@@ -19,16 +18,25 @@ rewriting it around a type-changing mask.
 
 ## Signed policies and independent binding
 
-The manager resolves the effective, token-attenuated column policies, sorts them
-by id, and validates each mask with the existing production transform validator.
-That includes stored/imported policies: a mask outside the allowed forms refuses
-native policy minting with a policy reference, never its SQL. Gateway mode keeps
-its existing behavior. Superuser and internal handles carry no column policies.
+The manager validates definitions consistently on REST/SQL create/update and before
+any manifest import writes rows. Imports store the same canonical expressions.
+An unusable persisted mask becomes a deny on its original source column; it is
+never omitted and never prevents an unrelated query from minting a handle.
+Superuser and internal handles carry no column policies.
 
-Every handle requires a `columnPolicies` array, bounded to 256 entries and 4096
-UTF-8 bytes of SQL per mask. Entries carry
-`{id,catalog,schema,table,column,action,sql}`; a deny has empty SQL. The MAC covers
-the entire payload. The native reader rejects malformed actions and payloads.
+Immutable policy snapshots are cached by the complete authorization-context digest,
+policy version and enable flags. Repeated handles reuse prepared policy arrays;
+mask-validation results are bounded and keyed by SQL and protected column. Changes
+in identities, token restrictions, policy contents, pools or versions cannot reuse
+another snapshot. Both policy kinds share the same attenuation step.
+
+Every handle requires a `columnPolicies` array. The decoded handle is bounded to
+2 MiB, rather than 256 policies across all of the user's databases. A mask retains
+its 4096 UTF-8 byte limit. No policy list is truncated. All effective policies stay
+in transport: a manager's guessed catalog inventory must not omit protection a
+federated source, view or macro can reach. Native binding decides applicability.
+Entries carry `{id,catalog,schema,table,column,action,sql}`; a deny has empty SQL.
+The MAC covers the complete payload. Both readers enforce shape and byte bounds.
 
 The node matches actual source catalog, schema, table and column names using
 DuckDB's identifier comparison. A deny wins. A mask naming a table outranks a
@@ -82,10 +90,11 @@ including when the version is unchanged but the signed mask changed.
   validated VARCHAR representation when appropriate.
 - Policies naming a generated column's own output refuse reads of its table.
   Policies on physical inputs do apply before generated expressions consume them.
-- A policy covering a view's or table macro's own coordinates refuses that read,
-  including a matching wildcard policy. Scope the policy to the base tables.
-  Policies naming a base table apply through ordinary and secure views, preserving
-  the independent secure-view grant rules.
+- A policy explicitly naming a view's or user table macro's own coordinates
+  refuses that read; view-output policies remain unsupported. Table wildcards
+  match physical source tables and do not target every view or built-in macro.
+  Base-table protection applies through ordinary and secure views. Built-in macro
+  bodies retain their existing call-name and dynamic-source checks.
 - Deny detection is conservative before optimization. A view or CTE that projects
   a denied column can refuse even if the caller selects another column. No unused
   denied value is exposed to make that query run.
@@ -119,11 +128,10 @@ consumers, predicates, aggregates, dynamic queries, positional reads, precedence
 cross-schema scope, typed NULLs, error handling, prepared-policy changes and later
 extension tampering. DuckLake cases run when its pinned extension is installed.
 
-Scala tests cover validation of legacy masks, full policy scopes, signing and
-verification, bounds, privileged callers, transport opt-in and bypassing gateway
-rewriting. The cross-language handle fixture pins the version transition.
+Scala tests cover shared definition/import validation, scoped refusal of unusable
+stored masks, snapshot invalidation, full policy scopes, large policy sets, byte
+bounds, signing and verification, privileged callers and native transport. The cross-language handle fixture pins the version transition.
 
-Complete socket-dependent transport/process checks in CI before merging. At each
-DuckDB upgrade, revisit scan-column mappings, secure-view optimization, TRY,
+At each DuckDB upgrade, revisit scan-column mappings, secure-view optimization, TRY,
 independent binding, prepared-query lifecycle and descriptor behavior. These are
 internal C++ interfaces, not a stable extension ABI.

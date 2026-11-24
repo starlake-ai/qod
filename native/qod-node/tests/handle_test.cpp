@@ -48,14 +48,14 @@ const std::string kCtx(64, 'c');
 
 //! A handle payload; `members` goes right before `read_only` (raw JSON members, none: ""), which goes
 //! right before "nonce". Node protocol 5: every handle carries ctx, creds, path and readOnly.
-std::string Payload(const std::string &node = kNode, int64_t exp = kNow + 60000,
-                    const std::string &tenant = "\"acme\"",
+std::string Payload(const std::string &node = kNode, int64_t exp = kNow + 60000, const std::string &tenant = "\"acme\"",
                     const std::string &members = ",\"ctx\":\"" + kCtx + "\",\"creds\":\"\",\"path\":\"\"",
                     const std::string &read_only = ",\"readOnly\":[]") {
 	return std::string("{\"v\":6,\"node\":\"") + node +
 	       "\",\"replica\":\"http://10.0.0.1:20900\",\"principal\":{\"id\":\"u-1\",\"name\":\"alice\",\"tenant\":" +
 	       tenant + ",\"superuser\":false,\"system\":false},\"pool\":\"acme/acme_db/bi\",\"policyVersion\":42" +
-	       members + read_only + ",\"rowPolicies\":[],\"columnPolicies\":[],\"nonce\":\"" + kNonce + "\",\"exp\":" + std::to_string(exp) + "}";
+	       members + read_only + ",\"rowPolicies\":[],\"columnPolicies\":[],\"nonce\":\"" + kNonce +
+	       "\",\"exp\":" + std::to_string(exp) + "}";
 }
 
 //! A handle with a valid ctx, an empty creds and path, and the given readOnly members (raw JSON).
@@ -138,7 +138,32 @@ void VerifyGolden(const std::string &path) {
 
 } // namespace
 
+void PolicyBudget() {
+	auto payload = Payload();
+	std::string policies = "[";
+	for (int i = 0; i < 300; ++i) {
+		if (i)
+			policies += ",";
+		policies += "{\"id\":\"p" + std::to_string(i) +
+		            "\",\"catalog\":\"*\",\"schema\":\"main\",\"table\":\"t\",\"column\":\"c\",\"action\":\"deny\","
+		            "\"sql\":\"\"}";
+	}
+	policies += "]";
+	auto at = payload.find("\"columnPolicies\":[]");
+	payload.replace(at, std::string("\"columnPolicies\":[]").size(), "\"columnPolicies\":" + policies);
+	Expect(qod::VerifyHandle(Sign(payload), kKey, kNode, kNow).column_policies.size() == 300,
+	       "policy count is not a per-user 256-entry limit");
+	payload.append(qod::kMaxHandlePayloadBytes - payload.size(), ' ');
+	Expect(qod::VerifyHandle(Sign(payload), kKey, kNode, kNow).column_policies.size() == 300,
+	       "exact payload byte budget accepts a complete handle");
+	payload += ' ';
+	ExpectRefused([&] { qod::VerifyHandle(Sign(payload), kKey, kNode, kNow); }, "byte budget", "oversize payload");
+	ExpectRefused([&] { qod::VerifyHandle(std::string(qod::kMaxEncodedHandleBytes + 1, 'x'), kKey, kNode, kNow); },
+	              "byte budget", "encoded handle bounded before decoding");
+}
+
 int main(int argc, char **argv) {
+	PolicyBudget();
 	// ---- json
 	auto doc = qod::ParseJson(" {\"a\": [1, -2, true, null, \"x\\n\\u00e9\\ud83e\\udd86\"], \"b\": {\"c\": false}} ");
 	Expect(doc.Get("a", qod::JsonValue::Kind::ARRAY).array.size() == 5, "json array");
@@ -162,32 +187,34 @@ int main(int argc, char **argv) {
 	Expect(handle.principal.id == "u-1" && handle.principal.name == "alice", "handle principal");
 	Expect(handle.principal.tenant == "acme" && !handle.principal.superuser && !handle.principal.system,
 	       "handle flags");
-	Expect(handle.pool == "acme/acme_db/bi" && handle.policy_version == 42 && handle.nonce == kNonce,
-	       "handle fields");
+	Expect(handle.pool == "acme/acme_db/bi" && handle.policy_version == 42 && handle.nonce == kNonce, "handle fields");
 	Expect(handle.replica == "http://10.0.0.1:20900" && handle.exp == kNow + 60000, "handle replica, exp");
 	Expect(qod::VerifyHandle(Sign(Payload(kNode, kNow + 60000, "null")), kKey, kNode, kNow).principal.tenant.empty(),
 	       "handle null tenant");
 
 	auto good = Sign(Payload());
-	auto tampered = qod::ToBase64Url(Payload().replace(Payload().find("alice"), 5, "admin")) + good.substr(good.find('.'));
+	auto tampered =
+	    qod::ToBase64Url(Payload().replace(Payload().find("alice"), 5, "admin")) + good.substr(good.find('.'));
 	ExpectRefused([&] { qod::VerifyHandle(tampered, kKey, kNode, kNow); }, "does not verify", "tampered payload");
 	ExpectRefused([&] { qod::VerifyHandle(Sign(Payload(), std::string(32, 'x')), kKey, kNode, kNow); },
 	              "does not verify", "other key");
 	ExpectRefused([&] { qod::VerifyHandle(Sign(Payload("quack-acme-db-bi-2")), kKey, kNode, kNow); }, "another node",
 	              "other node");
 	ExpectRefused([&] { qod::VerifyHandle(Sign(Payload(kNode, kNow)), kKey, kNode, kNow); }, "expired", "expired");
-	ExpectRefused([&] { qod::VerifyHandle(Sign(Payload(kNode, kNow + qod::kMaxHandleLifetimeMs + 1)), kKey, kNode, kNow); },
-	              "too long", "too long");
+	ExpectRefused(
+	    [&] { qod::VerifyHandle(Sign(Payload(kNode, kNow + qod::kMaxHandleLifetimeMs + 1)), kKey, kNode, kNow); },
+	    "too long", "too long");
 	ExpectRefused([&] { qod::VerifyHandle("no-dot", kKey, kNode, kNow); }, "malformed handle", "no dot");
 	ExpectRefused([&] { qod::VerifyHandle(good + ".x", kKey, kNode, kNow); }, "malformed handle", "two dots");
 	ExpectRefused([&] { qod::VerifyHandle(good.substr(0, good.size() - 1) + "G", kKey, kNode, kNow); }, "MAC",
 	              "bad hex");
 	ExpectRefused([&] { qod::VerifyHandle("!!" + good.substr(good.find('.')), kKey, kNode, kNow); }, "payload",
 	              "bad base64");
-	auto no_principal = std::string("{\"v\":6,\"node\":\"") + kNode +
-	                    "\",\"replica\":\"r\",\"pool\":\"p\",\"policyVersion\":1,\"ctx\":\"" + kCtx +
-	                    "\",\"creds\":\"\",\"path\":\"\",\"readOnly\":[],\"rowPolicies\":[],\"columnPolicies\":[],\"nonce\":\"" + kNonce +
-	                    "\",\"exp\":" + std::to_string(kNow + 1000) + "}";
+	auto no_principal =
+	    std::string("{\"v\":6,\"node\":\"") + kNode +
+	    "\",\"replica\":\"r\",\"pool\":\"p\",\"policyVersion\":1,\"ctx\":\"" + kCtx +
+	    "\",\"creds\":\"\",\"path\":\"\",\"readOnly\":[],\"rowPolicies\":[],\"columnPolicies\":[],\"nonce\":\"" +
+	    kNonce + "\",\"exp\":" + std::to_string(kNow + 1000) + "}";
 	ExpectRefused([&] { qod::VerifyHandle(Sign(no_principal), kKey, kNode, kNow); }, "principal", "no principal");
 	auto v6 = Payload();
 	v6.replace(v6.find("\"v\":6"), 5, "\"v\":7");
@@ -219,8 +246,9 @@ int main(int argc, char **argv) {
 	       "the handle's ctx");
 	ExpectRefused([&] { qod::VerifyHandle(Sign(PayloadWithCtx("\"" + kCtx.substr(1) + "\"")), kKey, kNode, kNow); },
 	              "bad ctx", "a short ctx");
-	ExpectRefused([&] { qod::VerifyHandle(Sign(PayloadWithCtx("\"" + std::string(64, 'C') + "\"")), kKey, kNode, kNow); },
-	              "bad ctx", "an uppercase ctx");
+	ExpectRefused(
+	    [&] { qod::VerifyHandle(Sign(PayloadWithCtx("\"" + std::string(64, 'C') + "\"")), kKey, kNode, kNow); },
+	    "bad ctx", "an uppercase ctx");
 	ExpectRefused([&] { qod::VerifyHandle(Sign(PayloadWithCtx("42")), kKey, kNode, kNow); }, "malformed handle",
 	              "a ctx that is no string");
 
@@ -230,10 +258,12 @@ int main(int argc, char **argv) {
 	Expect(qod::VerifyHandle(Sign(PayloadWithCreds("\"" + std::string(64, 'd') + "\"")), kKey, kNode, kNow).creds ==
 	           std::string(64, 'd'),
 	       "the handle's creds");
-	ExpectRefused([&] { qod::VerifyHandle(Sign(PayloadWithCreds("\"" + std::string(63, 'd') + "\"")), kKey, kNode, kNow); },
-	              "bad creds", "a short creds");
-	ExpectRefused([&] { qod::VerifyHandle(Sign(PayloadWithCreds("\"" + std::string(64, 'D') + "\"")), kKey, kNode, kNow); },
-	              "bad creds", "an uppercase creds");
+	ExpectRefused(
+	    [&] { qod::VerifyHandle(Sign(PayloadWithCreds("\"" + std::string(63, 'd') + "\"")), kKey, kNode, kNow); },
+	    "bad creds", "a short creds");
+	ExpectRefused(
+	    [&] { qod::VerifyHandle(Sign(PayloadWithCreds("\"" + std::string(64, 'D') + "\"")), kKey, kNode, kNow); },
+	    "bad creds", "an uppercase creds");
 	ExpectRefused([&] { qod::VerifyHandle(Sign(PayloadWithCreds("7")), kKey, kNode, kNow); }, "malformed handle",
 	              "a creds that is no string");
 
@@ -269,7 +299,8 @@ int main(int argc, char **argv) {
 	auto without_ctx = std::string("{\"v\":6,\"node\":\"") + kNode +
 	                   "\",\"replica\":\"http://10.0.0.1:20900\",\"principal\":{\"id\":\"u-1\",\"name\":\"alice\","
 	                   "\"tenant\":\"acme\",\"superuser\":false,\"system\":false},\"pool\":\"acme/acme_db/bi\","
-	                   "\"policyVersion\":42,\"creds\":\"\",\"path\":\"\",\"readOnly\":[],\"rowPolicies\":[],\"columnPolicies\":[],\"nonce\":\"" +
+	                   "\"policyVersion\":42,\"creds\":\"\",\"path\":\"\",\"readOnly\":[],\"rowPolicies\":[],"
+	                   "\"columnPolicies\":[],\"nonce\":\"" +
 	                   kNonce + "\",\"exp\":" + std::to_string(kNow + 60000) + "}";
 	ExpectRefused([&] { qod::VerifyHandle(Sign(without_ctx), kKey, kNode, kNow); }, "ctx", "a handle without ctx");
 	auto null_ctx = without_ctx;
@@ -292,7 +323,8 @@ int main(int argc, char **argv) {
 		                      kKey, kNode, kNow);
 	    },
 	    "creds", "a handle without creds");
-	ExpectRefused([&] { qod::VerifyHandle(Sign(PayloadWithCreds("null")), kKey, kNode, kNow); }, "creds", "a null creds");
+	ExpectRefused([&] { qod::VerifyHandle(Sign(PayloadWithCreds("null")), kKey, kNode, kNow); }, "creds",
+	              "a null creds");
 	Expect(qod::VerifyHandle(Sign(Payload()), kKey, kNode, kNow).creds.empty(), "an empty creds is no credential");
 	// ---- node protocol 3: and the session default path the manager expects (CONTRACT Addendum 4 item 22)
 	ExpectRefused([&] { qod::VerifyHandle(Sign(PayloadWithPath("")), kKey, kNode, kNow); }, "path",
@@ -308,8 +340,7 @@ int main(int argc, char **argv) {
 
 	// ---- node protocol 5: and the pool's read-only catalogs (decision 24)
 	Expect(qod::VerifyHandle(Sign(Payload()), kKey, kNode, kNow).read_only.empty(), "an empty readOnly: none");
-	Expect(qod::VerifyHandle(Sign(PayloadWithReadOnly(",\"readOnly\":[\"crm\",\"erp_pg\",\"x9\"]")), kKey, kNode,
-	                         kNow)
+	Expect(qod::VerifyHandle(Sign(PayloadWithReadOnly(",\"readOnly\":[\"crm\",\"erp_pg\",\"x9\"]")), kKey, kNode, kNow)
 	               .read_only == std::vector<std::string> {"crm", "erp_pg", "x9"},
 	       "the handle's readOnly");
 	auto longest = std::string(128, 'a');
@@ -324,16 +355,18 @@ int main(int argc, char **argv) {
 	              "readOnly", "a readOnly that is no array");
 	ExpectRefused([&] { qod::VerifyHandle(Sign(PayloadWithReadOnly(",\"readOnly\":[7]")), kKey, kNode, kNow); },
 	              "readOnly", "a readOnly entry that is no string");
-	for (auto bad : {"[\"CRM\"]", "[\"\"]", "[\"crm-x\"]", "[\"cr\\u0131m\"]", "[\"erp\",\"crm\"]",
-	                 "[\"crm\",\"crm\"]"}) {
+	for (auto bad :
+	     {"[\"CRM\"]", "[\"\"]", "[\"crm-x\"]", "[\"cr\\u0131m\"]", "[\"erp\",\"crm\"]", "[\"crm\",\"crm\"]"}) {
 		ExpectRefused(
-		    [&] { qod::VerifyHandle(Sign(PayloadWithReadOnly(std::string(",\"readOnly\":") + bad)), kKey, kNode, kNow); },
+		    [&] {
+			    qod::VerifyHandle(Sign(PayloadWithReadOnly(std::string(",\"readOnly\":") + bad)), kKey, kNode, kNow);
+		    },
 		    "bad readOnly", std::string("readOnly ") + bad);
 	}
 	ExpectRefused(
 	    [&] {
-		    qod::VerifyHandle(Sign(PayloadWithReadOnly(",\"readOnly\":[\"" + std::string(129, 'a') + "\"]")), kKey, kNode,
-		                      kNow);
+		    qod::VerifyHandle(Sign(PayloadWithReadOnly(",\"readOnly\":[\"" + std::string(129, 'a') + "\"]")), kKey,
+		                      kNode, kNow);
 	    },
 	    "bad readOnly", "an alias longer than 128 characters");
 

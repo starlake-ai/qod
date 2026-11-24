@@ -51,22 +51,29 @@ class NodeColumnPolicySpec extends AnyFlatSpec with Matchers:
     policies.forall(NodeColumnPolicy.valid) shouldBe true
   }
 
-  it should "refuse unsafe stored masks without disclosing their SQL" in {
-    val bad     = mask.copy(transformSql = Some("CAST(secret AS INTEGER)"))
-    val message =
-      intercept[IllegalArgumentException](NodeColumnPolicy.of(principal(List(bad)))).getMessage
-    message should include("m1")
-    message should not include "CAST"
-    message should not include "secret"
+  it should "turn unusable stored masks into scoped denies without leaking SQL" in {
+    val invalid = List(
+      mask.copy(transformSql = Some("CAST(secret AS INTEGER)")),
+      mask.copy(transformSql = None),
+      mask.copy(action = "unknown")
+    )
+    invalid.foreach { bad =>
+      val transported = NodeColumnPolicy.of(principal(List(bad))).head
+      transported shouldBe NodeColumnPolicy("m1", "memory", "main", "docs", "secret", "deny", "")
+    }
   }
 
-  it should "reject missing masks and invalid actions" in {
-    intercept[IllegalArgumentException](
-      NodeColumnPolicy.of(principal(List(mask.copy(transformSql = None))))
-    )
-    intercept[IllegalArgumentException](
-      NodeColumnPolicy.of(principal(List(mask.copy(action = "unknown"))))
-    )
+  it should "keep validation cache entries separate by protected column and expression" in {
+    NodeColumnPolicy.of(principal(List(mask))).head.action shouldBe "mask"
+    NodeColumnPolicy
+      .of(principal(List(mask.copy(columnName = "owner"))))
+      .head
+      .action shouldBe "deny"
+    NodeColumnPolicy
+      .of(principal(List(mask.copy(transformSql = Some("owner")))))
+      .head
+      .action shouldBe "deny"
+    NodeColumnPolicy.of(principal(List(mask))).head.action shouldBe "mask"
   }
 
   it should "carry no policies for privileged or unbound callers" in {
@@ -99,7 +106,7 @@ class NodeColumnPolicySpec extends AnyFlatSpec with Matchers:
       .columnPolicies shouldBe policies
   }
 
-  it should "bound counts, UTF-8 lengths and action payload shapes" in {
+  it should "bound UTF-8 lengths and action payload shapes" in {
     NodeColumnPolicy.valid(
       NodeColumnPolicy("m", "*", "*", "*", "c", "mask", "é" * 2049)
     ) shouldBe false

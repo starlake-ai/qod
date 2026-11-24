@@ -10,6 +10,9 @@
 
 namespace qod {
 
+constexpr size_t kMaxHandlePayloadBytes = 2 * 1024 * 1024;
+constexpr size_t kMaxEncodedHandleBytes = ((kMaxHandlePayloadBytes + 2) / 3) * 4 + 65;
+
 //! Who a statement runs for, as the manager vouches for it in a handle.
 struct Principal {
 	std::string id;
@@ -87,8 +90,7 @@ constexpr int64_t kMaxHandleLifetimeMs = 5 * 60 * 1000;
 //! Verifies `text` for this node (`node_key`: its 32-byte key; `node_id`: its id) at `now_ms` and
 //! returns what it carries. Throws std::invalid_argument naming the first failed check: the format,
 //! the MAC, the payload's shape, another node, expired, or valid too long.
-Handle VerifyHandle(const std::string &text, const std::string &node_key, const std::string &node_id,
-                    int64_t now_ms);
+Handle VerifyHandle(const std::string &text, const std::string &node_key, const std::string &node_id, int64_t now_ms);
 
 //! The nonces of the handles already used, each kept until its handle expires: a handle installs a
 //! principal once.

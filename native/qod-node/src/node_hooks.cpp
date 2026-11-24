@@ -98,8 +98,17 @@ public:
 		if (!authz.Consume(handle)) {
 			throw PermissionException(kHandleRefused + std::string("it was already used"));
 		}
-		current_ = Installed {handle.principal, handle.policy_version, handle.exp, handle.nonce, handle.ctx,
-		                      text,             handle.replica,        handle.path, handle.read_only, handle.row_policies, handle.column_policies};
+		current_ = Installed {handle.principal,
+		                      handle.policy_version,
+		                      handle.exp,
+		                      handle.nonce,
+		                      handle.ctx,
+		                      text,
+		                      handle.replica,
+		                      handle.path,
+		                      handle.read_only,
+		                      handle.row_policies,
+		                      handle.column_policies};
 		installed_ = true;
 		authz_ = &authz;
 	}
@@ -169,7 +178,8 @@ public:
 			auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
 			for (auto &entry : present) {
 				manager.DropSecretByName(transaction, Identifier(entry.first), OnEntryNotFound::RETURN_NULL,
-				                         SecretPersistType::TEMPORARY, Identifier(SecretManager::CONNECTION_STORAGE_NAME));
+				                         SecretPersistType::TEMPORARY,
+				                         Identifier(SecretManager::CONNECTION_STORAGE_NAME));
 			}
 			for (auto &credential : set.credentials) {
 				manager.RegisterSecret(transaction, UserSecret(credential), OnCreateConflict::REPLACE_ON_CONFLICT,
@@ -229,8 +239,14 @@ public:
 	//! The manager's prelude: the handle's own install step.
 	void AdmitPrelude() {
 		std::lock_guard<std::mutex> guard(lock_);
-		pending_ = Admitted {"",           current_.principal.id, current_.policy_version,
-		                     current_.ctx, kNeverExpires,         current_.read_only, current_.row_policies, current_.column_policies};
+		pending_ = Admitted {"",
+		                     current_.principal.id,
+		                     current_.policy_version,
+		                     current_.ctx,
+		                     kNeverExpires,
+		                     current_.read_only,
+		                     current_.row_policies,
+		                     current_.column_policies};
 	}
 
 	//! True when the current statement already runs under a verdict for the plan `fingerprint`
@@ -650,8 +666,8 @@ bool IsPrelude(LogicalOperator &plan) {
 //! parquet_extension.cpp, json_extension.cpp and copy_json.cpp at v2.0.0; empty: the core).
 const std::map<std::string, std::string> &CoreCopyOrigins() {
 	static const std::map<std::string, std::string> origins = {
-	    {"blob", ""},      {"csv", ""},       {"geojson", "json"}, {"geojsonl", "json"},
-	    {"json", "json"},  {"jsonl", "json"}, {"ndjson", "json"},  {"parquet", "parquet"}};
+	    {"blob", ""},     {"csv", ""},       {"geojson", "json"}, {"geojsonl", "json"},
+	    {"json", "json"}, {"jsonl", "json"}, {"ndjson", "json"},  {"parquet", "parquet"}};
 	return origins;
 }
 
@@ -666,8 +682,9 @@ void RefuseForeignCopyFunction(ClientContext &context, LogicalOperator &op) {
 			CatalogEntryRetriever retriever(context);
 			auto &catalog = Catalog::GetSystemCatalog(context);
 			auto entry = catalog.GetEntry(
-			    retriever, EntryLookupInfo(CatalogType::COPY_FUNCTION_ENTRY,
-			                               QualifiedName(catalog.GetName(), Identifier::DefaultSchema(), Identifier(name))),
+			    retriever,
+			    EntryLookupInfo(CatalogType::COPY_FUNCTION_ENTRY,
+			                    QualifiedName(catalog.GetName(), Identifier::DefaultSchema(), Identifier(name))),
 			    OnEntryNotFound::RETURN_NULL);
 			if (!entry || StringUtil::Lower(entry->extension_name.GetIdentifierName()) != origin->second) {
 				throw PermissionException("QoD: statement uses a COPY format " + name +
@@ -690,16 +707,18 @@ std::string RefusalMessage(const DecideResult &decided, const NodeAuthz &authz, 
 		return decided.Message();
 	}
 	std::string unavailable = "authorization unavailable";
-	auto rest = decided.reason.compare(0, unavailable.size(), unavailable) == 0 ? decided.reason.substr(unavailable.size())
-	                                                                             : ": " + decided.reason;
+	auto rest = decided.reason.compare(0, unavailable.size(), unavailable) == 0
+	                ? decided.reason.substr(unavailable.size())
+	                : ": " + decided.reason;
 	return "QoD: " + unavailable + ", retry" + rest + UnavailableMarker(authz.NodeKey(), nonce);
 }
 
 //! The verdict on `described` for `installed`: a local allow for a superuser or system principal,
 //! else the decider's (from Task 7's cache or the issuing replica). Throws the refusal.
 Admitted Decide(Gate &gate, const Installed &installed, const Described &described) {
-	Admitted admitted {described.fingerprint, installed.principal.id, installed.policy_version,
-	                   installed.ctx,         kNeverExpires,          installed.read_only, installed.row_policies, installed.column_policies};
+	Admitted admitted {
+	    described.fingerprint, installed.principal.id, installed.policy_version, installed.ctx,
+	    kNeverExpires,         installed.read_only,    installed.row_policies,   installed.column_policies};
 	if (installed.principal.superuser || installed.principal.system) {
 		return admitted;
 	}
@@ -735,51 +754,42 @@ void Enforce(ClientContext &context, Gate &gate, LogicalOperator &plan) {
 		return;
 	}
 	auto privileged = installed.principal.superuser || installed.principal.system;
-	if (!privileged) {
-		VerifyRowPolicies(plan, installed.row_policies);
-		VerifyColumnPolicies(plan, installed.column_policies);
-	}
 	Described described;
 	try {
+		if (!privileged) {
+			VerifyRowPolicies(plan, installed.row_policies);
+			VerifyColumnPolicies(plan, installed.column_policies);
+		}
 		auto text = session->StatementText(context);
 		if (!text && !privileged) {
 			// Item 32 B judges the call names as written: a statement whose text is out of reach is refused.
 			throw PermissionException("QoD: statement uses a statement whose text cannot be read, so its calls "
 			                          "cannot be judged, which QoD does not support");
 		}
-		described = Describe(context, plan, installed.principal, text ? &*text : nullptr,
-		                     &installed.row_policies, &installed.column_policies);
-		if (!privileged && !installed.row_policies.empty()) {
+		described = Describe(context, plan, installed.principal, text ? &*text : nullptr, &installed.row_policies,
+		                     &installed.column_policies);
+		// One parse and object walk for both policy kinds, with one schema-DDL rule.
+		if (!privileged && (!installed.row_policies.empty() || !installed.column_policies.empty())) {
 			auto description = ParseJson(described.canonical);
 			for (auto &object : description.Get("objects", JsonValue::Kind::ARRAY).array) {
-				if (object.Get("access", JsonValue::Kind::STRING).string == "read") {
+				auto access = object.Get("access", JsonValue::Kind::STRING).string;
+				if (access == "read")
 					continue;
-				}
+				auto &catalog = object.Get("catalog", JsonValue::Kind::STRING).string;
+				auto &schema = object.Get("schema", JsonValue::Kind::STRING).string;
+				auto &name = object.Get("name", JsonValue::Kind::STRING).string;
+				auto schema_ddl = object.Get("kind", JsonValue::Kind::STRING).string == "schema" &&
+				                  (access == "drop" || access == "alter");
 				for (auto &policy : installed.row_policies) {
-					auto access = object.Get("access", JsonValue::Kind::STRING).string;
-					auto schema_ddl = object.Get("kind", JsonValue::Kind::STRING).string == "schema" &&
-					                  (access == "drop" || access == "alter");
-					if (RowPolicyMatches(policy, object.Get("catalog", JsonValue::Kind::STRING).string,
-					                     object.Get("schema", JsonValue::Kind::STRING).string,
-					                     schema_ddl ? policy.table : object.Get("name", JsonValue::Kind::STRING).string)) {
+					if (RowPolicyMatches(policy, catalog, schema, schema_ddl ? policy.table : name)) {
 						throw PermissionException("QoD: writes to a row-policy table require write-check policies, "
 						                          "which node RLS does not yet support");
 					}
 				}
-			}
-		}
-		if (!privileged && !installed.column_policies.empty()) {
-			auto description = ParseJson(described.canonical);
-			for (auto &object : description.Get("objects", JsonValue::Kind::ARRAY).array) {
-				auto access = object.Get("access", JsonValue::Kind::STRING).string;
-				if (access == "read") continue;
 				for (auto &policy : installed.column_policies) {
-					auto schema_ddl = object.Get("kind", JsonValue::Kind::STRING).string == "schema" &&
-					                  (access == "drop" || access == "alter");
-					if (ColumnPolicyMatches(policy, object.Get("catalog", JsonValue::Kind::STRING).string,
-					                        object.Get("schema", JsonValue::Kind::STRING).string,
-					                        schema_ddl ? policy.table : object.Get("name", JsonValue::Kind::STRING).string)) {
-						throw PermissionException("QoD: writes to a column-policy table are not supported in native CLS");
+					if (ColumnPolicyMatches(policy, catalog, schema, schema_ddl ? policy.table : name)) {
+						throw PermissionException(
+						    "QoD: writes to a column-policy table are not supported in native CLS");
 					}
 				}
 			}
@@ -818,10 +828,17 @@ void PostBind(PlannerExtensionInput &input, BoundStatement &statement) {
 		return;
 	}
 	Installed installed;
-	if (SessionSnapshot(context, gate.authz->Now(), installed) &&
-	    !installed.principal.superuser && !installed.principal.system && !IsPrelude(*statement.plan)) {
-		ApplyColumnPolicies(context, input.binder, statement.plan, installed.column_policies);
-		ApplyRowPolicies(context, statement.plan, installed.row_policies);
+	if (SessionSnapshot(context, gate.authz->Now(), installed) && !installed.principal.superuser &&
+	    !installed.principal.system && !IsPrelude(*statement.plan)) {
+		// Placement errors happen before Enforce's description/verification boundary. Count
+		// them here, and leave later refusals to Enforce so every refusal increments once.
+		try {
+			ApplyColumnPolicies(context, input.binder, statement.plan, installed.column_policies);
+			ApplyRowPolicies(context, statement.plan, installed.row_policies);
+		} catch (PermissionException &) {
+			gate.authz->Stats().local_refusals++;
+			throw;
+		}
 	}
 	Enforce(context, gate, *statement.plan);
 }

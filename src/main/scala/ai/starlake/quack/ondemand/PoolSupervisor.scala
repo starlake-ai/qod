@@ -4958,8 +4958,8 @@ final class PoolSupervisor(
 
   /** A policy's catalog, schema or table left blank matches no table (`PolicyCoverage.covers`
     * compares names; only "*" is a wildcard), so the policy would be stored and never apply: a mask
-    * or row filter its author believes in force. Refused at create; a manifest import, which writes
-    * through the store, keeps restoring whatever a backup holds.
+    * or row filter its author believes in force. Refused at create and during manifest validation
+    * before persistence.
     */
   private def blankPolicyScopeError(
       catalogName: String,
@@ -4985,54 +4985,35 @@ final class PoolSupervisor(
       transformSql: Option[String]
   ): IO[Either[SupervisorError, state.RoleColumnPolicy]] = IO.blocking {
     withCacheRecovery("createColumnPolicy") {
-      val normalisedTransform = transformSql.map(_.trim).filter(_.nonEmpty)
-      val builtin             = builtinRoleError(roleId)
-      val blankScope          = blankPolicyScopeError(catalogName, schemaName, tableName)
-      if builtin.isDefined then Left(builtin.get)
-      else if blankScope.isDefined then Left(blankScope.get)
-      else if !state.RoleColumnPolicy.ValidActions.contains(action) then
-        Left(
-          SupervisorError.InvalidArgument(
-            s"action must be one of ${state.RoleColumnPolicy.ValidActions.mkString(", ")}"
+      val definition = builtinRoleError(roleId).toLeft(()).flatMap { _ =>
+        ai.starlake.quack.edge.cls.ColumnPolicyDefinition
+          .validate(
+            catalogName,
+            schemaName,
+            tableName,
+            columnName,
+            action,
+            transformSql
+          )
+          .left
+          .map(SupervisorError.InvalidArgument.apply)
+      }
+      definition.map { canonical =>
+        val persisted = store.insertColumnPolicy(
+          state.RoleColumnPolicy(
+            id = newId("cp"),
+            roleId = roleId,
+            catalogName = catalogName,
+            schemaName = schemaName,
+            tableName = tableName,
+            columnName = columnName,
+            action = action,
+            transformSql = canonical
           )
         )
-      else if columnName == state.RoleColumnPolicy.Wildcard || columnName.trim.isEmpty then
-        Left(SupervisorError.InvalidArgument("columnName is required and must not be '*'"))
-      else if action == state.RoleColumnPolicy.ActionMask && normalisedTransform.isEmpty then
-        Left(SupervisorError.InvalidArgument("transformSql is required when action='mask'"))
-      else if action == state.RoleColumnPolicy.ActionDeny && normalisedTransform.isDefined then
-        Left(SupervisorError.InvalidArgument("transformSql must be empty when action='deny'"))
-      else
-        val validatedTransform: Either[SupervisorError, Option[String]] =
-          if action == state.RoleColumnPolicy.ActionMask then
-            normalisedTransform
-              .toRight(
-                SupervisorError.InvalidArgument("transformSql is required when action='mask'")
-              )
-              .flatMap { raw =>
-                ai.starlake.quack.edge.cls.TransformSqlValidator.validate(raw, columnName) match
-                  case ai.starlake.quack.edge.cls.TransformSqlValidator.Invalid(reason) =>
-                    Left(SupervisorError.InvalidArgument(s"invalid transformSql: $reason"))
-                  case ai.starlake.quack.edge.cls.TransformSqlValidator.Valid(canon) =>
-                    Right(Some(canon))
-              }
-          else Right(None)
-        validatedTransform match
-          case Left(err)             => Left(err)
-          case Right(canonTransform) =>
-            val p = state.RoleColumnPolicy(
-              id = newId("cp"),
-              roleId = roleId,
-              catalogName = catalogName,
-              schemaName = schemaName,
-              tableName = tableName,
-              columnName = columnName,
-              action = action,
-              transformSql = canonTransform
-            )
-            val persisted = store.insertColumnPolicy(p)
-            invalidateEffectiveCache()
-            Right(persisted)
+        invalidateEffectiveCache()
+        persisted
+      }
     }
   }
 
@@ -5042,45 +5023,30 @@ final class PoolSupervisor(
       transformSql: Option[String]
   ): IO[Either[SupervisorError, Unit]] = IO.blocking {
     withCacheRecovery("updateColumnPolicy") {
-      val normalisedTransform = transformSql.map(_.trim).filter(_.nonEmpty)
-      val builtin             = store.getColumnPolicy(id).flatMap(p => builtinRoleError(p.roleId))
-      if builtin.isDefined then Left(builtin.get)
-      else if !state.RoleColumnPolicy.ValidActions.contains(action) then
-        Left(
-          SupervisorError.InvalidArgument(
-            s"action must be one of ${state.RoleColumnPolicy.ValidActions.mkString(", ")}"
-          )
-        )
-      else if action == state.RoleColumnPolicy.ActionMask && normalisedTransform.isEmpty then
-        Left(SupervisorError.InvalidArgument("transformSql is required when action='mask'"))
-      else if action == state.RoleColumnPolicy.ActionDeny && normalisedTransform.isDefined then
-        Left(SupervisorError.InvalidArgument("transformSql must be empty when action='deny'"))
-      else
-        val validatedTransform: Either[SupervisorError, Option[String]] =
-          if action == state.RoleColumnPolicy.ActionMask then
-            normalisedTransform
-              .toRight(
-                SupervisorError.InvalidArgument("transformSql is required when action='mask'")
+      store
+        .getColumnPolicy(id)
+        .toRight(SupervisorError.NotFound(s"column policy $id not found"))
+        .flatMap { existing =>
+          builtinRoleError(existing.roleId).toLeft(()).flatMap { _ =>
+            ai.starlake.quack.edge.cls.ColumnPolicyDefinition
+              .validate(
+                existing.catalogName,
+                existing.schemaName,
+                existing.tableName,
+                existing.columnName,
+                action,
+                transformSql
               )
-              .flatMap { raw =>
-                // updateColumnPolicy doesn't know the columnName; fetch it from the store.
-                store.getColumnPolicy(id) match
-                  case None => Left(SupervisorError.NotFound(s"column policy $id not found"))
-                  case Some(existing) =>
-                    ai.starlake.quack.edge.cls.TransformSqlValidator
-                      .validate(raw, existing.columnName) match
-                      case ai.starlake.quack.edge.cls.TransformSqlValidator.Invalid(reason) =>
-                        Left(SupervisorError.InvalidArgument(s"invalid transformSql: $reason"))
-                      case ai.starlake.quack.edge.cls.TransformSqlValidator.Valid(canon) =>
-                        Right(Some(canon))
-              }
-          else Right(None)
-        validatedTransform match
-          case Left(err)             => Left(err)
-          case Right(canonTransform) =>
-            val ok = store.updateColumnPolicy(id, action, canonTransform)
-            if ok then { invalidateEffectiveCache(); Right(()) }
-            else Left(SupervisorError.NotFound(s"column policy $id not found"))
+              .left
+              .map(SupervisorError.InvalidArgument.apply)
+          }
+        }
+        .flatMap { canonical =>
+          if store.updateColumnPolicy(id, action, canonical) then
+            invalidateEffectiveCache()
+            Right(())
+          else Left(SupervisorError.NotFound(s"column policy $id not found"))
+        }
     }
   }
 

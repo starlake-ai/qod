@@ -9,7 +9,11 @@
   Gateway CLS remains the default. Native CLS applies compatible masks and denies
   to bound base-table reads, including reads through views; unsupported types,
   generated-output/view-scoped policies and writes to covered tables refuse.
-  Unsafe stored masks refuse policy minting, and mask evaluation errors become NULL.
+  Invalid new masks are rejected on every write/import path. Unusable stored masks
+  become scoped denies; mask evaluation errors become NULL.
+  Policy preparation is cached by context and version. The 256-policy handle cap is
+  replaced by a 2 MiB payload budget, and wildcard policies target base tables
+  without blocking unrelated views or built-in macros. Native refusals count once.
   See [the design and limits](docs/node-column-security.md).
 
 - **Row policies now run exclusively in the native node.** Deploy and restart protocol-8
