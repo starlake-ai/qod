@@ -7,12 +7,7 @@ import ai.starlake.quack.ondemand.state.{RbacUser, RoleRowPolicy}
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-/** The row-policy rewriter and the access checks read a CTE name the way JSqlParser unquotes it,
-  * which for these spellings is another name than DuckDB's. The rewriter wraps the table beside
-  * such a CTE, but the access checks would take the table for the CTE. What keeps such a statement
-  * from a row-policy holder is the guard's screen of quoted names, which runs ahead of the
-  * rewriters: this pins it in CTE-name position.
-  */
+/** Row-only reads are bound by the native engine, which resolves CTE names itself. */
 class ProtectedWriteGuardCteSpellingSpec extends AnyFlatSpec with Matchers:
   import GuardOutcome._
 
@@ -22,7 +17,7 @@ class ProtectedWriteGuardCteSpellingSpec extends AnyFlatSpec with Matchers:
     SchemaContext(Some("acme_tpch"), Some("tpch1"), attachedCatalogs = Set.empty)
   private val guard =
     new ProtectedWriteGuard(
-      new ColumnCatalog.MapCatalog(Map.empty),
+      new ColumnCatalog.MapCatalog(),
       clsEnabled = true,
       rlsEnabled = true
     )
@@ -43,12 +38,12 @@ class ProtectedWriteGuardCteSpellingSpec extends AnyFlatSpec with Matchers:
   )
 
   for spelling <- spellings do
-    s"a CTE spelled $spelling" should "be refused to a row-policy holder" in {
+    s"a CTE spelled $spelling" should "reach native binding for a row-policy holder" in {
       val sql = s"WITH $spelling AS (SELECT 5 AS id, 'q' AS region) SELECT * FROM secret"
       guard.check(
         sql,
         StatementKind.Select,
         EffectiveSet(user, Nil, Nil, Nil, Nil, Nil, List(rowPolicy)),
         ctx
-      ) shouldBe a[Deny]
+      ) shouldBe Allow
     }

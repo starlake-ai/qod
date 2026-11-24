@@ -2,12 +2,12 @@
 
 ## Status and rollout
 
-This adds opt-in read-side CLS on DuckDB 2.0.1's bound plan. Set
-`QOD_CLS_ENFORCEMENT=node` (`quack-on-demand.cls.enforcement=node`) on every manager
-replica. The default remains `gateway`. Invalid modes refuse boot.
-`QOD_CLS_ENABLED=false` disables policy transport and both enforcement paths.
+CLS runs exclusively on DuckDB 2.0.1's bound plan. It is enabled by default;
+`QOD_CLS_ENABLED=false` disables signed column-policy transport and the CLS write
+guard. Gateway rewriting, `QOD_CLS_ENFORCEMENT`, and `QOD_CLS_UNRESOLVED_TABLE`
+are retired. Metadata filtering and historical-name checks remain.
 
-Node protocol **8** and signed handle version **6** are mandatory in both modes.
+Node protocol **8** and signed handle version **6** are mandatory.
 Rebuild and vendor every platform's node binary, deploy matching node images and
 fleet launchers, and restart the nodes. Earlier nodes and handles refuse.
 No policy-table or DuckLake metadata migration is needed.
@@ -54,7 +54,7 @@ the bound source type. A literal NULL is bound as a typed NULL; other incompatib
 types refuse. No implicit cast is added to make a type-changing mask fit.
 
 Masks evaluate under `TRY`: an evaluation failure produces NULL rather than an
-error quoting the original value. This is a documented native-mode behavior.
+error quoting the original value. This is part of the native masking contract.
 
 ## Plan placement and RLS composition
 
@@ -105,17 +105,17 @@ including when the version is unchanged but the signed mask changed.
   other unsupported scan shapes refuse. Ordinary nested-value consumers can use
   masks only where the full source type and bindings are preserved.
 - Writes and DDL targeting covered tables, INSERT included, refuse natively.
-  Existing gateway protected-write checks stay mounted. This does not introduce
-  write-check policies or a general secure-write feature.
+  Gateway checks also refuse writes and batches reading any CLS-covered table,
+  including reads of unprotected columns. The removed gateway rewriter is no
+  longer used as a write-safety oracle. No write-check policies are introduced.
 - Existing historical-name restrictions remain. DuckLake change feeds refuse
   for native column-policy holders because they have no ordinary source scan to
   mask. File readers without table identity retain file-location authorization;
   they do not acquire name-scoped table policies.
 - Gateway metadata filtering, routing and conservative syntax/write guards remain.
-  Node mode skips the gateway column rewrite and its SQL normalization; it does
-  not promise every syntax form is newly admitted by the remaining guards.
-- Gateway rewrite metrics report passthrough in node mode. That means no gateway
-  rewrite was performed, not that native policies were bypassed.
+  Caller SQL bypasses column rewriting and normalization; the remaining guards
+  still refuse syntax they cannot safely analyze. Gateway rewrite and schema-
+  lookup metrics and their dashboard panels are removed.
 
 EXPLAIN sees the opaque boundary rather than its mask expressions. Query text is
 not populated with mask SQL; existing statement-text and metadata authorization
@@ -133,7 +133,8 @@ extension tampering. DuckLake cases run when its pinned extension is installed.
 
 Scala tests cover shared definition/import validation, scoped refusal of unusable
 stored masks, snapshot invalidation, full policy scopes, large policy sets, byte
-bounds, signing and verification, privileged callers and native transport. The cross-language handle fixture pins the version transition.
+bounds, signing and verification, privileged callers, the kill switch and native-only transport. The cross-language
+handle fixture pins the version transition.
 
 At each DuckDB upgrade, revisit scan-column mappings, secure-view optimization, TRY,
 independent binding, prepared-query lifecycle and descriptor behavior. These are

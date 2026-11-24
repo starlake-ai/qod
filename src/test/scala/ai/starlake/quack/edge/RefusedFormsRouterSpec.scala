@@ -42,10 +42,6 @@ class RefusedFormsRouterSpec extends AnyFlatSpec with Matchers:
       answer: String => QuackResponse = _ => TestArrow.okResponse(),
       journal: ai.starlake.quack.ondemand.telemetry.EventJournal =
         ai.starlake.quack.ondemand.telemetry.EventJournal.noop,
-      columns: ai.starlake.quack.edge.cls.ColumnPolicyRewriter =
-        new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
-          new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(Map.empty)
-        ),
       attached: Set[String] = Set.empty,
       nodes: Int = 1
   ) =
@@ -102,7 +98,6 @@ class RefusedFormsRouterSpec extends AnyFlatSpec with Matchers:
       tracker,
       new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral()),
       journal = journal,
-      columnPolicyRewriter = columns,
       attachedCatalogsOf = _ => attached,
       metadataFilterRewriter = new MetadataFilterRewriter(enabled = true),
       protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
@@ -567,43 +562,8 @@ class RefusedFormsRouterSpec extends AnyFlatSpec with Matchers:
     )
   )
 
-  private val customerColumns = new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
-    new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(
-      Map(("memory", "main", "customer") -> List("c_id", "c_email", "c_secret"))
-    )
-  )
-
-  "a SUMMARIZE over a masked column" should "aggregate the masked values" in {
-    val listing: String => QuackResponse = sql =>
-      if sql.contains("information_schema.columns") then
-        QuackResponse.Ok(
-          TestArrow.readerFor(
-            "SELECT * FROM (VALUES ('c_id', 'INTEGER'), ('c_email', 'VARCHAR')) " +
-              "AS c(column_name, column_type)"
-          ),
-          1L,
-          () => ()
-        )
-      else TestArrow.okResponse()
-    val (router, sent) = setup(listing, columns = customerColumns)
-    // A denied column refuses the summary, as it refuses SELECT * of the table.
-    run(router, "SUMMARIZE customer", maskedUser).left.map(_.reason) shouldBe
-      Left("access denied: column customer.c_secret is denied")
-    val maskOnly = maskedUser.copy(columnPolicies = maskedUser.columnPolicies.take(1))
-    val out      = run(router, "SUMMARIZE customer", maskOnly)
-    withClue(out)(out.isRight shouldBe true)
-    val summary = sent().last
-    summary should include("unnest(list_value('c_id', 'c_email'))")
-    // Every aggregate of c_email reads the mask, and the derived table they read masks it too.
-    summary should include("CAST(min('***') AS VARCHAR)")
-    summary should include("CAST(max('***') AS VARCHAR)")
-    summary should include("approx_count_distinct('***')")
-    summary should include("'***' AS c_email")
-    summary should not include "min(\"c_email\")"
-  }
-
   "a DESCRIBE of a table with a denied column" should "not be refused" in {
-    val (router, sent) = setup(columns = customerColumns)
+    val (router, sent) = setup()
     val out            = run(router, "DESCRIBE customer", maskedUser)
     withClue(out)(out.isRight shouldBe true)
     sent().last should include("NOT EXISTS (SELECT 1 FROM")

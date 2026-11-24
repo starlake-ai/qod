@@ -22,15 +22,14 @@ import java.sql.Connection
 /** Discovery fails closed, in the posture of `RbacTenantScopeSpec`: a principal sees exactly what
   * its grants cover, and an object it may not see answers exactly like one that does not exist.
   *
-  * The handlers run over the router's real text pipeline (the metadata filter and the column-policy
-  * rewriter, via [[PolicyPipelineFixture]]), and the node is an in-process DuckDB holding the
-  * tenant catalog, so every listing and probe is answered by DuckDB itself after the pipeline
-  * rewrote it. Table grants are qod-node's decision: this node answers a read of an ungranted table
-  * with the refusal qod-node sends ([[refusingUngranted]]), so what is pinned here is how the edge
-  * answers that refusal; `RestEdgeEndToEndSpec` has the real decision on live nodes. That DuckDB
-  * has no DuckLake extension, so the node drops the `AT (VERSION => n)` the edge sends for `asOf*`
-  * on the DuckLake kind before executing; what the pipeline does with that clause is pinned by
-  * RestTimeTravelPolicySpec.
+  * The handlers run over the router's metadata pipeline (via [[PolicyPipelineFixture]]), and the
+  * node is an in-process DuckDB holding the tenant catalog, so every listing and probe is answered
+  * by DuckDB itself after the pipeline rewrote it. Table grants are qod-node's decision: this node
+  * answers a read of an ungranted table with the refusal qod-node sends ([[refusingUngranted]]), so
+  * what is pinned here is how the edge answers that refusal; `RestEdgeEndToEndSpec` has the real
+  * decision on live nodes. That DuckDB has no DuckLake extension, so the node drops the
+  * `AT (VERSION => n)` the edge sends for `asOf*` on the DuckLake kind before executing; what the
+  * pipeline does with that clause is pinned by RestTimeTravelPolicySpec.
   */
 class RestDiscoveryScopeSpec extends AnyFlatSpec with Matchers:
 
@@ -137,31 +136,30 @@ class RestDiscoveryScopeSpec extends AnyFlatSpec with Matchers:
   private def grants(kc: KindCase) =
     List(grant(kc.catalog, "main", "customer"), grant(kc.catalog, "sales", "*"))
 
-  private val customerColumns = new ColumnCatalog.MapCatalog(
-    AllKinds
-      .flatMap(kc =>
-        List(
-          (kc.catalog, "main", "customer") -> List("c_id", "c_email", "ssn"),
-          (kc.catalog, "main", "dotted")   -> List("a.b", "c_email")
-        )
-      )
-      .toMap
-  )
+  private val customerColumns = new ColumnCatalog.MapCatalog()
 
   private def withHandlers[A](
       kc: KindCase,
       permissions: List[RolePermission] = Nil,
       columnPolicies: List[RoleColumnPolicy] = Nil,
       rowPolicies: List[RoleRowPolicy] = Nil,
+      nodeSeedSql: List[String] = Nil,
+      nodeRefuses: Boolean = false,
       recorded: Option[scala.collection.mutable.ListBuffer[(String, String)]] = None
   )(body: RestEdgeHandlers => A): A =
     withDuckDb(kc.catalog) { conn =>
       seed(conn, kc.catalog)
+      nodeSeedSql.foreach(exec(conn, _))
       val h = harness(
         kc,
         customerColumns,
         metadataFilter = new MetadataFilterRewriter(enabled = true),
-        respond = refusingUngranted(permissions, node(conn))
+        respond = refusingUngranted(
+          permissions,
+          sql =>
+            if nodeRefuses then QuackResponse.Failed(QuackError.Permanent("column is denied"))
+            else node(conn)(sql)
+        )
       )
       val eff = effWith(permissions, columnPolicies, rowPolicies)
       def executor(record: Boolean): CatalogPreviewHandlers.PreviewExecutor =
@@ -327,6 +325,8 @@ class RestDiscoveryScopeSpec extends AnyFlatSpec with Matchers:
   private val maskEmail =
     RoleColumnPolicy("cp-mask", "r-1", "*", "main", "customer", "c_email", "mask", Some("'***'"))
 
+  // Explicit node output fixtures keep these handler tests independent of native enforcement.
+  // column_policy_engine_test checks masking, denied stars and predicates on real source scans.
   private val maskedRows = Right(
     Json.arr(
       Json.obj(
@@ -345,7 +345,12 @@ class RestDiscoveryScopeSpec extends AnyFlatSpec with Matchers:
   "a masked column" should "be listed and served as an ordinary column" in {
     for kc <- AllKinds do
       withClue(s"${kc.kind}: ") {
-        withHandlers(kc, permissions = grants(kc), columnPolicies = List(maskEmail)) { h =>
+        withHandlers(
+          kc,
+          permissions = grants(kc),
+          columnPolicies = List(maskEmail),
+          nodeSeedSql = List(s"UPDATE ${kc.catalog}.main.customer SET c_email = '***'")
+        ) { h =>
           columnsOf(h.table("acme", db(kc), "main", "customer", req()).unsafeRunSync()) shouldBe
             List("c_id" -> "INTEGER", "c_email" -> "VARCHAR", "ssn" -> "VARCHAR")
           h.rows("acme", db(kc), "main", "customer", req("order=c_id"))
@@ -360,7 +365,12 @@ class RestDiscoveryScopeSpec extends AnyFlatSpec with Matchers:
   "a masked text column" should "be filtered and ordered on its masked value" in {
     for kc <- AllKinds do
       withClue(s"${kc.kind}: ") {
-        withHandlers(kc, permissions = grants(kc), columnPolicies = List(maskEmail)) { h =>
+        withHandlers(
+          kc,
+          permissions = grants(kc),
+          columnPolicies = List(maskEmail),
+          nodeSeedSql = List(s"UPDATE ${kc.catalog}.main.customer SET c_email = '***'")
+        ) { h =>
           def ids(q: String) =
             h.rows("acme", db(kc), "main", "customer", req(s"select=c_id&$q"))
               .unsafeRunSync()
@@ -375,14 +385,16 @@ class RestDiscoveryScopeSpec extends AnyFlatSpec with Matchers:
       }
   }
 
-  // ColumnPolicyRewriter refuses any statement that reads a `deny` column, a star included, rather
-  // than drop the column from `SELECT *`. The edge's schema probe is therefore refused, fail-closed,
-  // and the whole table answers the one 404 of a missing object. Pinned so a rewriter change that
-  // starts dropping the column shows up here.
-  "a denied column" should "hide its whole table, since the rewriter refuses the probe's star" in {
+  // A native denial of the schema probe hides the table with the uniform missing-object response.
+  "a denied column" should "hide its whole table, when the node refuses the probe's star" in {
     for kc <- AllKinds do
       withClue(s"${kc.kind}: ") {
-        withHandlers(kc, permissions = grants(kc), columnPolicies = List(denySsn)) { h =>
+        withHandlers(
+          kc,
+          permissions = grants(kc),
+          columnPolicies = List(denySsn),
+          nodeRefuses = true
+        ) { h =>
           val missing = h.table("acme", db(kc), "main", "no_such_table", req()).unsafeRunSync()
           h.table("acme", db(kc), "main", "customer", req()).unsafeRunSync() shouldBe missing
           h.rows("acme", db(kc), "main", "customer", req()).unsafeRunSync().left.map(_._1) shouldBe
@@ -430,10 +442,7 @@ class RestDiscoveryScopeSpec extends AnyFlatSpec with Matchers:
       }
   }
 
-  // A column policy on the table itself makes the column rewriter expand the probe's `*`. The
-  // expansion prints the dotted column qualified (`"dotted"."a.b"`), which parses back as that one
-  // column, so the table is described and its rows are served, masked (#238; before, the probe
-  // was refused and the table answered the 404 of a missing object).
+  // The node returns the same schema with masked values, including dotted column names.
   it should "be served, masked, to a holder of a column policy on that table" in {
     val maskDotted =
       RoleColumnPolicy("cp-mask-d", "r-1", "*", "main", "dotted", "c_email", "mask", Some("'***'"))
@@ -442,7 +451,8 @@ class RestDiscoveryScopeSpec extends AnyFlatSpec with Matchers:
         withHandlers(
           kc,
           permissions = grant(kc.catalog, "main", "dotted") :: grants(kc),
-          columnPolicies = List(maskDotted)
+          columnPolicies = List(maskDotted),
+          nodeSeedSql = List(s"UPDATE ${kc.catalog}.main.dotted SET c_email = '***'")
         ) { h =>
           h.table("acme", db(kc), "main", "dotted", req()).unsafeRunSync().isRight shouldBe true
           h.rows("acme", db(kc), "main", "dotted", req())
@@ -459,7 +469,12 @@ class RestDiscoveryScopeSpec extends AnyFlatSpec with Matchers:
     val onlyTwo = RoleRowPolicy("rp-d", "r-1", "*", "main", "customer", "c_id = 2")
     for kc <- AllKinds do
       withClue(s"${kc.kind}: ") {
-        withHandlers(kc, permissions = grants(kc), rowPolicies = List(onlyTwo)) { h =>
+        withHandlers(
+          kc,
+          permissions = grants(kc),
+          rowPolicies = List(onlyTwo),
+          nodeSeedSql = List(s"DELETE FROM ${kc.catalog}.main.customer WHERE c_id <> 2")
+        ) { h =>
           h.rows("acme", db(kc), "main", "customer", req("select=c_id&order=c_id"))
             .unsafeRunSync()
             .map(ok => parse(ok.body).toOption.get) shouldBe

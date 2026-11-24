@@ -63,15 +63,10 @@ class EdgeRewritersHistorySpec extends AnyFlatSpec with Matchers:
     private val readers = Map(parentRow.name -> parent, branchRow.name -> branch)
     private val catalog = EdgeRewriters.columnCatalog(
       sup,
-      (_, td) => readers(td),
-      StatementInstruments.noop,
-      nodeQuery = (_, _) => IO.pure(Right(Nil)),
-      nodeTimeout = 1.second
+      (_, td) => readers(td)
     )
     def stable(pool: Option[PoolKey], cat: String = "sales"): Boolean =
       catalog.historyStable("acme", pool, cat, "tpch1", "customer").unsafeRunSync()
-    def columns(pool: Option[PoolKey], cat: String = "sales"): List[String] =
-      catalog.columnsOf("acme", pool, cat, "tpch1", "customer").unsafeRunSync()
 
   "The name-history check" should "read a branch pool's snapshot and history from the branch" in {
     val f = new Fixture
@@ -99,25 +94,4 @@ class EdgeRewritersHistorySpec extends AnyFlatSpec with Matchers:
   it should "answer false for a catalog that is no DuckLake database of the tenant" in {
     val f = new Fixture
     f.stable(ParentPool, cat = "pg_federated") shouldBe false
-  }
-
-  "The column lookup" should "read a branch pool's columns from the branch (#241)" in {
-    val f = new Fixture
-    // A column added on the branch only.
-    f.branch.columns = List("id", "name", "ssn")
-    f.columns(BranchPool) shouldBe List("id", "name", "ssn")
-    f.columns(ParentPool) shouldBe List("id", "name")
-  }
-
-  it should "read a statement with no pool, or another tenant's pool, from the alias's database" in {
-    val f = new Fixture
-    f.branch.columns = List("id", "name", "ssn")
-    f.columns(None) shouldBe List("id", "name")
-    f.columns(Some(PoolKey("globex", branchRow.name, "p"))) shouldBe List("id", "name")
-  }
-
-  it should "list nothing from DuckLake for a catalog that is no DuckLake database of the tenant" in {
-    val f = new Fixture
-    // The fixture's node answers no rows, so nothing lists the table.
-    f.columns(ParentPool, cat = "pg_federated") shouldBe Nil
   }

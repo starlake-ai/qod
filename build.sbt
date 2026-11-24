@@ -26,10 +26,10 @@ ThisBuild / scalacOptions += "-Xmax-inlines:64"
 ThisBuild / publishMavenStyle      := true
 ThisBuild / sonatypeCredentialHost := sonatypeCentralHost
 ThisBuild / sonatypeProfileName    := "ai.starlake"
-ThisBuild / publishTo := {
+ThisBuild / publishTo              := {
   val centralSnapshots = "https://central.sonatype.com/repository/maven-snapshots/"
   if (isSnapshot.value) Some("central-snapshots" at centralSnapshots)
-  else                  sonatypePublishToBundle.value
+  else sonatypePublishToBundle.value
 }
 ThisBuild / credentials += Credentials(
   "Sonatype Central Portal",
@@ -49,15 +49,17 @@ ThisBuild / scmInfo := Some(
 )
 ThisBuild / developers := List(
   Developer(
-    id    = "hayssams",
-    name  = "Hayssam Saleh",
+    id = "hayssams",
+    name = "Hayssam Saleh",
     email = "hayssam.saleh@starlake.ai",
-    url   = url("https://github.com/hayssams")
+    url = url("https://github.com/hayssams")
   )
 )
 
-lazy val genOpenApi    = taskKey[Unit]("Generate static/openapi.yaml in starlake-docs from the Tapir endpoints")
-lazy val genConfigDocs = taskKey[Unit]("Generate qod/reference/configuration.md in starlake-docs from ConfigRegistry")
+lazy val genOpenApi =
+  taskKey[Unit]("Generate static/openapi.yaml in starlake-docs from the Tapir endpoints")
+lazy val genConfigDocs =
+  taskKey[Unit]("Generate qod/reference/configuration.md in starlake-docs from ConfigRegistry")
 lazy val starlakeDocsDir = settingKey[File](
   "starlake-docs checkout the gen* tasks write into: STARLAKE_DOCS_DIR, else a sibling of the main checkout"
 )
@@ -236,7 +238,6 @@ lazy val root = (project in file("."))
       Dependencies.javaJwt,
       Dependencies.nimbusJoseJwt,
       Dependencies.jsqlParser,
-      Dependencies.jsqltranspiler,
       Dependencies.kubernetesClient,
       Dependencies.kubernetesServerMock,
       Dependencies.junit4,
@@ -268,7 +269,7 @@ lazy val root = (project in file("."))
     ),
     assembly / assemblyMergeStrategy := {
       case PathList("META-INF", "versions", "9", "module-info.class") => MergeStrategy.discard
-      case PathList("META-INF", xs @ _*) =>
+      case PathList("META-INF", xs @ _*)                              =>
         xs match {
           case "MANIFEST.MF" :: Nil => MergeStrategy.discard
           case "services" :: _      => MergeStrategy.concat
@@ -277,14 +278,14 @@ lazy val root = (project in file("."))
           // KubernetesQuackBackend) loads it on first .build() and dies
           // with "Cannot find vertx-version.txt on classpath" if the
           // assembly merge strategy discards it.
-          case "vertx" :: _         => MergeStrategy.first
+          case "vertx" :: _ => MergeStrategy.first
           // Jakarta Mail resolves its transports through these registry files
           // (javamail.default.address.map maps rfc822 -> smtp); discarding them
           // makes every real SMTP send from the jar fail with
           // "expected resource not found" (lockout notices, password resets).
           case x :: Nil if x.startsWith("javamail.") || x == "mailcap" =>
             MergeStrategy.first
-          case _                    => MergeStrategy.discard
+          case _ => MergeStrategy.discard
         }
       case "module-info.class"       => MergeStrategy.discard
       case "application.conf"        => MergeStrategy.concat
@@ -341,7 +342,9 @@ lazy val root = (project in file("."))
     Test / envVars ++= {
       if (sys.env.get("DUCKDB_CACHE_DIR").exists(_.trim.nonEmpty)) Map.empty[String, String]
       else {
-        Map("DUCKDB_CACHE_DIR" -> (mainCheckoutDir(baseDirectory.value) / ".duckdb").getAbsolutePath)
+        Map(
+          "DUCKDB_CACHE_DIR" -> (mainCheckoutDir(baseDirectory.value) / ".duckdb").getAbsolutePath
+        )
       }
     },
     // Specs that start a node through the real spawn script run this checkout's own qod-node build
@@ -369,7 +372,7 @@ lazy val root = (project in file("."))
     // their own `def main`), and `java -jar` then fails with
     // "no main manifest attribute".
     assembly / mainClass := Some("ai.starlake.quack.Main"),
-    starlakeDocsDir := sys.env
+    starlakeDocsDir      := sys.env
       .get("STARLAKE_DOCS_DIR")
       .filter(_.trim.nonEmpty)
       .map(file)

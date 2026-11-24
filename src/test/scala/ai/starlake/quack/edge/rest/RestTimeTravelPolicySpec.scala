@@ -16,7 +16,6 @@ class RestTimeTravelPolicySpec extends AnyFlatSpec with Matchers:
     RoleColumnPolicy("cp-1", "r-1", "*", "main", "customer", "c_email", "mask", Some("'***'"))
   private val row     = RoleRowPolicy("rp-1", "r-1", "*", "main", "customer", "c_region = 'X'")
   private val catalog = new ColumnCatalog.MapCatalog(
-    Map((kc.catalog, "main", "customer") -> List("c_id", "c_email", "c_region")),
     stable = Set((kc.catalog, "main", "customer"))
   )
   private val pipeline   = harness(kc, catalog, guarded = true)
@@ -36,12 +35,13 @@ class RestTimeTravelPolicySpec extends AnyFlatSpec with Matchers:
       sent should not include row.predicateSql
     }
 
-  it should "retain column masks and each snapshot clause once before native filtering" in
+  it should "retain each snapshot clause once without embedding policies" in
     statements.foreach { sql =>
       val sent = pipeline
         .run(sql, effWith(columnPolicies = List(mask), rowPolicies = List(row)))
         .fold(f => fail(f.toString), identity)
-      sent should include("'***'")
+      sent should include(sql)
+      sent should not include "'***'"
       sent should not include row.predicateSql
       if sql.contains(At) then {
         sent should include(s"$Ref $At")
@@ -57,9 +57,7 @@ class RestTimeTravelPolicySpec extends AnyFlatSpec with Matchers:
   it should "still refuse column-masked historical names whose bindings changed" in {
     val unstable = harness(
       kc,
-      new ColumnCatalog.MapCatalog(
-        Map((kc.catalog, "main", "customer") -> List("c_id", "c_email", "c_region"))
-      ),
+      new ColumnCatalog.MapCatalog(),
       guarded = true
     )
     unstable.run(s"SELECT * FROM $Ref $At", effWith(columnPolicies = List(mask))) match

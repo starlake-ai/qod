@@ -3,24 +3,8 @@ package ai.starlake.quack.edge.cls
 import ai.starlake.quack.model.PoolKey
 import cats.effect.IO
 
-/** Returns the ordered column list for one (catalog, schema, table) so the rewriter can expand
-  * `SELECT *`. Calls are routinely repeated for the same key (a busy dashboard issues `SELECT *
-  * FROM customer` over and over); implementations should cache. Failures return `Nil`, which the
-  * rewriter's unresolvedMode then judges (a masked column of a table with no list is refused, never
-  * forwarded). `tenant` is the asking principal's: a catalog name resolves among that tenant's
-  * databases only. `pool` is the pool the statement runs on: a catalog only the pool's nodes hold
-  * (a federated source, a `duckdb-file` or `memory` database) is read there, and with no pool it
-  * has no list.
-  */
+/** DuckLake name-history checks retained while policies are keyed on current names. */
 trait ColumnCatalog:
-  def columnsOf(
-      tenant: String,
-      pool: Option[PoolKey],
-      catalog: String,
-      schemaName: String,
-      tableName: String
-  ): IO[List[String]]
-
   /** Whether the name has meant one and the same table, with the same column names, in every
     * snapshot the catalog holds (`DuckLakeCatalogReader.nameHistoryStable`): what a time-travel
     * read under a column or row policy needs, since policies match today's names. False when it
@@ -36,52 +20,13 @@ trait ColumnCatalog:
   ): IO[Boolean] =
     IO.pure(false)
 
-  /** The column names `tableName` had at DuckLake snapshot `snapshot`, when the catalog can read
-    * them (`DuckLakeCatalogReader.columnsAt`), else None: the caller then judges the current
-    * columns. `Some(Nil)` when the table had no columns there (it did not exist).
-    */
-  def columnsAt(
-      tenant: String,
-      pool: Option[PoolKey],
-      catalog: String,
-      schemaName: String,
-      tableName: String,
-      snapshot: Long
-  ): IO[Option[List[String]]] =
-    IO.pure(None)
-
 object ColumnCatalog:
-
-  /** Test-only static catalog. Construct with the (catalog, schema, table) -> column-list map you
-    * want. Not cached; tests run synchronously.
-    */
-  final class MapCatalog(
-      rows: Map[(String, String, String), List[String]],
-      stable: Set[(String, String, String)] = Set.empty,
-      atSnapshot: Map[(String, String, String, Long), List[String]] = Map.empty
-  ) extends ColumnCatalog:
-    def columnsOf(
-        tenant: String,
-        pool: Option[PoolKey],
-        c: String,
-        s: String,
-        t: String
-    ): IO[List[String]] =
-      IO.pure(rows.getOrElse((c, s, t), Nil))
+  /** Static history fixture; production uses [[CachedColumnCatalog]]. */
+  final class MapCatalog(stable: Set[(String, String, String)] = Set.empty) extends ColumnCatalog:
     override def historyStable(
         tenant: String,
         pool: Option[PoolKey],
         c: String,
         s: String,
         t: String
-    ): IO[Boolean] =
-      IO.pure(stable.contains((c, s, t)))
-    override def columnsAt(
-        tenant: String,
-        pool: Option[PoolKey],
-        c: String,
-        s: String,
-        t: String,
-        snapshot: Long
-    ): IO[Option[List[String]]] =
-      IO.pure(atSnapshot.get((c, s, t, snapshot)))
+    ): IO[Boolean] = IO.pure(stable.contains((c, s, t)))

@@ -38,26 +38,24 @@ class ProtectedWriteGuardSpec extends AnyFlatSpec with Matchers:
 
   // A catalog that knows customer's columns, so SELECT * expands and masks c_email.
   private def guardWithCls(clsOn: Boolean = true, rlsOn: Boolean = true): ProtectedWriteGuard =
-    val cat = new ColumnCatalog.MapCatalog(
-      Map(("acme_tpch", "tpch1", "customer") -> List("c_id", "c_email", "c_region"))
-    )
+    val cat = new ColumnCatalog.MapCatalog()
     new ProtectedWriteGuard(cat, clsEnabled = clsOn, rlsEnabled = rlsOn)
 
   // A guard whose catalog does NOT know customer, so the Deny-mode oracle cannot resolve it.
   private def guardEmptyCatalog: ProtectedWriteGuard =
     new ProtectedWriteGuard(
-      new ColumnCatalog.MapCatalog(Map.empty),
+      new ColumnCatalog.MapCatalog(),
       clsEnabled = true,
       rlsEnabled = true
     )
 
-  "check" should "allow a write reading only unmasked columns of a CLS table" in {
+  "check" should "refuse a write reading only unmasked columns of a CLS table" in {
     guardWithCls().check(
       "INSERT INTO tpch1.scratch SELECT c_id FROM tpch1.customer",
       StatementKind.Dml,
       eff(tenantUser, cols = List(maskEmail)),
       ctx
-    ) shouldBe Allow
+    ) shouldBe a[Deny]
   }
 
   it should "deny a write projecting a masked column" in {
@@ -230,14 +228,14 @@ class ProtectedWriteGuardSpec extends AnyFlatSpec with Matchers:
     ) shouldBe a[Deny]
   }
 
-  it should "allow a benign multi-statement batch that reads only unmasked columns" in {
+  it should "refuse a batch reading even unmasked columns of a CLS table" in {
     guardWithCls().check(
       "INSERT INTO tpch1.x SELECT o_id FROM tpch1.orders; " +
         "INSERT INTO tpch1.y SELECT c_id FROM tpch1.customer",
       StatementKind.Dml,
       eff(tenantUser, cols = List(maskEmail)),
       ctx
-    ) shouldBe Allow
+    ) shouldBe a[Deny]
   }
 
   it should "deny an INSERT VALUES that embeds a subquery reading a masked column" in {
@@ -623,13 +621,13 @@ class ProtectedWriteGuardSpec extends AnyFlatSpec with Matchers:
         }
     }
 
-  it should "still allow a write reading only unmasked columns through backticks" in {
+  it should "refuse a write reading unmasked CLS columns through backticks" in {
     guardWithCls().check(
       "INSERT INTO tpch1.scratch SELECT `c_id` FROM `tpch1`.`customer`",
       StatementKind.Dml,
       eff(tenantUser, cols = List(maskEmail)),
       ctx
-    ) shouldBe Allow
+    ) shouldBe a[Deny]
   }
 
   // Audit F18: the classifier reads a batch's first statement only, so a batch led by a read
@@ -688,18 +686,18 @@ class ProtectedWriteGuardSpec extends AnyFlatSpec with Matchers:
       }
     }
 
-  it should "still allow a batch that reads nothing protected" in {
+  it should "refuse a batch reading unmasked CLS columns" in {
     classified(
       "SELECT 1; INSERT INTO tpch1.scratch SELECT c_id FROM tpch1.customer",
       eff(tenantUser, cols = List(maskEmail))
-    ) shouldBe Allow
+    ) shouldBe a[Deny]
     maskAndRow.foreach { e =>
       classified("SELECT 1; INSERT INTO tpch1.scratch VALUES (1)", e) shouldBe Allow
       classified("SELECT 1; SELECT 2", e) shouldBe Allow
     }
   }
 
-  "a single SELECT carrying a semicolon" should "still be left to the rewriters" in
+  "a single SELECT carrying a semicolon" should "reach native enforcement as one statement" in
     List(
       "SELECT c_email FROM tpch1.customer;",
       "SELECT c_email FROM tpch1.customer ;  -- trailing",
@@ -719,13 +717,7 @@ class ProtectedWriteGuardSpec extends AnyFlatSpec with Matchers:
 
   // A catalog that also knows the unpoliced sinks, so a stripped CTE name resolves physically.
   private def guardWithSinks: ProtectedWriteGuard =
-    val cat = new ColumnCatalog.MapCatalog(
-      Map(
-        ("acme_tpch", "tpch1", "customer") -> List("c_id", "c_email", "c_region"),
-        ("acme_tpch", "tpch1", "leak")     -> List("c_email"),
-        ("acme_tpch", "tpch1", "scratch")  -> List("c_id", "c_email")
-      )
-    )
+    val cat = new ColumnCatalog.MapCatalog()
     new ProtectedWriteGuard(cat, clsEnabled = true, rlsEnabled = true)
 
   private val maskDeny = maskEmail.copy(id = "cp-2", action = "deny", transformSql = None)
@@ -760,13 +752,13 @@ class ProtectedWriteGuardSpec extends AnyFlatSpec with Matchers:
       }
     }
 
-  it should "still allow a CTE that reads only unmasked columns" in {
+  it should "refuse a write whose CTE reads unmasked CLS columns" in {
     guardWithSinks.check(
       "WITH x AS (SELECT c_id FROM tpch1.customer) INSERT INTO scratch SELECT c_id FROM x",
       StatementKind.Dml,
       eff(tenantUser, cols = List(maskEmail)),
       ctx
-    ) shouldBe Allow
+    ) shouldBe a[Deny]
   }
 
   it should "be denied when both the statement and its SELECT carry a WITH" in {
@@ -910,7 +902,6 @@ class ProtectedWriteGuardSpec extends AnyFlatSpec with Matchers:
   private def guardWithHistory(stable: Set[(String, String, String)]): ProtectedWriteGuard =
     new ProtectedWriteGuard(
       new ColumnCatalog.MapCatalog(
-        Map(("acme_tpch", "tpch1", "customer") -> List("c_id", "c_email", "c_region")),
         stable
       ),
       clsEnabled = true,

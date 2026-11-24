@@ -2,12 +2,7 @@ package ai.starlake.quack.edge.policy
 
 import ai.starlake.acl.model.{Config, DenyReason, TableRef}
 import ai.starlake.acl.parser.{SqlParser, StatementResult, TableExtractor, TableQualifier, Verb}
-import ai.starlake.quack.edge.cls.{
-  ColumnCatalog,
-  ColumnPolicyRewriter,
-  SchemaContext,
-  UnresolvedMode
-}
+import ai.starlake.quack.edge.cls.{ColumnCatalog, SchemaContext}
 import ai.starlake.quack.model.StatementKind
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.sql.{ParserInput, SqlCommentStripper}
@@ -15,10 +10,7 @@ import cats.effect.unsafe.implicits.global
 import net.sf.jsqlparser.parser.{CCJSqlParser, CCJSqlParserUtil}
 import net.sf.jsqlparser.parser.feature.{Feature, FeatureConfiguration}
 import net.sf.jsqlparser.statement.Statement
-import net.sf.jsqlparser.statement.create.table.CreateTable
-import net.sf.jsqlparser.statement.create.view.CreateView
-import net.sf.jsqlparser.statement.insert.Insert
-import net.sf.jsqlparser.statement.select.{Select, Values}
+import net.sf.jsqlparser.statement.select.Select
 
 import scala.jdk.CollectionConverters._
 
@@ -29,8 +21,8 @@ enum GuardOutcome:
 /** Closes the CLS/RLS write-wrapping bypass (spec 2026-08-20-protected-write-guard). For a
   * non-SELECT statement, or any batch of more than one statement, from a principal with enforced
   * policies, denies when the read side exposes a protected table: any read of an RLS table, or a
-  * CLS table whose masked columns actually appear in the read. Any read it cannot isolate denies
-  * fail-closed. Never rewrites; only allows or denies.
+  * CLS-covered table. Any read it cannot isolate denies fail-closed. Never rewrites; only allows or
+  * denies.
   *
   * A write aimed at a protected table is judged too ([[DirectWrites]]). The gateway only admits a
   * plain INSERT of new rows for a row-policy table; the native node currently refuses all writes to
@@ -45,15 +37,13 @@ enum GuardOutcome:
   * as `histogram('t', c)`), a SQL-valued setting, a batch that moves the schema or search path
   * ([[SessionScopeScreen]]: every bare name after it resolves past the policy keyed on the default
   * schema), and a two-part name headed by an attached catalog (`acme_tpch.customer`), which DuckDB
-  * binds catalog-first while the rewriters and this guard's policy match read it schema-first
-  * (audit F20, F22). Native RLS reads use the bound plan instead of these parser screens.
-  * Change-feed and historical-name checks remain because they need additional table identity
-  * support. A principal without policies is judged by the node alone.
+  * binds catalog-first while this guard's policy match reads it schema-first (audit F20, F22).
+  * Native RLS reads use the bound plan instead of these parser screens. Change-feed and
+  * historical-name checks remain because they need additional table identity support. A principal
+  * without policies is judged by the node alone.
   *
-  * The guard owns its CLS detection oracle: it builds a `ColumnPolicyRewriter` internally in
-  * `UnresolvedMode.Deny`, so a table whose columns the catalog cannot enumerate denies rather than
-  * passing through unexpanded. Analysis is per statement: a batch is allowed only when every
-  * statement is clean, so a benign write cannot launder a protected read in a sibling statement.
+  * Writes and batches reading a CLS-covered table are refused, including projections containing
+  * only unprotected columns. Native write-check semantics must exist before relaxing this guard.
   *
   * `clsEnabled` and `rlsEnabled` are required, not defaulted (final review I1): false switches the
   * guard off for that kind of policy, which a construction site must say rather than forget.
@@ -66,10 +56,6 @@ final class ProtectedWriteGuard(
 
   import GuardOutcome._
 
-  // Deny-mode oracle: an unresolvable protected table must deny, not pass through.
-  private val oracle =
-    new ColumnPolicyRewriter(catalog, unresolvedMode = UnresolvedMode.Deny, enabled = true)
-
   /** `clientDataScans`: the statement came through the native Quack front door, so a DuckDB 2.0
     * client's scan_data_from_quack_client source is set aside (TableExtractor.gatedUnsupported).
     * False denies it as an incomplete extraction.
@@ -81,8 +67,8 @@ final class ProtectedWriteGuard(
       ctx: SchemaContext,
       clientDataScans: Boolean = false
   ): GuardOutcome =
-    // The text every policy step reads (MisreadNames.normalize): the column rewriter parses this
-    // one, so this guard must too, or a word JSqlParser misreads would hide a read from it alone.
+    // Normalize only the guard's input so parser-specific spellings cannot hide reads.
+    // The router sends the caller's original text to the native engine.
     val colPolicies = if clsEnabled then eff.columnPolicies else Nil
     val nativeRead  = rlsEnabled && kind == StatementKind.Select && !isBatch(statement)
     val rowPolicies = if rlsEnabled && !nativeRead then eff.rowPolicies else Nil
@@ -100,15 +86,11 @@ final class ProtectedWriteGuard(
         case Some(reason) => Deny(s"access denied: $reason")
         case None         => Allow
     else if colPolicies.isEmpty && rowPolicies.isEmpty then Allow
-    // A method call the column rewriter could not write as a plain call: refused there too.
+    // A method call this parser cannot analyze with certainty fails closed.
     else if normalized.refusal.isDefined then Deny(s"access denied: ${normalized.refusal.get}")
     else
-      // Every kind, a plain SELECT included: a table named in a string is invisible to the
-      // rewriters, so the read would come back unfiltered and unmasked. A quoted name holding a
-      // dot is matched by the rewriters as a qualified name, not as the one table DuckDB reads
-      // (DottedIdentifierScreen). A SQL-valued setting runs SQL nobody reads, and a batch that
-      // moves the schema or search path resolves its bare names past the policies. A function
-      // returning the statement's text would show the policies applied to it.
+      // Retain conservative screens where this gateway cannot identify a source or scope.
+      // Native scan enforcement is independent of these write/history checks.
       DottedIdentifierScreen
         .find(sql)
         .orElse(CatalogReachingCalls.find(sql).map(CatalogReachingCalls.denyReason))
@@ -171,9 +153,8 @@ final class ProtectedWriteGuard(
   /** More than one statement, as the lexer separates them (a `;` inside a literal, a quoted name or
     * a comment does not count, nor does a trailing one). `kind` describes only a batch's first
     * statement, and the node runs all of them: `SELECT 1; INSERT INTO t SELECT c_email FROM
-    * customer` classifies Select, and the rewriters, whose parse keeps only the first statement,
-    * pass it through. So a batch is never waved through as a read: every statement is analysed like
-    * a write's, a read of a protected table in any of them included.
+    * customer` classifies Select. A batch is never waved through as one read: every statement is
+    * analysed like a write's, a read of a protected table in any of them included.
     */
   private def isBatch(sql: String): Boolean =
     SqlCommentStripper.splitStatements(sql).lengthCompare(1) > 0
@@ -220,8 +201,7 @@ final class ProtectedWriteGuard(
         PolicyCoverage.covers(c, s, tb, t.database, t.schema, t.table)
       }
 
-    // A plain read in a batch is denied with its own reason: the guard, not the rewriters, is
-    // what stops it (see isBatch), and "read into a write statement" would not describe it.
+    // A plain read in a batch gets a reason distinct from a protected read inside a write.
     def denial(ast: Statement): String => String = ast match
       case _: Select if pairs.lengthCompare(1) > 0 => batchDeny
       case _                                       => deny
@@ -327,7 +307,7 @@ final class ProtectedWriteGuard(
                 else if colTarget.nonEmpty &&
                   DirectWrites.readsProtectedColumn(ast, protectedColumns)
                 then GuardOutcome.Deny(colWriteDeny(colTarget.head.table))
-                else if colHit then preciseCls(ast, eff, ctx, firstCovered(reads, colKeys), deny)
+                else if colHit then GuardOutcome.Deny(deny(firstCovered(reads, colKeys)))
                 else extractedRest(e, clientDataScans)
       case _: StatementResult.ParseError  => GuardOutcome.Deny(IncompleteDeny)
       case _: StatementResult.ControlFlow => GuardOutcome.Allow
@@ -367,48 +347,10 @@ final class ProtectedWriteGuard(
       GuardOutcome.Deny(IncompleteDeny)
     else GuardOutcome.Allow
 
-  /** CLS arm: allow only if this statement's inner SELECT masks nothing. */
-  private def preciseCls(
-      ast: Statement,
-      eff: EffectiveSet,
-      ctx: SchemaContext,
-      protectedName: String,
-      deny: String => String
-  ): GuardOutcome =
-    innerSelect(ast) match
-      case Some(sel) =>
-        oracle.rewrite(sel.toString, StatementKind.Select, eff, ctx).unsafeRunSync() match
-          case ColumnPolicyRewriter.Passthrough => GuardOutcome.Allow
-          case _                                => GuardOutcome.Deny(deny(protectedName))
-      case None => GuardOutcome.Deny(deny(protectedName))
-
-  /** This statement's inner read SELECT for the write shapes we model precisely, else None. */
-  private def innerSelect(ast: Statement): Option[Select] =
-    ast match
-      // An INSERT ... VALUES exposes a Values node (a Select subtype), not a query the
-      // oracle can mask. Exclude it so a VALUES that embeds a subquery read of a covered
-      // table has no isolable query select and fails closed.
-      case i: Insert =>
-        Option(i.getSelect).filterNot(_.isInstanceOf[Values]).flatMap(withStatementCtes(i, _))
-      case c: CreateTable => Option(c.getSelect)
-      case v: CreateView  => Option(v.getSelect)
-      case _              => None
-
-  /** JSqlParser hangs a statement-level `WITH x AS (...) INSERT INTO t SELECT * FROM x` on the
-    * Insert, not on its Select, so the bare Select reads `x` as a physical table while DuckDB binds
-    * it to the CTE (audit F19). Re-attach those CTEs so the oracle sees what DuckDB reads. A Select
-    * that carries its own WITH too has two scopes one list cannot model: None, so it denies.
-    */
-  private def withStatementCtes(i: Insert, sel: Select): Option[Select] =
-    val outer = Option(i.getWithItemsList).map(_.asScala.toList).getOrElse(Nil)
-    val inner = Option(sel.getWithItemsList).map(_.asScala.toList).getOrElse(Nil)
-    if outer.isEmpty then Some(sel)
-    else if inner.nonEmpty then None
-    else Some(sel.withWithItemsList(outer.asJava))
-
   /** Some(refusal) when a statement of `text` holds a call JSqlParser kept fewer arguments of than
     * its text gives (each statement parsed alone, so the parser's token positions are its own), or,
-    * under column policies, a call left in method form ([[ResidualColumns.methodCallLeft]]).
+    * under column policies, a call left in method form
+    * ([[PolicyExpressionAnalysis.methodCallLeft]]).
     */
   private def callRefusal(text: String, columnPolicies: Boolean): Option[String] =
     ai.starlake.sql.SqlCommentStripper
@@ -417,12 +359,12 @@ final class ProtectedWriteGuard(
       .flatMap { (from, until) =>
         val one = text.substring(from, until)
         scala.util.Try(CCJSqlParserUtil.parse(one)).toOption.flatMap { stmt =>
-          ai.starlake.quack.edge.cls.ResidualColumns
+          ai.starlake.quack.edge.cls.PolicyExpressionAnalysis
             .droppedArgument(one, List(stmt))
             .orElse(
               Option
                 .when(columnPolicies)(
-                  ai.starlake.quack.edge.cls.ResidualColumns.methodCallLeft(stmt)
+                  ai.starlake.quack.edge.cls.PolicyExpressionAnalysis.methodCallLeft(stmt)
                 )
                 .flatten
             )
@@ -519,7 +461,7 @@ object ProtectedWriteGuard:
   /** A guard that admits everything: for specs isolating something else, never for production. */
   val disabled: ProtectedWriteGuard =
     new ProtectedWriteGuard(
-      new ColumnCatalog.MapCatalog(Map.empty),
+      new ColumnCatalog.MapCatalog(),
       clsEnabled = false,
       rlsEnabled = false
     )

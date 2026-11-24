@@ -24,14 +24,9 @@ class ProtectedWriteGuardDirectWriteSpec extends AnyFlatSpec with Matchers:
 
   import PolicyPipelineFixture.*
 
-  private val catalog = new ColumnCatalog.MapCatalog(
-    Map(
-      ("memory", "main", "secret") -> List("id", "owner", "a", "b", "email"),
-      ("memory", "main", "other")  -> List("id", "v", "k", "email")
-    )
-  )
-  private val guard = new ProtectedWriteGuard(catalog, clsEnabled = true, rlsEnabled = true)
-  private val ctx   = SchemaContext(Some("memory"), Some("main"), Set.empty)
+  private val catalog = new ColumnCatalog.MapCatalog()
+  private val guard   = new ProtectedWriteGuard(catalog, clsEnabled = true, rlsEnabled = true)
+  private val ctx     = SchemaContext(Some("memory"), Some("main"), Set.empty)
 
   private val rowEff =
     effWith(rowPolicies = List(RoleRowPolicy("rp", "r", "*", "main", "secret", "owner = 'alice'")))
@@ -42,13 +37,13 @@ class ProtectedWriteGuardDirectWriteSpec extends AnyFlatSpec with Matchers:
     List(RoleColumnPolicy("cd", "r", "*", "main", "secret", "email", "deny", None))
   )
 
-  private val RowWrite   = "writes to a row-policy table are refused"
-  private val ColWrite   = "cannot read a masked or denied column"
+  private val RowWrite = "writes to a row-policy table are refused"
+  private val ColWrite = "cannot read a masked or denied column"
   // The method-call screen every policy step runs first refuses a method call on a name of more
   // than two parts, naming no table.
   private val MethodScreen = "cannot be read under column policies; write it as a function call"
-  private val ReadInto   = "cannot be read into a write statement"
-  private val Positional =
+  private val ReadInto     = "cannot be read into a write statement"
+  private val Positional   =
     "cannot use a positional reference (#n); name the columns instead"
   private val SchemaRefusal = "holds a table protected by a column/row policy"
   private val DdlRefusal    =

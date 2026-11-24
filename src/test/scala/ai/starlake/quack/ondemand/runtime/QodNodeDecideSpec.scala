@@ -140,7 +140,7 @@ class QodNodeDecideSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
         readOnlyCatalogs = ReadOnlyCatalogs.none,
         versions = ai.starlake.quack.edge.authz.PolicyVersions.zero,
         rowPoliciesEnabled = true,
-        nativeColumnPoliciesEnabled = true
+        columnPoliciesEnabled = true
       )
       val decideRoute = new DecideRoute(
         keys,

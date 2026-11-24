@@ -38,7 +38,7 @@ class PolicyRouteSpec extends AnyFlatSpec with Matchers:
     versions = PolicyVersions.zero,
     readOnlyCatalogs = ReadOnlyCatalogs.none,
     rowPoliciesEnabled = true,
-    nativeColumnPoliciesEnabled = true
+    columnPoliciesEnabled = true
   )
   private val route                                   = new PolicyRoute(keys, () => clock)
   private def mint(rows: List[RoleRowPolicy]): String =

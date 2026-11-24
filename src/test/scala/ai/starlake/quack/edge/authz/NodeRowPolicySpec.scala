@@ -143,7 +143,7 @@ class NodeRowPolicySpec extends AnyFlatSpec with Matchers:
   }
 
   it should "leave native reads to the node while retaining the protected-write guard" in {
-    val catalog = new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(Map.empty)
+    val catalog = new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog()
     val native  = new ai.starlake.quack.edge.policy.ProtectedWriteGuard(
       catalog,
       clsEnabled = false,

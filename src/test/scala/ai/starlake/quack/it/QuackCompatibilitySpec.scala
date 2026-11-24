@@ -4,7 +4,7 @@ import ai.starlake.quack.QuackNativeConfig
 import ai.starlake.quack.edge.*
 import ai.starlake.quack.edge.adapter.*
 import ai.starlake.quack.edge.quack.*
-import ai.starlake.quack.edge.cls.{ColumnCatalog, ColumnPolicyRewriter}
+import ai.starlake.quack.edge.cls.ColumnCatalog
 import ai.starlake.quack.edge.meta.MetadataFilterRewriter
 import ai.starlake.quack.model.*
 import ai.starlake.quack.ondemand.PoolSupervisor
@@ -167,20 +167,12 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
     decide.decide = (_, d) => aliceRefusal(d).toLeft(())
     val client = new QuackHttpClient(new org.apache.arrow.memory.RootAllocator())
     // The column catalog the CLS resolver needs, mirroring the node's tables.
-    val columns = new ColumnCatalog.MapCatalog(
-      Map(
-        ("acme_db", "tpch1", "customer") -> List("c_custkey", "c_name"),
-        ("acme_db", "tpch1", "ids")      -> List("id"),
-        ("acme_db", "tpch1", "secret")   -> List("x"),
-        ("acme_db", "tpch1", "Clés")     -> List("id", "secret")
-      )
-    )
+    val columns = new ColumnCatalog.MapCatalog()
     router = new FlightSqlRouter(
       sup,
       new SessionRegistry,
       tracker,
       new QuackHttpAdapter(client, tracker, keys),
-      columnPolicyRewriter = new ColumnPolicyRewriter(columns),
       metadataFilterRewriter = new MetadataFilterRewriter(enabled = true),
       protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
     )

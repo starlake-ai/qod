@@ -1383,7 +1383,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       .getOrElse(fail(s"no USE statement found in sent SQL: $capturedSql"))
     useSchema2 shouldBe "curated"
 
-  // ---- ColumnPolicyRewriter integration tests ----
+  // ---- Native policy routing and gateway guards ----
 
   private val tenantUser = ai.starlake.quack.ondemand.state.RbacUser(
     "u-1",
@@ -1397,15 +1397,11 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
   ): ai.starlake.quack.ondemand.rbac.EffectiveSet =
     ai.starlake.quack.ondemand.rbac.EffectiveSet(tenantUser, Nil, Nil, Nil, Nil, ps)
 
-  /** Builds a router backed by a fresh single-node InMemory pool, with a custom rewriter. Returns
-    * (router, lastSqlSentToBackend ref, node). `metadataFilter` is the mounted filter, as `Main`
-    * mounts it.
+  /** Builds a router backed by a fresh single-node InMemory pool, with metadata and write guards.
+    * Returns (router, lastSqlSentToBackend ref, node). `metadataFilter` is the mounted filter, as
+    * `Main` mounts it.
     */
-  private def setupWithRewriter(
-      rewriter: ai.starlake.quack.edge.cls.ColumnPolicyRewriter =
-        new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
-          new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(Map.empty)
-        ),
+  private def setupWithPolicies(
       metadataFilter: ai.starlake.quack.edge.meta.MetadataFilterRewriter = mountedFilter,
       readers: Int = 1,
       stub: () => QuackResponse = defaultStub,
@@ -1478,336 +1474,11 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       sessions,
       tracker,
       adapter,
-      columnPolicyRewriter = rewriter,
       metadataFilterRewriter = metadataFilter,
       protectedWriteGuard = protectedWriteGuard,
       attachedCatalogsOf = attachedCatalogsOf
     )
     (router, () => capturedSql, node)
-
-  it should "rewrite a SELECT c_email projection through to the backend masked" in:
-    val policies = List(
-      ai.starlake.quack.ondemand.state.RoleColumnPolicy(
-        "cp-1",
-        "r-1",
-        "*",
-        "main",
-        "customer",
-        "c_email",
-        "mask",
-        Some("'***'")
-      )
-    )
-    val rewriter = new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
-      new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(
-        Map(("memory", "main", "customer") -> List("c_id", "c_email"))
-      ),
-      enabled = true
-    )
-    val (router, capturedSql, _) = setupWithRewriter(rewriter)
-    val out                      = router
-      .execute(
-        "cls-1",
-        "alice",
-        poolKey,
-        "SELECT c_email FROM main.customer",
-        effectiveSet = Some(effWithPolicies(policies))
-      )
-      .unsafeRunSync()
-    out shouldBe a[Right[?, ?]]
-    capturedSql() should include("'***'")
-
-  it should "expand SELECT * via the catalog and mask covered columns" in:
-    val policies = List(
-      ai.starlake.quack.ondemand.state.RoleColumnPolicy(
-        "cp-2",
-        "r-1",
-        "*",
-        "main",
-        "customer",
-        "c_email",
-        "mask",
-        Some("'***'")
-      )
-    )
-    val rewriter = new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
-      new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(
-        Map(("memory", "main", "customer") -> List("c_id", "c_email"))
-      ),
-      enabled = true
-    )
-    val (router, capturedSql, _) = setupWithRewriter(rewriter)
-    val out                      = router
-      .execute(
-        "cls-2",
-        "alice",
-        poolKey,
-        "SELECT * FROM main.customer",
-        effectiveSet = Some(effWithPolicies(policies))
-      )
-      .unsafeRunSync()
-    out shouldBe a[Right[?, ?]]
-    // The star was expanded; the masked column carries the literal, not the column name.
-    capturedSql() should include("c_id")
-    capturedSql() should include("'***'")
-
-  it should "deny a SELECT c_ssn when a deny policy matches" in:
-    val policies = List(
-      ai.starlake.quack.ondemand.state.RoleColumnPolicy(
-        "cp-3",
-        "r-1",
-        "*",
-        "main",
-        "customer",
-        "c_ssn",
-        "deny",
-        None
-      )
-    )
-    val rewriter = new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
-      new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(
-        Map(("memory", "main", "customer") -> List("c_id", "c_ssn"))
-      ),
-      enabled = true
-    )
-    val (router, _, _) = setupWithRewriter(rewriter)
-    val out            = router
-      .execute(
-        "cls-3",
-        "alice",
-        poolKey,
-        "SELECT c_ssn FROM main.customer",
-        effectiveSet = Some(effWithPolicies(policies))
-      )
-      .unsafeRunSync()
-    out shouldBe a[Left[?, ?]]
-    val failure = out.left.get
-    failure shouldBe a[RouterFailure.AccessDenied]
-    failure.reason should include("access denied")
-
-  // ---- a rewrite never reaches beyond what the gate authorized ----
-  //
-  // The column policy rewrite once printed a CTE reference schema-qualified (`FROM t` became
-  // `FROM main.t`), and a qualified name never binds to a CTE: the node read the real table `t`,
-  // which the ACL gate never saw. The router now refuses any rewrite that reaches a table the
-  // original did not, and re-validates the rewrite for the same principal.
-
-  private val maskCustomerEmailCls =
-    ai.starlake.quack.ondemand.state.RoleColumnPolicy(
-      "cp-cte",
-      "r-1",
-      "*",
-      "main",
-      "customer",
-      "c_email",
-      "mask",
-      Some("'***'")
-    )
-
-  /** A column policy rewrite that schema-qualifies every `FROM t`, as the old resolver did. */
-  private def qualifyingRewriter(qualified: String) =
-    new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
-      new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(Map.empty),
-      inner = new ai.starlake.quack.edge.cls.SchemaAwareSqlRewriter:
-        def rewrite(
-            sql: String,
-            schema: Map[String, List[String]],
-            policies: List[ai.starlake.quack.ondemand.state.RoleColumnPolicy],
-            defaultCatalog: Option[String],
-            defaultSchema: Option[String],
-            unresolvedMode: ai.starlake.quack.edge.cls.UnresolvedMode,
-            homes: Map[String, (String, String)]
-        ) = ai.starlake.quack.edge.cls.RewriteOutcome.Rewritten(qualified)
-      ,
-      enabled = true
-    )
-
-  "a policy rewrite" should "be refused when it reaches a table the original statement did not" in:
-    val sql = "WITH secret AS (SELECT c_id AS v FROM customer WHERE c_email LIKE '%') " +
-      "SELECT v FROM secret"
-    val (router, capturedSql, _) = setupWithRewriter(
-      qualifyingRewriter(
-        "WITH secret AS (SELECT c_id AS v FROM customer WHERE '***' LIKE '%') " +
-          "SELECT v FROM main.secret"
-      )
-    )
-    val out = router
-      .execute(
-        "cls-cte-1",
-        "alice",
-        poolKey,
-        sql,
-        Some(effWithPolicies(List(maskCustomerEmailCls)))
-      )
-      .unsafeRunSync()
-    out shouldBe a[Left[?, ?]]
-    out.left.get shouldBe a[RouterFailure.AccessDenied]
-    // A policy holder is told the rewrite reached more, not what: the list is read from the
-    // rewritten statement, which holds the policies' expressions.
-    out.left.get.reason should include(ai.starlake.quack.edge.policy.RewriteScope.ReachesBeyond)
-    out.left.get.reason should not include "memory.main.secret"
-    router.history.snapshot(1).head.error.getOrElse("") should not include "memory.main.secret"
-    capturedSql() shouldBe ""
-
-  it should "log its refusal for a policy holder as one line, whatever the reason quotes" in:
-    // The reason quotes the parser's message about the rewrite, which can hold the caller's text.
-    val (router, _, _) = setupWithRewriter(
-      qualifyingRewriter("SELECT c_id FROM customer WHERE c_email = 'x\nFORGED: line' AND (((")
-    )
-    val (out, events) =
-      ai.starlake.quack.ondemand.runtime.testkit.LogCapture
-        .logged("ai.starlake.quack.edge.FlightSqlRouter") {
-          router
-            .execute(
-              "cls-log-1",
-              "alice",
-              poolKey,
-              "SELECT c_id FROM customer WHERE c_email = 'x'",
-              Some(effWithPolicies(List(maskCustomerEmailCls)))
-            )
-            .unsafeRunSync()
-        }
-    out.left.get.reason should include(ai.starlake.quack.edge.policy.RewriteScope.CannotAuthorize)
-    val lines = events.map(_.getFormattedMessage).filter(_.startsWith("policy rewrite refused"))
-    lines should have size 1
-    lines.head should include(ai.starlake.quack.edge.policy.RewriteScope.CannotAuthorize)
-    lines.head.exists(_.isControl) shouldBe false
-
-  it should "run an ordinary CTE query of a policy holder, the CTE reference left unqualified" in:
-    val (router, capturedSql, _) = setupWithRewriter(
-      new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
-        new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(
-          Map(("memory", "main", "customer") -> List("c_id", "c_email"))
-        ),
-        enabled = true
-      )
-    )
-    router
-      .execute(
-        "cls-cte-3",
-        "alice",
-        poolKey,
-        "WITH t AS (SELECT c_id AS a FROM customer WHERE c_email LIKE '%') SELECT a FROM t",
-        Some(effWithPolicies(List(maskCustomerEmailCls)))
-      )
-      .unsafeRunSync() shouldBe a[Right[?, ?]]
-    capturedSql() should include("'***' LIKE '%'")
-    capturedSql() should include("SELECT a FROM t")
-    capturedSql() should not include "main.t"
-
-  // The star expansion quotes a catalog column the screen would refuse as a caller-written name
-  // (`c."a@b"`, `c."x]"`): the caller wrote no such token, so the rewrite scope admits the rewrite.
-  "a star expansion over an unusual column name" should "keep its predicate out of the submitted SQL" in:
-    val (router, capturedSql, _) = setupWithRewriter(
-      new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
-        new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(
-          Map(("memory", "main", "customer") -> List("c_id", "c_email", "a@b", "x]"))
-        ),
-        enabled = true
-      )
-    )
-    val granted = effWithPolicies(List(maskCustomerEmailCls)).copy(permissions =
-      List(ai.starlake.quack.ondemand.state.RolePermission("p-1", "r-1", "*", "*", "*", "RO"))
-    )
-    List("SELECT * FROM customer c", "SELECT * EXCLUDE (c_id) FROM customer").foreach { sql =>
-      withClue(sql) {
-        router
-          .execute("cls-odd", "alice", poolKey, sql, Some(granted))
-          .unsafeRunSync() shouldBe a[Right[?, ?]]
-        capturedSql() should include("'***' AS c_email")
-        capturedSql() should include("\"a@b\"")
-        capturedSql() should include("\"x]\"")
-      }
-    }
-
-  // JSqlParser's `Column(table, name)` splits a dotted name (`"price"."usd"`, another column); the
-  // expansion is printed qualified, `c."price.usd"`, which parses back as that one column (#238).
-  it should "expand a column whose name holds a dot as that one column" in:
-    val (router, capturedSql, _) = setupWithRewriter(
-      new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
-        new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(
-          Map(("memory", "main", "customer") -> List("c_id", "c_email", "price.usd"))
-        ),
-        enabled = true
-      )
-    )
-    val out = router
-      .execute(
-        "cls-dotted",
-        "alice",
-        poolKey,
-        "SELECT * FROM customer c",
-        Some(effWithPolicies(List(maskCustomerEmailCls)))
-      )
-      .unsafeRunSync()
-    withClue(out.toString)(out.isRight shouldBe true)
-    capturedSql() should include("c.\"price.usd\"")
-    capturedSql() should not include "\"price\".\"usd\""
-    capturedSql() should not include "c.c_email"
-
-  // `c.to_json()` is `to_json(c)`: the whole row of customer, c_email raw.
-  "a method call on a masked table's binding" should "be denied before the node" in:
-    val (router, capturedSql, _) = setupWithRewriter(
-      new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
-        new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(
-          Map(("memory", "main", "customer") -> List("c_id", "c_name", "c_email", "c_phone"))
-        ),
-        enabled = true
-      )
-    )
-    List("SELECT c.to_json() FROM customer c", "SELECT customer.to_json() FROM customer")
-      .foreach { sql =>
-        withClue(sql) {
-          val out = router
-            .execute(
-              "cls-row",
-              "alice",
-              poolKey,
-              sql,
-              Some(effWithPolicies(List(maskCustomerEmailCls)))
-            )
-            .unsafeRunSync()
-          out.left.toOption.get shouldBe a[RouterFailure.AccessDenied]
-          capturedSql() shouldBe ""
-        }
-      }
-
-  // `customer AS c(a, b, e)` renames c_email to `e`, which no policy names.
-  "an alias column list on a masked table" should "be denied before the node" in:
-    val (router, capturedSql, _) = setupWithRewriter(
-      new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
-        new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(
-          Map(("memory", "main", "customer") -> List("c_id", "c_name", "c_email", "c_phone"))
-        ),
-        enabled = true
-      )
-    )
-    List(
-      "SELECT e FROM customer AS c(a, b, e)",
-      "SELECT e FROM (customer) AS c(a, b, e)",
-      "SELECT x.e FROM (customer AS c) x(a, b, e)"
-    ).foreach { sql =>
-      withClue(sql) {
-        val out = router
-          .execute(
-            "cls-alias-cols",
-            "alice",
-            poolKey,
-            sql,
-            Some(effWithPolicies(List(maskCustomerEmailCls)))
-          )
-          .unsafeRunSync()
-        out.left.toOption.get shouldBe a[RouterFailure.AccessDenied]
-        capturedSql() shouldBe ""
-      }
-    }
-
-  // ---- ProtectedWriteGuard integration tests ----
-  //
-  // The InMemory pool hands the guard a session catalog of "memory" / schema "main",
-  // so the mask/row policy is keyed on ("memory","main","customer") (catalog wildcard
-  // "*"). The catalog knows customer's columns so the guard's Deny-mode oracle can
-  // decide precisely which reads project a masked column.
 
   private def maskCustomerEmail =
     ai.starlake.quack.ondemand.state.RoleColumnPolicy(
@@ -1838,16 +1509,14 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
 
   private def guardKnowingCustomer =
     new ai.starlake.quack.edge.policy.ProtectedWriteGuard(
-      new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(
-        Map(("memory", "main", "customer") -> List("c_id", "c_email", "c_region"))
-      ),
+      new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(),
       clsEnabled = true,
       rlsEnabled = true
     )
 
   it should "deny laundering a masked column through CTAS end-to-end" in:
     val (router, capturedSql, _) =
-      setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)
+      setupWithPolicies(protectedWriteGuard = guardKnowingCustomer)
     val out = router
       .execute(
         "pw-1",
@@ -1862,9 +1531,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     // The guard denied before routing, so nothing reached the node.
     capturedSql() shouldBe ""
 
-  it should "allow a write reading only unmasked columns end-to-end" in:
+  it should "refuse a write reading only unmasked columns of a CLS table end-to-end" in:
     val (router, capturedSql, _) =
-      setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)
+      setupWithPolicies(protectedWriteGuard = guardKnowingCustomer)
     val out = router
       .execute(
         "pw-2",
@@ -1874,12 +1543,12 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         effectiveSet = Some(effWithPolicies(List(maskCustomerEmail)))
       )
       .unsafeRunSync()
-    out shouldBe a[Right[?, ?]]
-    capturedSql() should include("c_id")
+    out shouldBe a[Left[?, ?]]
+    capturedSql() shouldBe ""
 
   it should "deny any read of an RLS table through a write end-to-end" in:
     val (router, capturedSql, _) =
-      setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)
+      setupWithPolicies(protectedWriteGuard = guardKnowingCustomer)
     val out = router
       .execute(
         "pw-3",
@@ -1904,7 +1573,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       "TRUNCATE main.customer"
     ).foreach { sql =>
       val (router, capturedSql, _) =
-        setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)
+        setupWithPolicies(protectedWriteGuard = guardKnowingCustomer)
       val out = router
         .execute("pw-d27", "alice", poolKey, sql, Some(effWithRowPolicies(List(rowPolicyCustomer))))
         .unsafeRunSync()
@@ -1918,7 +1587,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
 
   it should "still route a row-policy holder's plain INSERT into the policy table" in:
     val (router, capturedSql, _) =
-      setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)
+      setupWithPolicies(protectedWriteGuard = guardKnowingCustomer)
     val sql = "INSERT INTO main.customer VALUES (1, 'e', 'X')"
     router
       .execute(
@@ -1938,7 +1607,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       "UPDATE main.customer SET c_id = 0 RETURNING c_email"
     ).foreach { sql =>
       val (router, capturedSql, _) =
-        setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)
+        setupWithPolicies(protectedWriteGuard = guardKnowingCustomer)
       val out = router
         .execute("pw-d27-c", "alice", poolKey, sql, Some(effWithPolicies(List(maskCustomerEmail))))
         .unsafeRunSync()
@@ -1956,7 +1625,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       "DELETE FROM main.customer WHERE c_email.starts_with('a')"
     ).foreach { sql =>
       val (router, capturedSql, _) =
-        setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)
+        setupWithPolicies(protectedWriteGuard = guardKnowingCustomer)
       val out = router
         .execute("pw-r2-c", "alice", poolKey, sql, Some(effWithPolicies(List(maskCustomerEmail))))
         .unsafeRunSync()
@@ -1979,7 +1648,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       )
     do
       val (router, capturedSql, _) =
-        setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)
+        setupWithPolicies(protectedWriteGuard = guardKnowingCustomer)
       val out = router.execute("pw-r3-p", "alice", poolKey, sql, Some(eff)).unsafeRunSync()
       withClue(sql) {
         out shouldBe a[Left[?, ?]]
@@ -1995,7 +1664,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       sql <- List("DROP SCHEMA main CASCADE", "DROP SCHEMA IF EXISTS main CASCADE")
     do
       val (router, capturedSql, _) =
-        setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)
+        setupWithPolicies(protectedWriteGuard = guardKnowingCustomer)
       val out = router.execute("pw-r3-s", "alice", poolKey, sql, Some(eff)).unsafeRunSync()
       withClue(sql) {
         out.left.toOption.get.reason should include("schema main holds a table protected")
@@ -2016,7 +1685,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       )
     do
       val (router, capturedSql, _) =
-        setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)
+        setupWithPolicies(protectedWriteGuard = guardKnowingCustomer)
       val out = router.execute("pw-d29", "alice", poolKey, sql, Some(eff)).unsafeRunSync()
       withClue(sql) {
         out.left.toOption.get.reason should include(
@@ -2027,7 +1696,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
 
   it should "still route a column-policy holder's write that only assigns the masked column" in:
     val (router, capturedSql, _) =
-      setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)
+      setupWithPolicies(protectedWriteGuard = guardKnowingCustomer)
     val sql = "UPDATE main.customer SET c_email = 'x' WHERE c_id = 1"
     router
       .execute("pw-d27-c-ok", "alice", poolKey, sql, Some(effWithPolicies(List(maskCustomerEmail))))
@@ -2047,7 +1716,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         effWithRowPolicies(List(rowPolicyCustomer))
       ).foreach { eff =>
         val (router, capturedSql, _) =
-          setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)
+          setupWithPolicies(protectedWriteGuard = guardKnowingCustomer)
         val out = router.execute("pw-f18", "alice", poolKey, sql, Some(eff)).unsafeRunSync()
         withClue(s"$sql ${eff.columnPolicies.size}/${eff.rowPolicies.size}") {
           out.left.toOption.get shouldBe a[RouterFailure.AccessDenied]
@@ -2056,9 +1725,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       }
     }
 
-  it should "still route a batch led by a read whose write reads nothing protected" in:
+  it should "refuse a batch led by a read whose write reads unmasked CLS columns" in:
     val (router, capturedSql, _) =
-      setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)
+      setupWithPolicies(protectedWriteGuard = guardKnowingCustomer)
     val out = router
       .execute(
         "pw-f18-ok",
@@ -2068,23 +1737,18 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         effectiveSet = Some(effWithPolicies(List(maskCustomerEmail)))
       )
       .unsafeRunSync()
-    out shouldBe a[Right[?, ?]]
-    capturedSql() should include("INSERT INTO main.scratch SELECT c_id FROM main.customer")
+    out shouldBe a[Left[?, ?]]
+    capturedSql() shouldBe ""
 
   it should "deny an INSERT whose statement-level CTE shadows the target (audit F19)" in:
     // DuckDB binds `FROM leak` to the CTE reading the masked column; the guard used to analyse
     // the Insert's Select without the WITH and resolve `leak` to the physical, unpoliced table.
     val guard = new ai.starlake.quack.edge.policy.ProtectedWriteGuard(
-      new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(
-        Map(
-          ("memory", "main", "customer") -> List("c_id", "c_email", "c_region"),
-          ("memory", "main", "leak")     -> List("c_email")
-        )
-      ),
+      new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(),
       clsEnabled = true,
       rlsEnabled = true
     )
-    val (router, capturedSql, _) = setupWithRewriter(protectedWriteGuard = guard)
+    val (router, capturedSql, _) = setupWithPolicies(protectedWriteGuard = guard)
     val out                      = router
       .execute(
         "pw-f19",
@@ -2107,7 +1771,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       "CREATE TABLE main.mine AS SELECT * FROM memory.customer" ->
         effWithRowPolicies(List(rowPolicyCustomer))
     ).foreach { (sql, eff) =>
-      val (router, capturedSql, _) = setupWithRewriter(
+      val (router, capturedSql, _) = setupWithPolicies(
         protectedWriteGuard = guardKnowingCustomer,
         attachedCatalogsOf = _ => Set("memory")
       )
@@ -2122,7 +1786,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     }
 
   it should "forward a schema-qualified row-policy read for native resolution (audit F20)" in:
-    val (router, capturedSql, _) = setupWithRewriter(
+    val (router, capturedSql, _) = setupWithPolicies(
       protectedWriteGuard = guardKnowingCustomer,
       attachedCatalogsOf = _ => Set("memory")
     )
@@ -2148,7 +1812,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       "PIVOT customer ON c_region USING count(*)"
     ).foreach { sql =>
       val (router, capturedSql, _) =
-        setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)
+        setupWithPolicies(protectedWriteGuard = guardKnowingCustomer)
       val out = router
         .execute(
           "rls-f21",
@@ -2180,7 +1844,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         )
       else TestArrow.okResponse()
     val (router, capturedSql, _) =
-      setupWithRewriter(protectedWriteGuard = guardKnowingCustomer, stub = columns)
+      setupWithPolicies(protectedWriteGuard = guardKnowingCustomer, stub = columns)
     val out = router
       .execute(
         "rls-t19",
@@ -2203,7 +1867,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       "SELECT * FROM query('SELECT * FROM main.customer')"
     ).foreach { sql =>
       val (router, capturedSql, _) =
-        setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)
+        setupWithPolicies(protectedWriteGuard = guardKnowingCustomer)
       val out = router
         .execute(
           "rls-qt",
@@ -3584,7 +3248,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
   private val customerOnly = Some(effWithGrants(List(grant("memory", "tpch1", "customer", "RO"))))
 
   "the metadata filter step" should "narrow an information_schema read to the granted objects" in:
-    val (router, capturedSql, _) = setupWithRewriter(metadataFilter = metaFilterOn)
+    val (router, capturedSql, _) = setupWithPolicies(metadataFilter = metaFilterOn)
     val out                      = router
       .execute(
         "meta-1",
@@ -3599,7 +3263,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
 
   it should "leave a superuser's information_schema read unfiltered" in:
     val root = ai.starlake.quack.ondemand.state.RbacUser("u-0", None, "root", "admin")
-    val (router, capturedSql, _) = setupWithRewriter(metadataFilter = metaFilterOn)
+    val (router, capturedSql, _) = setupWithPolicies(metadataFilter = metaFilterOn)
     val out                      = router
       .execute(
         "meta-3",
@@ -3614,7 +3278,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     capturedSql() should not include "qod_meta"
 
   it should "narrow a plain SHOW TABLES, rewritten to a catalog function listing (Task 19)" in:
-    val (router, capturedSql, _) = setupWithRewriter(metadataFilter = metaFilterOn)
+    val (router, capturedSql, _) = setupWithPolicies(metadataFilter = metaFilterOn)
     val out                      = router
       .execute("meta-4", "alice", poolKey, "SHOW TABLES", effectiveSet = customerOnly)
       .unsafeRunSync()
@@ -3624,7 +3288,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     capturedSql() should include("duckdb_tables() WHERE (lower(database_name) = 'memory'")
 
   it should "deny a SHOW TABLES variant without ever reaching a node" in:
-    val (router, capturedSql, _) = setupWithRewriter(metadataFilter = metaFilterOn)
+    val (router, capturedSql, _) = setupWithPolicies(metadataFilter = metaFilterOn)
     val out                      = router
       .execute("meta-5", "alice", poolKey, "SHOW TABLES FROM tpch1", effectiveSet = customerOnly)
       .unsafeRunSync()
@@ -3639,7 +3303,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       if calls.getAndIncrement() == 0 then QuackResponse.Failed(QuackError.Transient("gone"), 1L)
       else TestArrow.okResponse()
     val (router, capturedSql, _) =
-      setupWithRewriter(metadataFilter = metaFilterOn, readers = 2, stub = transientThenOk)
+      setupWithPolicies(metadataFilter = metaFilterOn, readers = 2, stub = transientThenOk)
     val out = router
       .execute(
         "meta-6",
@@ -3663,7 +3327,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
   )
 
   it should "refuse a COPY writing a filtered listing to an authorized location" in:
-    val (router, capturedSql, _) = setupWithRewriter(
+    val (router, capturedSql, _) = setupWithPolicies(
       metadataFilter = metaFilterOn
     )
     List(
@@ -3683,7 +3347,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     }
 
   it should "send an ordinary COPY to an authorized location" in:
-    val (router, capturedSql, _) = setupWithRewriter(
+    val (router, capturedSql, _) = setupWithPolicies(
       metadataFilter = metaFilterOn
     )
     val sql = "COPY (SELECT * FROM main.t) TO 's3://acme-etl/out/t.csv'"
@@ -3702,7 +3366,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       "PREPARE p AS COPY (SHOW TABLES) TO 's3://acme-etl/out/t.csv'",
       "COPY (DESCRIBE customer) TO 's3://acme-etl/out/t.csv'"
     )
-    val (narrowing, narrowingCaptured, _) = setupWithRewriter(metadataFilter = metaFilterOn)
+    val (narrowing, narrowingCaptured, _) = setupWithPolicies(metadataFilter = metaFilterOn)
     unread.zipWithIndex.foreach { (sql, i) =>
       withClue(sql) {
         narrowing
@@ -3734,7 +3398,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     // got the full catalog. Either outcome is safe, but the wire text must never carry an
     // unfiltered catalog read.
     val (router, capturedSql, _) =
-      setupWithRewriter(metadataFilter = metaFilterOn)
+      setupWithPolicies(metadataFilter = metaFilterOn)
     val out = router
       .execute(
         "meta-9",
@@ -3756,7 +3420,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
   it should "never send an unfiltered metadata read riding inside a multi-statement write batch" in:
     // The filter rewrites the batch's SELECT and keeps the INSERT as written, or refuses the batch:
     // either is safe, but the wire text must never carry an unfiltered catalog read.
-    val (router, capturedSql, _) = setupWithRewriter(metadataFilter = metaFilterOn)
+    val (router, capturedSql, _) = setupWithPolicies(metadataFilter = metaFilterOn)
     val out                      = router
       .execute(
         "meta-8",
@@ -3829,7 +3493,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
 
   it should "refuse a client-fed INSERT on the FlightSQL path (the scan would wait forever)" in:
     val (router, _, _) =
-      setupWithRewriter()
+      setupWithPolicies()
     router
       .execute("cds-1", "alice", poolKey, ClientFedInsert, effectiveSet = Some(ordersWriter))
       .unsafeRunSync() match
@@ -3851,7 +3515,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
 
   it should "admit the same client-fed INSERT, same principal and grants, from the front door" in:
     val (router, _, _) =
-      setupWithRewriter()
+      setupWithPolicies()
     router
       .executeWith(
         "cds-3",
@@ -3868,7 +3532,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       .map(_.value) shouldBe Right("count")
 
   it should "refuse a client data scan off the native front door, superusers included" in:
-    val (router, captured, _) = setupWithRewriter()
+    val (router, captured, _) = setupWithPolicies()
     List(Some(ordersWriter), Some(superuserSet), None).foreach { eff =>
       withClue(eff.map(_.user.username)) {
         router
@@ -3910,9 +3574,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
 
   it should "let the protected-write guard admit a client-fed INSERT only from the front door" in:
     val guard = new ai.starlake.quack.edge.policy.ProtectedWriteGuard(
-      new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(
-        Map(("memory", "main", "customer") -> List("c_id"))
-      ),
+      new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(),
       clsEnabled = true,
       rlsEnabled = true
     )
@@ -3922,7 +3584,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
           .RoleRowPolicy("rp-1", "r-1", "*", "main", "customer", "1=1")
       )
     )
-    val (router, _, _) = setupWithRewriter(protectedWriteGuard = guard)
+    val (router, _, _) = setupWithPolicies(protectedWriteGuard = guard)
     router
       .executeWith(
         "cds-7",
@@ -3957,7 +3619,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
           .RoleRowPolicy("rp-d", "r-1", "*", "main", "customer", "c_region IS DISTINCT FROM 'X'")
       )
     )
-    val (router, captured, _) = setupWithRewriter()
+    val (router, captured, _) = setupWithPolicies()
     router
       .execute("file-5", "alice", poolKey, "SELECT c_id FROM customer", Some(withRows))
       .unsafeRunSync() shouldBe a[Right[?, ?]]
@@ -3976,7 +3638,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
   "a query_table-reading table macro" should "reach native row enforcement" in:
     // The node judges macro expansion and may refuse a nonliteral query_table body.
     val rls                   = Some(effWithRowPolicies(List(rowPolicyCustomer)))
-    val (router, captured, _) = setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)
+    val (router, captured, _) = setupWithPolicies(protectedWriteGuard = guardKnowingCustomer)
     List(
       "SELECT * FROM histogram('customer', c_email)",
       "SELECT * FROM histogram_values('main.customer', c_region)"
@@ -4005,46 +3667,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     List(rowPolicyCustomer)
   )
 
-  private def clsKnowingCustomer =
-    new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
-      new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(
-        Map(("memory", "main", "customer") -> List("c_id", "c_email", "c_region"))
-      ),
-      enabled = true
-    )
-
-  "a backtick-quoted table or column" should "be masked while leaving row enforcement to the node" in:
-    val twins = List(
-      "SELECT c_id, c_email, c_region FROM `customer`" ->
-        "SELECT c_id, c_email, c_region FROM \"customer\"",
-      "SELECT * FROM `main`.`customer`" -> "SELECT * FROM \"main\".\"customer\"",
-      "SELECT upper(`c_email`) AS e FROM customer" -> "SELECT upper(\"c_email\") AS e FROM customer",
-      "SELECT c_id FROM customer WHERE `c_email` LIKE '%a%'" ->
-        "SELECT c_id FROM customer WHERE \"c_email\" LIKE '%a%'",
-      "SELECT `c` FROM customer c" -> "SELECT \"c\" FROM customer c"
-    )
-    val (router, captured, _) = setupWithRewriter(rewriter = clsKnowingCustomer)
-    def run(sql: String)      =
-      val out = router.execute("bt-1", "alice", poolKey, sql, Some(maskedAndFiltered))
-      val res = out.unsafeRunSync().map(_ => captured())
-      res
-    twins.foreach { (backtick, twin) =>
-      withClue(backtick) {
-        val b = run(backtick)
-        b.map(_.contains("`")) should not be Right(true)
-        b shouldBe run(twin)
-        b.foreach { sent =>
-          sent should not include "c_region = 'X'"
-          sent should not include "c_email LIKE"
-        }
-      }
-    }
-    val table = run(twins.head._1)
-    table.toOption.get should include("'***'")
-
   it should "not launder a masked column into a table through CTAS" in:
-    val (router, captured, _) = setupWithRewriter(
-      rewriter = clsKnowingCustomer,
+    val (router, captured, _) = setupWithPolicies(
       protectedWriteGuard = guardKnowingCustomer
     )
     Seq(
@@ -4063,7 +3687,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
   // ---- F09: CHECKPOINT and DuckLake's per-schema macros ----
 
   "CHECKPOINT" should "run for a superuser, routed and classified as DDL" in:
-    val (router, captured, _) = setupWithRewriter()
+    val (router, captured, _) = setupWithPolicies()
     router
       .execute("ckpt-2", "alice", poolKey, "CHECKPOINT", Some(superuserSet))
       .unsafeRunSync()
@@ -4089,7 +3713,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
   )
 
   "DuckLake's maintenance and option-setting calls" should "run for a superuser" in:
-    val (open, openCaptured, _) = setupWithRewriter()
+    val (open, openCaptured, _) = setupWithPolicies()
     maintenanceCalls.foreach { sql =>
       withClue(sql) {
         open
@@ -4103,14 +3727,11 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
   // escapes a walk halts the whole manager. Run on a 1 MiB stack, a production worker's default.
   private def onWorkerStack[A](body: => A): Either[Throwable, A] =
     var out: Either[Throwable, A] = Left(new IllegalStateException("not run"))
-    val t                         = new Thread(
-      null,
-      () =>
-        out =
-          try Right(body)
-          catch case e: Throwable => Left(e), "deep-nesting",
-      1L << 20
-    )
+    val task: Runnable            = () =>
+      out =
+        try Right(body)
+        catch case e: Throwable => Left(e)
+    val t = new Thread(null, task, "deep-nesting", 1L << 20)
     t.start()
     t.join()
     out
