@@ -543,7 +543,19 @@ final class McpDataTools(
     name = "list_snapshots",
     description =
       "Snapshots and named tags of a database, newest first. Query any snapshot with run_sql: " +
-        "SELECT ... FROM t AT (VERSION => <snapshotId>), or reference a tag's snapshotId.",
+        "SELECT ... FROM t AT (VERSION => <snapshotId>), or reference a tag's snapshotId. " +
+        "Unless you are an admin, you see only the snapshots that touched a table you can read " +
+        "(a write, inlined included, a flush or a maintenance on it counts; a schema-only DDL " +
+        "snapshot does not), with only those tables named and no raw change text. A table is " +
+        "judged by the name it has now, and a snapshot of a dropped table is hidden. While you " +
+        "hold a column or a row policy, a snapshot of a table whose name has been another " +
+        "table's or whose columns were renamed is hidden too, as for time travel. When a " +
+        "snapshot also touched a table you cannot read or has a change that names no table, its " +
+        "commitMessage is null and rowsAdded, filesAdded and filesRemoved are -1 (withheld); " +
+        "the counts are also -1 while you hold a row policy. You may get fewer than limit: it " +
+        "applies to the newest 1000 snapshots at most. You get the tags of every snapshot you " +
+        "can see, however old. Gaps in snapshot ids and jumps in schemaVersion show that a " +
+        "write or a DDL you cannot see took place, not where.",
     inputSchema = objectSchema(
       required = List("database"),
       props = "database" -> strProp("Database (tenant-db) name."),
@@ -560,19 +572,56 @@ final class McpDataTools(
         case Left(err)                 => IO.pure(Left(err))
         case Right((tenant, database)) =>
           val key = principal.rawToken
-          for
-            snaps <- IO.blocking(
-              bridge(
-                catalog.listSnapshots(tenant, database, int(args, "limit"), None, None, key)(
-                  scopeOf
-                )
-              )
-            )
-            tagged <- tags.list(tenant, database, key)(scopeOf).map(bridge)
-          yield for
-            s <- snaps
-            t <- tagged
-          yield Json.obj("snapshots" -> s.asJson, "tags" -> t.asJson)
+          IO.blocking(
+            catalogReach.reach(key, callerFor(principal), tenant, database)
+          ).flatMap {
+            case Left(err)    => IO.pure(Left(err))
+            case Right(reach) =>
+              // A member's window is `limit * 50` snapshots, capped at the handler's 1000, cut to
+              // `limit` once the snapshots they cannot see are gone.
+              val wanted = int(args, "limit").getOrElse(DefaultSnapshots).max(1).min(MaxSnapshots)
+              val window = (wanted.toLong * SnapshotWindowFactor).min(MaxSnapshots).toInt
+              if reach.isMember then
+                // The tags first, so the one gated read below also reads the snapshots they name
+                // (a tag may sit on a snapshot older than the window): one audit row per call.
+                tags.list(tenant, database, key)(reach.scopeOf).map(bridge).flatMap {
+                  case Left(err) => IO.pure(Left(err))
+                  case Right(ts) =>
+                    IO.blocking(
+                      bridge(
+                        catalog.listSnapshotsForMember(
+                          tenant,
+                          database,
+                          Some(window),
+                          ts.map(_.snapshotId).toSet,
+                          reach.underPolicy,
+                          key
+                        )(reach.scopeOf)
+                      )
+                    ).map(_.map { case (page, taggedSnaps) =>
+                      Json.obj(
+                        "snapshots" -> reach.snapshots(page).take(wanted).asJson,
+                        "tags"      -> reach
+                          .tags(ts, reach.snapshots(taggedSnaps).map(_.snapshotId).toSet)
+                          .asJson
+                      )
+                    })
+                }
+              else
+                for
+                  snaps <- IO.blocking(
+                    bridge(
+                      catalog.listSnapshots(tenant, database, int(args, "limit"), None, None, key)(
+                        reach.scopeOf
+                      )
+                    )
+                  )
+                  tagged <- tags.list(tenant, database, key)(reach.scopeOf).map(bridge)
+                yield for
+                  s <- snaps
+                  t <- tagged
+                yield Json.obj("snapshots" -> s.asJson, "tags" -> t.asJson)
+          }
   )
 
   // ---------- my_usage ----------
@@ -606,3 +655,12 @@ object McpDataTools:
     * federation store). Same text on every iceberg-routed tool.
     */
   private val IcebergUnavailable = "iceberg catalogs are not available on this manager"
+
+  /** `list_snapshots`: the handler's default and ceiling for `limit`. */
+  private val DefaultSnapshots = 200
+  private val MaxSnapshots     = 1000
+
+  /** A member's `list_snapshots` reads this many times `limit` snapshots before filtering, at most
+    * [[MaxSnapshots]] (the handler's ceiling): 50 times up to `limit` 20, fewer above.
+    */
+  private val SnapshotWindowFactor = 50L

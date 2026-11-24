@@ -129,6 +129,35 @@ final class CatalogHandlers(
       )
     }
 
+  /** The MCP `list_snapshots` read of a plain member
+    * (`DuckLakeCatalogReader.listSnapshotsForMember`): the newest `limit` snapshots, and the
+    * snapshots `taggedIds` name wherever they sit in the history (for the member's tags), both read
+    * under the one gate, so the call audits once. `underPolicy`: the member holds a column or a row
+    * policy, so a table whose name history is not stable is left out as well. Same gate and `limit`
+    * bounds as [[listSnapshots]], no REST route.
+    */
+  def listSnapshotsForMember(
+      tenant: String,
+      tenantDb: String,
+      limit: Option[Int],
+      taggedIds: Set[Long],
+      underPolicy: Boolean,
+      apiKey: Option[String]
+  )(
+      scopeOf: SessionScope.Resolver
+  ): Res[(List[DuckLakeCatalogReader.MemberSnapshot], List[DuckLakeCatalogReader.MemberSnapshot])] =
+    gated("snapshots", tenant, tenantDb, apiKey)(scopeOf) { (tid, db) =>
+      Right(
+        if !isDuckLake(tid, db) then (Nil, Nil)
+        else
+          val reader = resolveReader(tid, db)
+          (
+            reader.listSnapshotsForMember(limit.getOrElse(200).max(1).min(1000), underPolicy),
+            reader.listSnapshotsByIdsForMember(taggedIds, underPolicy)
+          )
+      )
+    }
+
   /** Spec 00: at most one of asOf / asOfTag / asOfTs; a tag resolves to its snapshot id, asOfTs
     * resolves via timestamp lookup. A dangling tag/id (snapshot vacuumed) returns 410 expired; a
     * timestamp before first snapshot returns 422 invalid_snapshot.

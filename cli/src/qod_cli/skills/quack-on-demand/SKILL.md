@@ -412,11 +412,22 @@ MCP troubleshooting:
 - **Tool missing from tools/list**: wrong tier - admin tools need an admin-owned PAT.
 - **run_sql denied**: the ACL message names the table and missing verb; fix the grant.
 - **A plain user's discovery tools** (`list_databases`, `list_tables`, `describe_table`,
-  `table_history`) show the databases of their tenant with a pool they may connect to, and
-  only the tables their grants cover for reading (`RO`, `RW` or `ALL`, as `SHOW TABLES`
-  lists them); any other table answers `not_found`. `no_pool_access`: no pool of that
-  database admits them. A row count of `-1` is withheld: the user holds a row policy, so
-  count with `run_sql`. `list_snapshots` needs an admin.
+  `table_history`, `list_snapshots`) show the databases of their tenant with a pool they
+  may connect to, and only the tables their grants cover for reading (`RO`, `RW` or `ALL`,
+  as `SHOW TABLES` lists them); any other table answers `not_found`. `no_pool_access`: no
+  pool of that database admits them. A row count of `-1` is withheld: the user holds a row
+  policy, so count with `run_sql`. `list_snapshots` shows a plain user only the snapshots
+  that touched a table they can read (a write, inlined included, a flush or a maintenance
+  on it counts; a schema-only DDL snapshot does not), so possibly fewer than `limit`, which
+  applies to the newest 1000 snapshots at most. It names only those tables, each by its
+  current name, and a snapshot of a dropped table is hidden. While they hold a column or a row
+  policy, a snapshot of a table whose name has been another table's or whose columns were
+  renamed is hidden too, as for time travel. When a snapshot
+  also touched a table they cannot read or has a change that names no table, its
+  `commitMessage` is null and its counts are `-1`; the counts are also `-1` on every
+  snapshot while they hold a row policy. Their tags are those on any snapshot they can see,
+  however old. Gaps in snapshot ids and jumps in `schemaVersion` show that a write or a DDL
+  they cannot see took place, not where.
 - **"pool is resuming"**: the suspended pool is waking; retry in a few seconds.
 - Row caps: `run_sql` is truncated server-side at `QOD_MCP_MAX_ROWS` (default 500).
 
