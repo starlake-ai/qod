@@ -40,6 +40,8 @@ final class NodeKeys(
     nativeColumnPoliciesEnabled: Boolean = false,
     policySnapshots: NodePolicySnapshots = new NodePolicySnapshots()
 ):
+  val policyBundles = new PolicyBundles()
+
   require(secret.nonEmpty, "the node-key secret is empty")
 
   /** The nonces of every handle minted for a statement, by the statement's [[DecideContext]]
@@ -87,7 +89,8 @@ final class NodeKeys(
     val version  = versions.current(node.poolKey.tenant)
     val snapshot =
       policySnapshots.of(principal, ctx, version, rowPoliciesEnabled, nativeColumnPoliciesEnabled)
-    val m = NodeHandles.mint(
+    val bundle = policyBundles.put(snapshot)
+    val m      = NodeHandles.mint(
       secret,
       node.nodeId,
       replica,
@@ -99,8 +102,9 @@ final class NodeKeys(
       path = paths(node.poolKey),
       readOnly = if principal.system then Set.empty else readOnlyCatalogs.of(node.poolKey),
       nowMs = clock(),
-      preparedPolicies = Some(snapshot)
+      policyBundle = bundle
     )
+    if bundle.nonEmpty then policyBundles.authorize(m)
     // The statement's own record of its nonces: what its "authorization unavailable" marker is
     // checked against, whatever the bounded registries below still hold.
     principal.context.foreach { c =>

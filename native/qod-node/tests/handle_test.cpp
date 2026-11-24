@@ -51,11 +51,11 @@ const std::string kCtx(64, 'c');
 std::string Payload(const std::string &node = kNode, int64_t exp = kNow + 60000, const std::string &tenant = "\"acme\"",
                     const std::string &members = ",\"ctx\":\"" + kCtx + "\",\"creds\":\"\",\"path\":\"\"",
                     const std::string &read_only = ",\"readOnly\":[]") {
-	return std::string("{\"v\":6,\"node\":\"") + node +
-	       "\",\"replica\":\"http://10.0.0.1:20900\",\"principal\":{\"id\":\"u-1\",\"name\":\"alice\",\"tenant\":" +
-	       tenant + ",\"superuser\":false,\"system\":false},\"pool\":\"acme/acme_db/bi\",\"policyVersion\":42" +
-	       members + read_only + ",\"rowPolicies\":[],\"columnPolicies\":[],\"nonce\":\"" + kNonce +
-	       "\",\"exp\":" + std::to_string(exp) + "}";
+	return std::string("{\"v\":8,\"node\":\"") + node +
+		   "\",\"replica\":\"http://10.0.0.1:20900\",\"principal\":{\"id\":\"u-1\",\"name\":\"alice\",\"tenant\":" +
+		   tenant + ",\"superuser\":false,\"system\":false},\"pool\":\"acme/acme_db/bi\",\"policyVersion\":42" +
+		   members + read_only + ",\"policyBundle\":\"\",\"rowPolicies\":[],\"columnPolicies\":[],\"nonce\":\"" + kNonce +
+		   "\",\"exp\":" + std::to_string(exp) + "}";
 }
 
 //! A handle with a valid ctx, an empty creds and path, and the given readOnly members (raw JSON).
@@ -211,34 +211,36 @@ int main(int argc, char **argv) {
 	ExpectRefused([&] { qod::VerifyHandle("!!" + good.substr(good.find('.')), kKey, kNode, kNow); }, "payload",
 	              "bad base64");
 	auto no_principal =
-	    std::string("{\"v\":6,\"node\":\"") + kNode +
-	    "\",\"replica\":\"r\",\"pool\":\"p\",\"policyVersion\":1,\"ctx\":\"" + kCtx +
-	    "\",\"creds\":\"\",\"path\":\"\",\"readOnly\":[],\"rowPolicies\":[],\"columnPolicies\":[],\"nonce\":\"" +
-	    kNonce + "\",\"exp\":" + std::to_string(kNow + 1000) + "}";
+		std::string("{\"v\":8,\"node\":\"") + kNode +
+		"\",\"replica\":\"r\",\"pool\":\"p\",\"policyVersion\":1,\"ctx\":\"" + kCtx +
+		"\",\"creds\":\"\",\"path\":\"\",\"readOnly\":[],\"policyBundle\":\"\",\"rowPolicies\":[],\"columnPolicies\":[],\"nonce\":\"" +
+		kNonce + "\",\"exp\":" + std::to_string(kNow + 1000) + "}";
 	ExpectRefused([&] { qod::VerifyHandle(Sign(no_principal), kKey, kNode, kNow); }, "principal", "no principal");
 	auto v6 = Payload();
-	v6.replace(v6.find("\"v\":6"), 5, "\"v\":7");
-	ExpectRefused([&] { qod::VerifyHandle(Sign(v6), kKey, kNode, kNow); }, "version", "future version 7");
-	auto v5 = Payload();
-	v5.replace(v5.find("\"v\":6"), 5, "\"v\":5");
-	ExpectRefused([&] { qod::VerifyHandle(Sign(v5), kKey, kNode, kNow); }, "version", "version 5 without native CLS");
+	v6.replace(v6.find("\"v\":8"), 5, "\"v\":9");
+	ExpectRefused([&] { qod::VerifyHandle(Sign(v6), kKey, kNode, kNow); }, "version", "future version 8");
+	for (auto version : {"5", "6"}) {
+		auto old = Payload();
+		old.replace(old.find("\"v\":8"), 5, std::string("\"v\":") + version);
+		ExpectRefused([&] { qod::VerifyHandle(Sign(old), kKey, kNode, kNow); }, "version", "pre-snapshot handle");
+	}
 	auto v4 = Payload();
-	v4.replace(v4.find("\"v\":6"), 5, "\"v\":4");
+	v4.replace(v4.find("\"v\":8"), 5, "\"v\":4");
 	ExpectRefused([&] { qod::VerifyHandle(Sign(v4), kKey, kNode, kNow); }, "version", "version 4 without native RLS");
 	// Version 3 is node protocol 5's, whose nodes describe a DuckLake read at an earlier snapshot under
 	// the name it had then (review M1): a node of this build refuses it, and such a node refuses a version 4
 	// handle.
 	auto v3 = Payload();
-	v3.replace(v3.find("\"v\":6"), 5, "\"v\":3");
+	v3.replace(v3.find("\"v\":8"), 5, "\"v\":3");
 	ExpectRefused([&] { qod::VerifyHandle(Sign(v3), kKey, kNode, kNow); }, "version", "version 3");
 	// Version 2 is the handle of node protocols 3 and 4, which do not read readOnly: a node of this build
 	// refuses it, and a node of those protocols refuses a version 3 handle, the probe's included, so it
 	// stays unroutable. Version 1 is node protocol 2's, whose nodes enforce nothing in the engine.
 	auto v2 = Payload();
-	v2.replace(v2.find("\"v\":6"), 5, "\"v\":2");
+	v2.replace(v2.find("\"v\":8"), 5, "\"v\":2");
 	ExpectRefused([&] { qod::VerifyHandle(Sign(v2), kKey, kNode, kNow); }, "version", "version 2");
 	auto v1 = Payload();
-	v1.replace(v1.find("\"v\":6"), 5, "\"v\":1");
+	v1.replace(v1.find("\"v\":8"), 5, "\"v\":1");
 	ExpectRefused([&] { qod::VerifyHandle(Sign(v1), kKey, kNode, kNow); }, "version", "version 1");
 
 	// ---- the session context digest
@@ -289,19 +291,19 @@ int main(int argc, char **argv) {
 
 	// Run without the golden file, the cross-language checks would be skipped and the run still pass.
 	if (argc < 2) {
-		std::cerr << "FAIL: no golden file: run handle_test with the path of tests/golden/handle-v6.txt" << std::endl;
+		std::cerr << "FAIL: no golden file: run handle_test with the path of tests/golden/handle-v8.txt" << std::endl;
 		failures++;
 	} else {
 		VerifyGolden(argv[1]);
 	}
 
 	// ---- node protocol 3: every handle carries the session's authorization context digest
-	auto without_ctx = std::string("{\"v\":6,\"node\":\"") + kNode +
-	                   "\",\"replica\":\"http://10.0.0.1:20900\",\"principal\":{\"id\":\"u-1\",\"name\":\"alice\","
-	                   "\"tenant\":\"acme\",\"superuser\":false,\"system\":false},\"pool\":\"acme/acme_db/bi\","
-	                   "\"policyVersion\":42,\"creds\":\"\",\"path\":\"\",\"readOnly\":[],\"rowPolicies\":[],"
-	                   "\"columnPolicies\":[],\"nonce\":\"" +
-	                   kNonce + "\",\"exp\":" + std::to_string(kNow + 60000) + "}";
+	auto without_ctx = std::string("{\"v\":8,\"node\":\"") + kNode +
+					   "\",\"replica\":\"http://10.0.0.1:20900\",\"principal\":{\"id\":\"u-1\",\"name\":\"alice\","
+					   "\"tenant\":\"acme\",\"superuser\":false,\"system\":false},\"pool\":\"acme/acme_db/bi\","
+					   "\"policyVersion\":42,\"creds\":\"\",\"path\":\"\",\"readOnly\":[],\"policyBundle\":\"\","
+					   "\"rowPolicies\":[],\"columnPolicies\":[],\"nonce\":\"" +
+					   kNonce + "\",\"exp\":" + std::to_string(kNow + 60000) + "}";
 	ExpectRefused([&] { qod::VerifyHandle(Sign(without_ctx), kKey, kNode, kNow); }, "ctx", "a handle without ctx");
 	auto null_ctx = without_ctx;
 	null_ctx.insert(null_ctx.find(",\"nonce\""), ",\"ctx\":null");

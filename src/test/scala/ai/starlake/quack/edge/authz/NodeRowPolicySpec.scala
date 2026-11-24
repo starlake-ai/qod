@@ -35,10 +35,19 @@ class NodeRowPolicySpec extends AnyFlatSpec with Matchers:
       )
   }
 
-  it should "refuse unknown tokens instead of weakening a negative comparison" in {
-    intercept[IllegalArgumentException] {
-      NodeRowPolicy.of(principal("owner IS DISTINCT FROM ${usr}"))
-    }.getMessage should include("unknown identity token")
+  it should "carry a scoped refusal for invalid stored tokens" in {
+    NodeRowPolicy
+      .of(principal("owner IS DISTINCT FROM ${usr}"))
+      .head
+      .sql shouldBe NodeRowPolicy.InvalidPredicate
+  }
+
+  it should "carry a scoped refusal for oversized identity expansion" in {
+    val e = effective("owner IN (${groups})").copy(groups =
+      (1 to 2000).map(i => RbacGroup(s"g-$i", "acme", "x" * 100)).toList
+    )
+    val p = NodePrincipal.of(Some(e), PoolKey("acme", "db", "bi"), DecidePurpose.Live)
+    NodeRowPolicy.of(p).head.sql shouldBe NodeRowPolicy.InvalidPredicate
   }
 
   it should "carry no policies for privileged or unbound principals" in {
@@ -105,16 +114,25 @@ class NodeRowPolicySpec extends AnyFlatSpec with Matchers:
       readOnlyCatalogs = ReadOnlyCatalogs.none,
       rowPoliciesEnabled = false
     )
-    def rows(keys: NodeKeys) = NodeHandles
-      .verify(
-        keys.handle(node, p),
-        keys.key(node.nodeId),
-        node.nodeId,
-        1000L
-      )
-      .toOption
-      .get
-      .rowPolicies
+    def rows(keys: NodeKeys): List[NodeRowPolicy] =
+      val handle = NodeHandles
+        .verify(
+          keys.handle(node, p),
+          keys.key(node.nodeId),
+          node.nodeId,
+          1000L
+        )
+        .toOption
+        .get
+      if handle.policyBundle.isEmpty then Nil
+      else
+        keys.policyBundles
+          .page(handle.policyBundle, 0)
+          .get
+          .hcursor
+          .get[List[NodeRowPolicy]]("policies")
+          .toOption
+          .get
     rows(enabled) shouldBe NodeRowPolicy.of(p)
     rows(disabled) shouldBe Nil
   }

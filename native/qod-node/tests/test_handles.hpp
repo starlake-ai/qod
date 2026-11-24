@@ -38,6 +38,7 @@ struct MintSpec {
 	std::vector<std::string> read_only;
 	std::vector<qod::RowPolicy> row_policies;
 	std::vector<qod::ColumnPolicy> column_policies;
+	std::string policy_bundle;
 };
 
 //! `aliases` as a handle's readOnly array (the tests' aliases need no escaping).
@@ -65,15 +66,16 @@ inline std::string MintWith(const MintSpec &spec) {
 		    {"schema", qod::JsonString(p.schema)}, {"table", qod::JsonString(p.table)},
 		    {"column", qod::JsonString(p.column)}, {"action", qod::JsonString(p.action)}, {"sql", qod::JsonString(p.sql)}}));
 	}
-	auto payload = std::string("{\"v\":6,\"node\":\"") + spec.node + "\",\"replica\":\"" + spec.replica +
-	               "\",\"principal\":{\"id\":\"" + spec.principal_id + "\",\"name\":\"" + spec.principal_id +
-	               "\",\"tenant\":" + (spec.superuser ? "null" : "\"acme\"") +
-	               ",\"superuser\":" + (spec.superuser ? "true" : "false") +
-	               ",\"system\":" + (spec.system ? "true" : "false") + "}," +
-	               "\"pool\":\"acme/acme_db/bi\",\"policyVersion\":" + std::to_string(spec.policy_version) +
-	               ",\"ctx\":\"" + spec.ctx + "\",\"creds\":\"" + spec.creds + "\",\"path\":\"" + spec.path +
-	               "\",\"readOnly\":" + ReadOnlyJson(spec.read_only) + ",\"rowPolicies\":" + qod::CanonicalJson(qod::JsonArray(policies)) + ",\"columnPolicies\":" + qod::CanonicalJson(qod::JsonArray(columns)) + ",\"nonce\":\"" + nonce +
-	               "\",\"exp\":" + std::to_string(spec.exp) + "}";
+	auto payload = std::string("{\"v\":8,\"node\":\"") + spec.node + "\",\"replica\":\"" + spec.replica +
+				   "\",\"principal\":{\"id\":\"" + spec.principal_id + "\",\"name\":\"" + spec.principal_id +
+				   "\",\"tenant\":" + (spec.superuser ? "null" : "\"acme\"") +
+				   ",\"superuser\":" + (spec.superuser ? "true" : "false") +
+				   ",\"system\":" + (spec.system ? "true" : "false") + "}," +
+				   "\"pool\":\"acme/acme_db/bi\",\"policyVersion\":" + std::to_string(spec.policy_version) +
+				   ",\"ctx\":\"" + spec.ctx + "\",\"creds\":\"" + spec.creds + "\",\"path\":\"" + spec.path +
+				   "\",\"readOnly\":" + ReadOnlyJson(spec.read_only) +
+				   ",\"rowPolicies\":" + qod::CanonicalJson(qod::JsonArray(policies)) + ",\"columnPolicies\":" + qod::CanonicalJson(qod::JsonArray(columns)) + ",\"policyBundle\":\"" +
+				   spec.policy_bundle + "\",\"nonce\":\"" + nonce + "\",\"exp\":" + std::to_string(spec.exp) + "}";
 	return qod::ToBase64Url(payload) + "." + qod::Hex(qod::HmacSha256(kKey, payload));
 }
 

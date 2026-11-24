@@ -30,13 +30,16 @@ mask-validation results are bounded and keyed by SQL and protected column. Chang
 in identities, token restrictions, policy contents, pools or versions cannot reuse
 another snapshot. Both policy kinds share the same attenuation step.
 
-Every handle requires a `columnPolicies` array. The decoded handle is bounded to
-2 MiB, rather than 256 policies across all of the user's databases. A mask retains
-its 4096 UTF-8 byte limit. No policy list is truncated. All effective policies stay
-in transport: a manager's guessed catalog inventory must not omit protection a
-federated source, view or macro can reach. Native binding decides applicability.
-Entries carry `{id,catalog,schema,table,column,action,sql}`; a deny has empty SQL.
-The MAC covers the complete payload. Both readers enforce shape and byte bounds.
+Production handles carry the digest of one immutable snapshot containing both
+row and column policies. The private `/api/internal/authz/policies` endpoint serves
+signed pages of at most 64 policies and 512 KiB, only for a handle minted by that
+replica. The node verifies every page and installs both policy kinds atomically;
+an incomplete, unavailable or invalid snapshot cannot run a user statement.
+Snapshots are cached by digest on the node, with a 32 MiB byte budget and bounded
+cache retention. Handles stay small as policy counts grow. A mask retains its
+4096 UTF-8 byte limit. No policy list is truncated or narrowed using a manager's
+guessed catalog inventory: native binding decides applicability. Column entries
+carry `{kind,id,catalog,schema,table,column,action,sql}`; a deny has empty SQL.
 
 The node matches actual source catalog, schema, table and column names using
 DuckDB's identifier comparison. A deny wins. A mask naming a table outranks a

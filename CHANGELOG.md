@@ -4,25 +4,26 @@
 
 ### Upgrading
 
-- **Native column policies are opt-in.** Deploy and restart protocol-8 nodes (signed
-  handle version 6) before setting `QOD_CLS_ENFORCEMENT=node` on every replica.
+- **Native column policies are opt-in.** Deploy and restart protocol-10 nodes (signed
+  handle version 8) before setting `QOD_CLS_ENFORCEMENT=node` on every replica.
   Gateway CLS remains the default. Native CLS applies compatible masks and denies
   to bound base-table reads, including reads through views; unsupported types,
   generated-output/view-scoped policies and writes to covered tables refuse.
   Invalid new masks are rejected on every write/import path. Unusable stored masks
   become scoped denies; mask evaluation errors become NULL.
-  Policy preparation is cached by context and version. The 256-policy handle cap is
-  replaced by a 2 MiB payload budget, and wildcard policies target base tables
+  Policy preparation is cached by context and version. Both policy kinds use one
+  signed, paged snapshot with a small handle, and wildcard policies target base tables
   without blocking unrelated views or built-in macros. Native refusals count once.
   See [the design and limits](docs/node-column-security.md).
 
-- **Row policies now run exclusively in the native node.** Deploy and restart protocol-8
-  nodes; signed session handles are version 6 and older nodes and handles refuse. The
-  gateway RLS SQL rewriter, its enforcement-mode switch and rewrite metrics are removed.
-  `QOD_RLS_ENABLED=false` remains the RLS kill switch. Native enforcement applies base-table
-  policies through views and resolved scans; writes to protected tables (INSERT included),
-  view-scoped policies, DuckLake change feeds and unsupported predicate forms refuse. CLS,
-  metadata filtering, protected-write and historical-name checks remain. See
+- **Enabled row policies now run only on qod-node's bound DuckDB plan.** The gateway
+  row-policy SQL rewrite and `QOD_RLS_ENFORCEMENT` selector are removed. `QOD_RLS_ENABLED`
+  remains the kill switch. Deploy and restart protocol-10 nodes; signed handles are version 8.
+  Base-table policies apply through views and resolved scans. Writes to covered target tables
+  (INSERT included), view-scoped policies and unsupported predicates refuse. Table ACLs still
+  govern access; no applicable policy leaves reads unfiltered. Policy snapshots are signed and
+  paged; invalid stored predicates deny only their scopes. Fresh object creation is allowed,
+  caller setting overrides and EXPLAIN of protected scans refuse. See
   [the design and rollout guide](docs/node-row-security.md).
 
 - **Restart every node after upgrading** so it runs DuckDB 2.0.1 (see Changed): a node an

@@ -13,9 +13,26 @@ final case class NodePolicySnapshot(rows: List[NodeRowPolicy], columns: List[Nod
   require(columns.forall(NodeColumnPolicy.valid), "invalid node column policies")
   val rowJson: Json    = Json.arr(rows.map(summon[io.circe.Encoder[NodeRowPolicy]].apply)*)
   val columnJson: Json = Json.arr(columns.map(summon[io.circe.Encoder[NodeColumnPolicy]].apply)*)
-  private[authz] val weight: Int = 256 +
-    rowJson.noSpaces.getBytes(StandardCharsets.UTF_8).length * 2 +
-    columnJson.noSpaces.getBytes(StandardCharsets.UTF_8).length * 2
+  private[authz] lazy val entries: Vector[Json] =
+    rows
+      .map(p =>
+        summon[io.circe.Encoder[NodeRowPolicy]]
+          .apply(p)
+          .deepMerge(Json.obj("kind" -> Json.fromString("row")))
+      )
+      .toVector ++
+      columns
+        .map(p =>
+          summon[io.circe.Encoder[NodeColumnPolicy]]
+            .apply(p)
+            .deepMerge(Json.obj("kind" -> Json.fromString("column")))
+        )
+        .toVector
+  private[authz] lazy val encoded: Array[Byte] =
+    CanonicalJson.render(Json.arr(entries*)).getBytes(StandardCharsets.UTF_8)
+  private[authz] lazy val digest: String =
+    NodeHandles.hex(java.security.MessageDigest.getInstance("SHA-256").digest(encoded))
+  private[authz] lazy val weight: Int = 256 + encoded.length * 2
 
 object NodePolicySnapshot:
   val Empty: NodePolicySnapshot = NodePolicySnapshot(Nil, Nil)
@@ -31,7 +48,13 @@ final class NodePolicySnapshots(
         if columns then NodeColumnPolicy.ofEffective(e) else Nil
       )
 ):
-  private final case class Key(context: String, version: Long, rows: Boolean, columns: Boolean)
+  private final case class Key(
+      context: String,
+      version: Long,
+      rows: Boolean,
+      columns: Boolean,
+      identity: String
+  )
   private val cache = Caffeine
     .newBuilder()
     .maximumWeight(32L * 1024 * 1024)
@@ -48,7 +71,17 @@ final class NodePolicySnapshots(
     if principal.superuser || principal.system || principal.context.isEmpty then
       NodePolicySnapshot.Empty
     else
+      val e = NodePrincipal.policyEffectiveSet(principal).get
+      // Context digests contain identity ids. Predicate substitution also uses ordered names.
+      val identity = Json
+        .obj(
+          "user"   -> Json.fromString(e.user.username),
+          "tenant" -> Json.fromString(e.user.tenant.getOrElse("")),
+          "roles"  -> Json.arr(e.roles.map(r => Json.fromString(r.name))*),
+          "groups" -> Json.arr(e.groups.map(g => Json.fromString(g.name))*)
+        )
+        .noSpaces
       cache.get(
-        Key(context, version, rows, columns),
-        _ => compile(NodePrincipal.policyEffectiveSet(principal).get, rows, columns)
+        Key(context, version, rows, columns, identity),
+        _ => compile(e, rows, columns)
       )

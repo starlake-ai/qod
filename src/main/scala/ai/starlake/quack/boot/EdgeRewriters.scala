@@ -21,7 +21,7 @@ import io.circe.Json
 import scala.concurrent.duration.FiniteDuration
 
 /** Statement-pipeline components built from operator config, extracted from Main.bootManager: the
-  * routing classifier and the CLS / RLS rewriters.
+  * routing classifier, CLS rewriter and protected-write guard.
   */
 object EdgeRewriters extends LazyLogging:
 
@@ -66,8 +66,8 @@ object EdgeRewriters extends LazyLogging:
       nativeEnforcement = ai.starlake.quack.edge.cls.ColumnPolicyEnforcement.nativeEnabled()
     )
 
-  /** `quack-on-demand.cls.unresolvedTable`: what the column and row policy rewriters do with a
-    * table whose column list cannot be read.
+  /** `quack-on-demand.cls.unresolvedTable`: what the column policy rewriter does with a table whose
+    * column list cannot be read.
     */
   private def unresolvedTableMode(): UnresolvedMode =
     com.typesafe.config.ConfigFactory

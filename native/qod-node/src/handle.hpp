@@ -63,6 +63,7 @@ struct Handle {
 	std::vector<std::string> read_only;
 	std::vector<RowPolicy> row_policies;
 	std::vector<ColumnPolicy> column_policies;
+	std::string policy_bundle;
 	std::string nonce;
 	//! Epoch milliseconds.
 	int64_t exp = 0;
@@ -78,8 +79,8 @@ struct Handle {
 //! serve.
 //! Version 4 is protocol 6's: its nodes have no native row-policy enforcement. Version 5 requires
 //! rowPolicies even when empty, and keeps an older node from silently serving native-RLS traffic.
-//! Version 6 requires columnPolicies, fencing nodes without native CLS.
-constexpr int64_t kHandleVersion = 6;
+//! Version 7 requires signed row-policy snapshots; version 8 adds native column policies.
+constexpr int64_t kHandleVersion = 8;
 
 //! How far ahead of this node's clock a handle may expire: the manager mints them for 60 s, and the
 //! rest tolerates a manager clock up to 4 minutes ahead of the node's. That is the one direction it

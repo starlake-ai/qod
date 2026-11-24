@@ -152,11 +152,20 @@ class NodeColumnPolicySpec extends AnyFlatSpec with Matchers:
         readOnlyCatalogs = ReadOnlyCatalogs.none,
         nativeColumnPoliciesEnabled = enabled
       )
-      NodeHandles
+      val handle = NodeHandles
         .verify(keys.handle(node, principal(List(mask))), keys.key("node"), "node", 1000L)
         .toOption
         .get
-        .columnPolicies
+      handle.columnPolicies shouldBe Nil
+      if handle.policyBundle.isEmpty then Nil
+      else
+        keys.policyBundles
+          .page(handle.policyBundle, 0)
+          .get
+          .hcursor
+          .get[List[NodeColumnPolicy]]("policies")
+          .toOption
+          .get
     policies(false) shouldBe Nil
     policies(true).map(_.id) shouldBe List("m1")
   }

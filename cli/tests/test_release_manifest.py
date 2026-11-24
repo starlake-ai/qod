@@ -146,7 +146,7 @@ def test_build_manifest_refuses_a_pypi_answer_without_this_releases_wheel(releas
     ("rel", "old", "new", "message"),
     [
         ("project/Versions.scala", 'val duckdb         = "', 'val duckdb         = "9.', "the build links"),
-        ("native/qod-node/CMakeLists.txt", "set(QOD_NODE_PROTOCOL ", "set(QOD_NODE_PROTOCOL 9", "node protocol"),
+        ("native/qod-node/CMakeLists.txt", "set(QOD_NODE_PROTOCOL ", "set(QOD_NODE_PROTOCOL 10", "node protocol"),
         ("cli/src/qod_cli/launcher.py", 'DUCKDB_CLI_VERSION = "', 'DUCKDB_CLI_VERSION = "9.', "provisions DuckDB 9."),
     ],
 )
@@ -295,11 +295,11 @@ def test_main_check_pins_needs_no_release_files(tmp_path, capsys):
 
     repo = _fake_repo(tmp_path)
     cmake = repo / "native/qod-node/CMakeLists.txt"
-    cmake.write_text(cmake.read_text(encoding="utf-8").replace("set(QOD_NODE_PROTOCOL ", "set(QOD_NODE_PROTOCOL 9", 1))
+    cmake.write_text(cmake.read_text(encoding="utf-8").replace("set(QOD_NODE_PROTOCOL ", "set(QOD_NODE_PROTOCOL 10", 1))
     assert release_manifest.main(["--check-pins", "--repo", str(repo)]) == 1
     assert "node protocol" in capsys.readouterr().err
 
-    _edit(repo, "native/qod-node/CMakeLists.txt", "set(QOD_NODE_PROTOCOL 9", "set(QOD_NODE_PROTOCOL ")
+    _edit(repo, "native/qod-node/CMakeLists.txt", "set(QOD_NODE_PROTOCOL 10", "set(QOD_NODE_PROTOCOL ")
     dockerfile = "deploy/docker/quack-node/Dockerfile"
     version, pins = release_manifest.dockerfile_duckdb_pins(repo / dockerfile, dockerfile)
     asset = "duckdb-shared-libs-linux-amd64.tar.gz"

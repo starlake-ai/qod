@@ -70,6 +70,7 @@ class NodeHandlesVerifySpec extends AnyFlatSpec with Matchers:
     "readOnly"       -> Json.arr(),
     "rowPolicies"    -> Json.arr(),
     "columnPolicies" -> Json.arr(),
+    "policyBundle"   -> Json.fromString(""),
     "nonce"          -> Json.fromString("0123456789abcdef0123456789abcdef"),
     "exp"            -> Json.fromLong(Now + 60_000L)
   )
@@ -139,6 +140,19 @@ class NodeHandlesVerifySpec extends AnyFlatSpec with Matchers:
       _.readOnly
     ) shouldBe Right(List("crm"))
     List(
+      Payload.mapObject(_.remove("policyBundle")),
+      Payload.mapObject(_.add("policyBundle", Json.fromString("not-a-digest"))),
+      Payload.mapObject(
+        _.add("policyBundle", Json.fromString("a" * 64))
+          .add(
+            "columnPolicies",
+            Json.arr(
+              summon[io.circe.Encoder[NodeColumnPolicy]].apply(
+                NodeColumnPolicy("deny", "*", "*", "*", "secret", "deny", "")
+              )
+            )
+          )
+      ),
       Payload.mapObject(_.remove("columnPolicies")),
       Payload.mapObject(
         _.add("columnPolicies", Json.arr(Json.obj("action" -> Json.fromString("mask"))))

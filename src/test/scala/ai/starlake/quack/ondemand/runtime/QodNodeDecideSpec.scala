@@ -9,6 +9,7 @@ import ai.starlake.quack.edge.authz.{
   MintedHandles,
   NodeKeys,
   NodePrincipal,
+  PolicyRoute,
   ReadOnlyCatalogs
 }
 import ai.starlake.quack.edge.authz.location.{LocationRules, LocationRulesSource}
@@ -20,8 +21,9 @@ import ai.starlake.quack.model.{PoolKey, RoleDistribution, Tenant, TenantDbKind}
 import ai.starlake.quack.ondemand.PoolState
 import ai.starlake.quack.observability.metrics.{AuthzInstruments, MetricsBindings, OpaInstruments}
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
-import ai.starlake.quack.ondemand.state.{RbacRole, RbacUser, RolePermission}
+import ai.starlake.quack.ondemand.state.{RbacRole, RbacUser, RolePermission, RoleRowPolicy}
 import cats.effect.IO
+import cats.syntax.all.*
 import cats.effect.unsafe.implicits.global
 import com.sun.net.httpserver.HttpServer
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
@@ -130,16 +132,18 @@ class QodNodeDecideSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
         minted = Some(minted),
         paths = key => pools.get(key).flatMap(FlightSqlRouter.usePath).getOrElse(""),
         readOnlyCatalogs = ReadOnlyCatalogs.none,
-        versions = ai.starlake.quack.edge.authz.PolicyVersions.zero
+        versions = ai.starlake.quack.edge.authz.PolicyVersions.zero,
+        rowPoliciesEnabled = true
       )
-      val app = new DecideRoute(
+      val decideRoute = new DecideRoute(
         keys,
         minted,
         decider,
         new DryRunResults(),
         key => pools.get(key).flatMap(FlightSqlRouter.usePath).getOrElse(""),
         AuthzInstruments.noop
-      ).routes.orNotFound
+      )
+      val app = (decideRoute.routes <+> new PolicyRoute(keys).routes).orNotFound
       server.createContext(
         "/",
         exchange =>
@@ -164,7 +168,14 @@ class QodNodeDecideSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
       val file = dir.toRealPath().resolve("acme_file.duckdb").toString
       live = LiveQodNode.start(
         dir,
-        s"""CREATE TABLE memory.main.t AS SELECT 1 AS v;
+        s"""CREATE TABLE memory.main.docs(id INTEGER, owner VARCHAR);
+           |INSERT INTO memory.main.docs VALUES (1,'alice'),(2,'bob');
+           |INSTALL ducklake; LOAD ducklake;
+           |ATTACH 'ducklake:${dir.toRealPath()}/history.duckdb' AS lake (DATA_PATH '${dir
+            .toRealPath()}/data/');
+           |CREATE TABLE lake.main.docs AS SELECT * FROM memory.main.docs;
+           |ALTER TABLE lake.main.docs RENAME TO renamed_docs;
+           |CREATE TABLE memory.main.t AS SELECT 1 AS v;
            |ATTACH '$file' AS $Alias;
            |CREATE TABLE $Alias.main.t AS SELECT 2 AS v;
            |""".stripMargin,
@@ -292,4 +303,40 @@ class QodNodeDecideSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll
       .tags("tenant", "acme", "pool", "bi", "node", onPool.nodeId)
       .gauge()
       .value() should be > 0.0
+  }
+
+  "native row policies through the real manager" should "filter a signed snapshot and leave no-policy reads unfiltered" in {
+    val rows = AllTables.copy(rowPolicies =
+      List(RoleRowPolicy("rp-docs", "r-all", "*", "main", "docs", "owner = 'alice'"))
+    )
+    as(rows, MemoryPool, "SELECT id FROM docs") shouldBe Right(List("1"))
+    as(AllTables, MemoryPool, "SELECT count(*) FROM docs") shouldBe Right(List("2"))
+  }
+
+  it should "keep an invalid policy scoped to its table and report its id in the node log" in {
+    val broken = AllTables.copy(rowPolicies =
+      List(RoleRowPolicy("rp-broken", "r-all", "*", "main", "docs", "owner = ${typo}"))
+    )
+    as(broken, MemoryPool, "SELECT 1") shouldBe Right(List("1"))
+    as(broken, MemoryPool, "SELECT id FROM docs").left.toOption.get should include(
+      "could not be bound"
+    )
+    node.log should include("rp-broken")
+    new QuackHttpAdapter(client, new NodeLoadTracker, keys)
+      .authzStats(node.node)
+      .unsafeRunSync()
+      .get
+      .rowPolicyRefusals should be > 0L
+    as(AllTables, MemoryPool, "SELECT count(*) FROM docs") shouldBe Right(List("2"))
+  }
+
+  it should "refuse a renamed historical table through the actual decision route" in {
+    val rows = AllTables.copy(rowPolicies =
+      List(RoleRowPolicy("rp-history", "r-all", "*", "main", "renamed_docs", "owner = 'alice'"))
+    )
+    val principal = NodePrincipal.of(Some(rows), MemoryPool, DecidePurpose.Live)
+    raw(
+      principal,
+      "SELECT id FROM lake.main.docs AT (VERSION => 1)"
+    ).left.toOption.get should include("snapshot")
   }

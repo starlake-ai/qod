@@ -2270,6 +2270,13 @@ void Walker::Create(LogicalCreate &create, const std::string &via) {
 void Walker::CreateTable(LogicalCreateTable &create, const std::string &via) {
 	auto &base = create.info->Base();
 	InSchema("table", "create", create.schema, Text(base.GetTableName()), {}, via);
+	if (base.on_conflict == OnCreateConflict::REPLACE_ON_CONFLICT) {
+		auto existing = Catalog::GetEntry<TableCatalogEntry>(
+			context_, QualifiedName(create.schema.ParentCatalog().GetName(), create.schema.name, base.GetTableName()),
+			OnEntryNotFound::RETURN_NULL);
+		if (existing)
+			InSchema("table", "drop", create.schema, Text(base.GetTableName()), {}, via);
+	}
 	// DuckDB records a foreign key on the table it references (same schema, BindCreateTableConstraints).
 	for (auto &constraint : base.constraints) {
 		if (constraint->type != ConstraintType::FOREIGN_KEY) {

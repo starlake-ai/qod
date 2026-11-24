@@ -98,6 +98,12 @@ Handle VerifyHandle(const std::string &text, const std::string &node_key, const 
 			}
 			handle.column_policies.push_back(std::move(policy));
 		}
+		handle.policy_bundle = json.Get("policyBundle", JsonValue::Kind::STRING).string;
+		if (!handle.policy_bundle.empty() &&
+			(handle.policy_bundle.size() != 64 || !IsLowerHex(handle.policy_bundle) ||
+			 (!handle.row_policies.empty() || !handle.column_policies.empty()))) {
+			throw std::invalid_argument("invalid row policy bundle");
+		}
 		handle.exp = json.Get("exp", JsonValue::Kind::INTEGER).integer;
 		auto &principal = json.Get("principal", JsonValue::Kind::OBJECT);
 		handle.principal.id = principal.Get("id", JsonValue::Kind::STRING).string;
