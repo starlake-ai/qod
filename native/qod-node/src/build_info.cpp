@@ -12,13 +12,24 @@
 namespace qod {
 namespace {
 
-const char kBuildInfo[] = "qod-node-build-info:protocol=" QOD_NODE_STRINGIFY(QOD_NODE_PROTOCOL) ";duckdb=" QOD_NODE_DUCKDB_VERSION
-                          ";duckdb_source=" QOD_NODE_DUCKDB_SOURCE_ID;
+#ifndef QOD_NODE_EXTRA_EXTENSIONS
+#define QOD_NODE_EXTRA_EXTENSIONS ""
+#endif
+
+const char kBaseInfo[] = "qod-node-build-info:protocol=" QOD_NODE_STRINGIFY(QOD_NODE_PROTOCOL) ";duckdb=" QOD_NODE_DUCKDB_VERSION
+                         ";duckdb_source=" QOD_NODE_DUCKDB_SOURCE_ID;
+
+// The extra extensions linked through QOD_EXTRA_EXTENSIONS, only when there are any.
+std::string MakeBuildInfo() {
+	std::string extra = QOD_NODE_EXTRA_EXTENSIONS;
+	return extra.empty() ? std::string(kBaseInfo) : std::string(kBaseInfo) + ";extra=" + extra;
+}
 
 } // namespace
 
 const char *BuildInfo() {
-	return kBuildInfo;
+	static const std::string info = MakeBuildInfo();
+	return info.c_str();
 }
 
 void CheckLinkedDuckDB() {

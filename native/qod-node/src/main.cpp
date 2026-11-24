@@ -14,10 +14,12 @@
 #include "authz.hpp"
 #include "build_info.hpp"
 #include "duckdb.hpp"
+#include "extra_extensions.hpp"
 #include "functions_list.hpp"
 #include "init_policy.hpp"
 #include "init_runner.hpp"
 #include "lifetime.hpp"
+#include "linked_function_classes.hpp"
 #include "node_config.hpp"
 #include "node_hooks.hpp"
 #include "options.hpp"
@@ -58,6 +60,7 @@ int CheckInitMode(const NodeOptions &options) {
 	duckdb::DBConfig config;
 	ApplyExtensionPolicy(config, options.extensions);
 	duckdb::DuckDB db(nullptr, &config);
+	LoadExtraExtensions(db);
 	duckdb::Connection con(db);
 	std::cout << InitVerdictJson(CheckInit(*con.context, sql)) << std::endl;
 	return 0;
@@ -67,6 +70,7 @@ int ListSettingsMode(const NodeOptions &options) {
 	duckdb::DBConfig config;
 	ApplyExtensionPolicy(config, options.extensions);
 	duckdb::DuckDB db(nullptr, &config);
+	LoadExtraExtensions(db);
 	duckdb::Connection con(db);
 	RunInitFiles(con, options);
 	ListSettings(duckdb::DBConfig::GetConfig(*db.instance), std::cout);
@@ -77,6 +81,7 @@ int ListFunctionsMode(const NodeOptions &options) {
 	duckdb::DBConfig config;
 	ApplyExtensionPolicy(config, options.extensions);
 	duckdb::DuckDB db(nullptr, &config);
+	LoadExtraExtensions(db);
 	// qod_session and qod_screen are functions every node has. The id and key are never used: no
 	// handle is verified in this mode.
 	RegisterNodeAuthz(*db.instance, std::make_shared<NodeAuthz>("qod-node-list", std::string(32, '\0')));
@@ -124,6 +129,9 @@ int Serve(const NodeOptions &options) {
 	ApplyOptimizerPolicy(config);
 	RegisterS3EnvironmentGuard(config);
 	duckdb::DuckDB db(nullptr, &config);
+	LoadExtraExtensions(db);
+	// Linked extensions classified their functions while loading; nothing else may from here on.
+	FreezeLinkedFunctionClasses();
 	// Before any SQL: qod_session, the parse screen and the post_bind backstop apply to every
 	// connection quack opens from here on.
 	RegisterNodeAuthz(*db.instance,
