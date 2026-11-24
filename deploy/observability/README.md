@@ -200,8 +200,7 @@ Which stack mounts which:
 - `qod_maint_duration_seconds` - histogram, labels: `tenant`, `tenant_db`
 - `qod_maint_files_compacted_total` / `qod_maint_bytes_reclaimed_total` / `qod_maint_snapshots_expired_total` - counters, labels: `tenant`, `tenant_db`
 - `column_policy_rewrites_total` - counter, labels: `tenant`, `pool`, `outcome` (`rewritten` / `denied` / `passthrough`)
-- `row_policy_rewrites_total` - counter, labels: `tenant`, `pool`, `outcome` (`rewritten` / `passthrough` / `parse_failed`)
-- `column_policy_rewrite_duration_seconds` / `row_policy_rewrite_duration_seconds` - histograms, labels: `tenant`, `pool`
+- `column_policy_rewrite_duration_seconds` - histograms, labels: `tenant`, `pool`
 - `column_policy_catalog_lookups_total` - counter, labels: `tenant`, `pool`, `result` (`hit` / `miss` / `error`)
 - `routing_tables_total` - counter, labels: `tenant`, `pool`, `result` (`new` / `repeat`)
 - `routing_placements_total` - counter, labels: `tenant`, `pool`, `result` (`stay` / `switch`)

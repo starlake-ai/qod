@@ -36,7 +36,7 @@ final class NodeKeys(
     minted: Option[MintedHandles] = None,
     paths: PoolKey => String = _ => "",
     readOnlyCatalogs: ReadOnlyCatalogs,
-    nodeRowPolicies: Boolean = false
+    rowPoliciesEnabled: Boolean = true
 ):
   require(secret.nonEmpty, "the node-key secret is empty")
 
@@ -84,7 +84,7 @@ final class NodeKeys(
       path = paths(node.poolKey),
       readOnly = if principal.system then Set.empty else readOnlyCatalogs.of(node.poolKey),
       nowMs = clock(),
-      rowPolicies = if nodeRowPolicies then NodeRowPolicy.of(principal) else Nil
+      rowPolicies = if rowPoliciesEnabled then NodeRowPolicy.of(principal) else Nil
     )
     // The statement's own record of its nonces: what its "authorization unavailable" marker is
     // checked against, whatever the bounded registries below still hold.

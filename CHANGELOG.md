@@ -4,11 +4,13 @@
 
 ### Upgrading
 
-- **Native row-policy enforcement is opt-in.** Set `QOD_RLS_ENFORCEMENT=node` after
-  deploying and restarting protocol-7 nodes. Signed session handles are now version 5;
-  older nodes and handles refuse. Gateway enforcement remains the default. Native mode
-  applies base-table policies through views and resolved scans; writes to protected tables
-  (INSERT included), view-scoped policies and unsupported predicate forms refuse. See
+- **Row policies now run exclusively in the native node.** Deploy and restart protocol-7
+  nodes; signed session handles are version 5 and older nodes and handles refuse. The
+  gateway RLS SQL rewriter, its enforcement-mode switch and rewrite metrics are removed.
+  `QOD_RLS_ENABLED=false` remains the RLS kill switch. Native enforcement applies base-table
+  policies through views and resolved scans; writes to protected tables (INSERT included),
+  view-scoped policies, DuckLake change feeds and unsupported predicate forms refuse. CLS,
+  metadata filtering, protected-write and historical-name checks remain. See
   [the design and rollout guide](docs/node-row-security.md).
 
 - **Restart every node after upgrading** so it runs DuckDB 2.0.1 (see Changed): a node an

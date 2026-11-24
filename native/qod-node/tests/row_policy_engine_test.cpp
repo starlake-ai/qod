@@ -98,6 +98,21 @@ int main() {
 	Expect("hidden error", Run(user, "SELECT id FROM docs WHERE CAST(secret AS INTEGER)>0"), "1");
 	Expect("query table", Run(user, "SELECT id FROM query_table('docs')"), "1");
 	Expect("query literal", Run(user, "SELECT id FROM query('SELECT * FROM docs')"), "1");
+	Expect("CTE shadows protected name", Run(user, "WITH docs AS (SELECT 9 AS id) SELECT id FROM docs"), "9");
+	Expect("CTE shadows caller only", Run(user, "WITH docs AS (SELECT 9 AS id) SELECT id FROM memory.main.docs"), "1");
+	Expect("catalog-first two-part name", Run(user, "SELECT count(*) FROM memory.docs"), "1");
+	Refused("table macro keeps native literal-target restriction", Run(user,
+	        "SELECT sum(count) FROM histogram_values('docs', owner)"), "without literal table names");
+	Run(setup, "CREATE TABLE \"a.b\" AS SELECT * FROM docs; CREATE TABLE \"Équipe\" AS SELECT * FROM docs");
+	handle.row_policies.push_back({"p-dot", "memory", "main", "a.b", "owner = 'alice'"});
+	handle.row_policies.push_back({"p-unicode", "memory", "main", "Équipe", "owner = 'alice'"});
+	++handle.policy_version;
+	install();
+	Expect("dotted quoted table", Run(user, "SELECT id FROM \"a.b\""), "1");
+	Expect("Unicode table", Run(user, "SELECT id FROM \"Équipe\""), "1");
+	handle.row_policies.resize(1);
+	++handle.policy_version;
+	install();
 	Expect("rowid survives filtering", Run(user, "SELECT rowid FROM docs"), "0");
 	Expect("integer division dialect", Run(user, "SELECT id // 1 FROM docs"), "1");
 	Expect("sample after row filtering", Run(user, "SELECT count(*) FROM (SELECT * FROM docs USING SAMPLE 100%)"), "1");
@@ -153,6 +168,11 @@ int main() {
 	++handle.policy_version;
 	install();
 	Expect("built-in function in policy", Run(user, "SELECT id FROM docs"), "1");
+	handle.row_policies[0].sql = "owner.lower() = 'alice'";
+	++handle.policy_version;
+	install();
+	Expect("method-form policy binds natively", Run(user, "SELECT id FROM docs"), "1");
+	handle.row_policies[0].sql = "lower(owner) = 'alice'";
 	Run(setup, "CREATE MACRO memory.main.lower(v) AS 'alice'");
 	Refused("macro cannot shadow policy function", Run(user, "SELECT id FROM docs"), "could not be bound");
 	Run(setup, "DROP MACRO memory.main.lower");
@@ -205,6 +225,14 @@ int main() {
 		Expect("DuckLake base scan", Run(user, "SELECT id FROM lake.main.docs"), "1");
 		Expect("DuckLake view", Run(user, "SELECT id FROM lake.main.v"), "1");
 		Expect("DuckLake count", Run(user, "SELECT count(*) FROM lake.main.docs"), "1");
+		Expect("DuckLake historical scan", Run(user, "SELECT id FROM lake.main.docs AT (VERSION => 1)"), "1");
+		Refused("DuckLake change feed", Run(user,
+		        "SELECT * FROM ducklake_table_insertions('lake','main','docs',0,1)"), "change feed with row policies");
+		Run(setup, "CREATE VIEW lake.main.feed AS SELECT * FROM ducklake_table_insertions('lake','main','docs',0,1)");
+		Refused("DuckLake change feed behind view", Run(user, "SELECT * FROM lake.main.feed"), "change feed with row policies");
+		Refused("DuckLake change feed behind query", Run(user,
+		        "SELECT * FROM query('SELECT * FROM ducklake_table_insertions(''lake'',''main'',''docs'',0,1)')"),
+		        "change feed with row policies");
 		Expect("DuckLake caller error", Run(user, "SELECT id FROM lake.main.docs WHERE CAST(secret AS INTEGER)>0"), "1");
 		Run(setup, "DETACH lake");
 		std::filesystem::remove_all(dir);

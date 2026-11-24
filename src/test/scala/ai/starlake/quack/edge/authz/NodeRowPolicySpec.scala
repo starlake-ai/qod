@@ -75,6 +75,50 @@ class NodeRowPolicySpec extends AnyFlatSpec with Matchers:
       .isLeft shouldBe true
   }
 
+  it should "sign row policies by default and omit them only when the kill switch is off" in {
+    val pool = PoolKey("acme", "db", "bi")
+    val node = ai.starlake.quack.model.RunningNode(
+      "node-1",
+      pool,
+      ai.starlake.quack.model.Role.Dual,
+      "127.0.0.1",
+      1,
+      "t",
+      None,
+      None,
+      java.time.Instant.EPOCH
+    )
+    val secret  = "test-secret"
+    val p       = principal("owner = ${user}")
+    val enabled = new NodeKeys(
+      secret,
+      "r",
+      clock = () => 1000L,
+      versions = PolicyVersions.zero,
+      readOnlyCatalogs = ReadOnlyCatalogs.none
+    )
+    val disabled = new NodeKeys(
+      secret,
+      "r",
+      clock = () => 1000L,
+      versions = PolicyVersions.zero,
+      readOnlyCatalogs = ReadOnlyCatalogs.none,
+      rowPoliciesEnabled = false
+    )
+    def rows(keys: NodeKeys) = NodeHandles
+      .verify(
+        keys.handle(node, p),
+        keys.key(node.nodeId),
+        node.nodeId,
+        1000L
+      )
+      .toOption
+      .get
+      .rowPolicies
+    rows(enabled) shouldBe NodeRowPolicy.of(p)
+    rows(disabled) shouldBe Nil
+  }
+
   it should "bound policy counts and the expanded UTF-8 predicate size" in {
     NodeRowPolicy.valid(NodeRowPolicy("p", "*", "*", "t", "é" * 32769)) shouldBe false
     NodeRowPolicy.valid(NodeRowPolicy("p", "*", "*", "t", "")) shouldBe false
@@ -83,12 +127,6 @@ class NodeRowPolicySpec extends AnyFlatSpec with Matchers:
   it should "leave native reads to the node while retaining the protected-write guard" in {
     val catalog = new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(Map.empty)
     val native  = new ai.starlake.quack.edge.policy.ProtectedWriteGuard(
-      catalog,
-      clsEnabled = false,
-      rlsEnabled = true,
-      nodeRowPolicies = true
-    )
-    val gateway = new ai.starlake.quack.edge.policy.ProtectedWriteGuard(
       catalog,
       clsEnabled = false,
       rlsEnabled = true
@@ -104,8 +142,5 @@ class NodeRowPolicySpec extends AnyFlatSpec with Matchers:
       e,
       ctx
     ) shouldBe GuardOutcome.Allow
-    gateway.check("SELECT * FROM query_table('docs')", StatementKind.Select, e, ctx) shouldBe a[
-      GuardOutcome.Deny
-    ]
     native.check("DELETE FROM docs", StatementKind.Dml, e, ctx) shouldBe a[GuardOutcome.Deny]
   }

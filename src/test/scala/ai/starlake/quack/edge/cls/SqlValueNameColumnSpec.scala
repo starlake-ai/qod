@@ -417,28 +417,6 @@ class SqlValueNameColumnSpec extends AnyFlatSpec with Matchers:
       ) shouldBe a[Denied]
     }
 
-  "the row filter" should "filter a table read whole through a time keyword" in {
-    val rls = ai.starlake.quack.edge.rls.RowPolicyRewriterSpec.withNoCatalog()
-    val p   = ai.starlake.quack.ondemand.state
-      .RoleRowPolicy("rp-1", "r-1", "*", "main", "current_date", "id = 1")
-    val eff = EffectiveSet(user, Nil, Nil, Nil, Nil, Nil, List(p))
-    val out = rls.rewrite(
-      "SELECT current_date FROM current_date",
-      StatementKind.Select,
-      eff,
-      ai.starlake.quack.edge.rls.SchemaContext(Some(Catalog), Some("main"), None)
-    ) match
-      case ai.starlake.quack.edge.rls.RowPolicyRewriter.Rewritten(sql) => sql
-      case other => fail(s"expected Rewritten, got $other")
-    Using.resource(database(maskedValues = false)) { conn =>
-      Using.resource(conn.createStatement()) { st =>
-        st.execute("CREATE TABLE current_date (id INTEGER, s VARCHAR)")
-        st.execute("INSERT INTO current_date VALUES (1, 'kept'), (2, 'filtered')")
-      }
-      withClue(out)(rowsOf(conn, out) shouldBe Right(List(List("{'id': 1, 's': kept}"))))
-    }
-  }
-
   // ---- end to end on DuckDB ------------------------------------------------------------------
 
   private val Rows = List((1, "2020-01-01", "ct-secret", "cts-secret"), (2, "2021-06-30", "x", "y"))

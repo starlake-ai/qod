@@ -8,9 +8,9 @@ import ai.starlake.quack.ondemand.auth.TokenRestriction
   * Permissions and pool grants shrink. Column and row policies are passed through UNTOUCHED, and
   * that is a correctness condition, not an optimization: policies are attached to roles but
   * restrict tables that any role may grant. Row policies combine with `OR` and a table with no
-  * matching policy is passthrough (`RowPolicyRewriter`), so dropping a policy-carrying role while
-  * keeping a grant-carrying one would let the child see MORE rows than its parent. Anyone tempted
-  * to filter policies here should read `AttenuationSpec`'s regression test first.
+  * matching policy is unfiltered on the node, so dropping a policy-carrying role while keeping a
+  * grant-carrying one would let the child see MORE rows than its parent. Anyone tempted to filter
+  * policies here should read `AttenuationSpec`'s regression test first.
   */
 object Attenuation:
 

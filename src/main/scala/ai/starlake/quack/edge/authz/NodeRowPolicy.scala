@@ -1,6 +1,6 @@
 package ai.starlake.quack.edge.authz
 
-import ai.starlake.quack.edge.rls.RowPolicyRewriter
+import ai.starlake.quack.edge.rls.RowPolicyIdentity
 import io.circe.{Decoder, Encoder}
 
 /** A predicate, identity-filled by the manager, carried inside the signed session handle. */
@@ -39,7 +39,7 @@ object NodeRowPolicy:
               p.catalogName,
               p.schemaName,
               p.tableName,
-              RowPolicyRewriter.filledPredicate(p.predicateSql, e)
+              RowPolicyIdentity.fill(p.predicateSql, e)
             )
           )
       }

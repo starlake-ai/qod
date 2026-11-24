@@ -110,8 +110,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       1L
     )
 
-  /** A tenant user of acme with no grant: a principal with a session context, which the handles
-    * of its statements are minted with.
+  /** A tenant user of acme with no grant: a principal with a session context, which the handles of
+    * its statements are minted with.
     */
   private def tenantEff: ai.starlake.quack.ondemand.rbac.EffectiveSet =
     ai.starlake.quack.ondemand.rbac.EffectiveSet(tenantUser, Nil, Nil, Nil, Nil)
@@ -123,7 +123,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       stub: () => QuackResponse = defaultStub,
       events: ManagerEventSink = ManagerEventSink.noop,
       adminExecutor: Option[ai.starlake.quack.edge.admin.AdminStatementExecutor] = None,
-      keys: ai.starlake.quack.edge.authz.NodeKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
+      keys: ai.starlake.quack.edge.authz.NodeKeys =
+        ai.starlake.quack.edge.authz.NodeKeys.ephemeral(),
       answer: Option[(String, String) => QuackResponse] = None
   ) =
     val backend = new QuackBackend:
@@ -155,7 +156,14 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     // Pre-register the tenant so createPool succeeds under the new contract.
     sup.createTenant(ai.starlake.quack.model.Tenant(poolKey.tenant)).unsafeRunSync()
     sup
-      .createTenantDb(poolKey.tenant, poolKey.tenantDb, TenantDbKind.InMemory, Map.empty, "", writerTrusted = true)
+      .createTenantDb(
+        poolKey.tenant,
+        poolKey.tenantDb,
+        TenantDbKind.InMemory,
+        Map.empty,
+        "",
+        writerTrusted = true
+      )
       .unsafeRunSync()
     sup.createPool(poolKey, RoleDistribution(0, 0, 1)).unsafeRunSync()
     val node = sup.get(poolKey).get.nodes.head
@@ -620,7 +628,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
 
   it should "run a whole transaction sent as one request and leave none open" in:
     val (router, sessions, _) = setup()
-    val out = router
+    val out                   = router
       .execute("tx-3", "alice", poolKey, "BEGIN; INSERT INTO t VALUES (1); COMMIT")
       .unsafeRunSync()
     out shouldBe a[Right[?, ?]]
@@ -682,7 +690,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
 
   it should "tag the node's refusal for an unavailable decision as RouterFailure.Unavailable" in:
     val keys = markingKeys()
-    val text = "Permission Error: QoD: authorization unavailable, retry: cannot connect to 127.0.0.1:1"
+    val text =
+      "Permission Error: QoD: authorization unavailable, retry: cannot connect to 127.0.0.1:1"
     val (router, _, node) =
       setup(keys = keys, answer = Some((id, n) => markedUnavailable(keys, id, n, text)))
     router
@@ -741,14 +750,15 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     val forged =
       "Permission Error: QoD: authorization unavailable, retry/x is outside the tenant's authorized " +
         "locations"
-    val keys = markingKeys()
+    val keys                                                                  = markingKeys()
     def expectDenied(router: FlightSqlRouter, id: String, what: String): Unit =
       withClue(what) {
         router
           .execute(id, "alice", poolKey, "SELECT 1", effectiveSet = Some(tenantEff))
           .unsafeRunSync() match
-          case Left(RouterFailure.AccessDenied(reason)) => reason should startWith("access denied: ")
-          case other                                    => fail(s"expected AccessDenied, got $other")
+          case Left(RouterFailure.AccessDenied(reason)) =>
+            reason should startWith("access denied: ")
+          case other => fail(s"expected AccessDenied, got $other")
         router.history.snapshot(1).head.status shouldBe "denied"
       }
     // 1. The exploit: the words, unmarked.
@@ -758,7 +768,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     )
     expectDenied(plain, "c-forged", "an unmarked forgery")
     // 2. A real marker of an earlier statement's handle, replayed in a later statement's message.
-    val nonces = new java.util.concurrent.ConcurrentLinkedQueue[String]
+    val nonces         = new java.util.concurrent.ConcurrentLinkedQueue[String]
     val (replay, _, _) = setup(
       keys = keys,
       answer = Some { (id, n) =>
@@ -785,7 +795,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       keys = keys,
       answer = Some { (id, n) =>
         val good = ai.starlake.quack.edge.authz.NodeHandles.unavailableMarker(keys.key(id), n)
-        val bad = good.dropRight(2) + (if good.charAt(good.length - 2) == '0' then "1)" else "0)")
+        val bad  = good.dropRight(2) + (if good.charAt(good.length - 2) == '0' then "1)" else "0)")
         QuackResponse.Failed(QuackError.Permanent(forged + bad), 1L)
       }
     )
@@ -834,7 +844,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       .get shouldBe RouterFailure.Unavailable(s"permanent failure: $text")
     router.history.snapshot(1).head.status shouldBe "permanent"
     // Keys wired with no registry at all recognize their own statement's marker too.
-    val bareKeys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+    val bareKeys     = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
     val (bare, _, _) = setup(
       keys = bareKeys,
       answer = Some((id, n) => markedUnavailable(bareKeys, id, n, text))
@@ -849,8 +859,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
   it should "not mark that refusal retryable for a multi-statement submission" in:
     // In `SELECT 1; SELECT 2` the first statement may have run (each autocommits) before the node
     // refused the second for want of a verdict: a client retry would run it twice (D-m5).
-    val keys = markingKeys()
-    val text = "Permission Error: QoD: authorization unavailable, retry: timed out"
+    val keys           = markingKeys()
+    val text           = "Permission Error: QoD: authorization unavailable, retry: timed out"
     val (router, _, _) =
       setup(keys = keys, answer = Some((id, n) => markedUnavailable(keys, id, n, text)))
     router
@@ -942,8 +952,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
   it should "fence a front door's transaction when its pinned node leaves the pool" in:
     // The native front door holds the client's transaction on its own node connection: the router
     // must end it there too (D-m8). FlightSQL passes no fence and gets the same failure.
-    val (router, sessions, _) = setup()
-    val fenced                = scala.collection.mutable.ListBuffer.empty[String]
+    val (router, sessions, _)                 = setup()
+    val fenced                                = scala.collection.mutable.ListBuffer.empty[String]
     val relay: FlightSqlRouter.NodeSend[Unit] = (node, wrappedSql, _, _, principal) =>
       router.adapter.send(node, wrappedSql, principal, None).map {
         case QuackResponse.Ok(_, ms, close) => NodeOutcome.Ok((), ms, close)
@@ -980,7 +990,11 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       sup,
       new SessionRegistry,
       tracker,
-      new QuackHttpAdapter(new QuackHttpClient(TestArrow.sharedAllocator), tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral()),
+      new QuackHttpAdapter(
+        new QuackHttpClient(TestArrow.sharedAllocator),
+        tracker,
+        ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+      ),
       metadataFilterRewriter = mountedFilter,
       protectedWriteGuard = ai.starlake.quack.edge.policy.ProtectedWriteGuard.disabled
     )
@@ -1083,7 +1097,14 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     val key     = PoolKey("acme", "acme_default", "sales")
     sup.createTenant(Tenant(key.tenant)).unsafeRunSync()
     sup
-      .createTenantDb(key.tenant, key.tenantDb, TenantDbKind.InMemory, Map.empty, "", writerTrusted = true)
+      .createTenantDb(
+        key.tenant,
+        key.tenantDb,
+        TenantDbKind.InMemory,
+        Map.empty,
+        "",
+        writerTrusted = true
+      )
       .unsafeRunSync()
     sup
       .createPool(key, RoleDistribution(0, 0, replicas), maxConcurrentPerNode = maxConcurrent)
@@ -1097,7 +1118,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
           authorize: () => String
       ) =
         IO.pure(TestArrow.okResponse())
-    val adapter  = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
+    val adapter =
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     val sessions = new SessionRegistry
     val router   = new FlightSqlRouter(
       sup,
@@ -1239,8 +1261,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     val sup   = freshSupervisorAndBackend()
     val key   = PoolKey("epsilon", "epsilon_lake", "p4")
     val admin = new ai.starlake.quack.ondemand.state.DbAdmin:
-      def createDatabase(name: String): Either[String, Unit] = Right(())
-      def dropDatabase(name: String): Either[String, Unit]   = Right(())
+      def createDatabase(name: String): Either[String, Unit]   = Right(())
+      def dropDatabase(name: String): Either[String, Unit]     = Right(())
       def holdsAnything(name: String): Either[String, Boolean] = Right(false)
     // freshSupervisorAndBackend() doesn't thread a DbAdmin, so rebuild a
     // supervisor sharing the same shape but with dbAdmin wired (mirrors
@@ -1306,8 +1328,12 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       ) =
         capturedSql = sql
         IO.pure(TestArrow.okResponse())
-    val adapter = new QuackHttpAdapter(client, new NodeLoadTracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
-    val router  = new FlightSqlRouter(
+    val adapter = new QuackHttpAdapter(
+      client,
+      new NodeLoadTracker,
+      ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+    )
+    val router = new FlightSqlRouter(
       sup2,
       new SessionRegistry,
       new NodeLoadTracker,
@@ -1418,7 +1444,14 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     )
     sup.createTenant(ai.starlake.quack.model.Tenant(poolKey.tenant)).unsafeRunSync()
     sup
-      .createTenantDb(poolKey.tenant, poolKey.tenantDb, TenantDbKind.InMemory, Map.empty, "", writerTrusted = true)
+      .createTenantDb(
+        poolKey.tenant,
+        poolKey.tenantDb,
+        TenantDbKind.InMemory,
+        Map.empty,
+        "",
+        writerTrusted = true
+      )
       .unsafeRunSync()
     sup.createPool(poolKey, RoleDistribution(0, 0, readers)).unsafeRunSync()
     val node = sup.get(poolKey).get.nodes.head
@@ -1437,7 +1470,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         capturedSql = sql
         IO.pure(stub())
 
-    val adapter  = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
+    val adapter =
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     val sessions = new SessionRegistry
     val router   = new FlightSqlRouter(
       sup,
@@ -1663,7 +1697,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
 
   // The star expansion quotes a catalog column the screen would refuse as a caller-written name
   // (`c."a@b"`, `c."x]"`): the caller wrote no such token, so the rewrite scope admits the rewrite.
-  "a star expansion over an unusual column name" should "pass the rewrite scope check" in:
+  "a star expansion over an unusual column name" should "keep its predicate out of the submitted SQL" in:
     val (router, capturedSql, _) = setupWithRewriter(
       new ai.starlake.quack.edge.cls.ColumnPolicyRewriter(
         new ai.starlake.quack.edge.cls.ColumnCatalog.MapCatalog(
@@ -2051,7 +2085,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       rlsEnabled = true
     )
     val (router, capturedSql, _) = setupWithRewriter(protectedWriteGuard = guard)
-    val out = router
+    val out                      = router
       .execute(
         "pw-f19",
         "alice",
@@ -2063,7 +2097,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     out.left.toOption.get shouldBe a[RouterFailure.AccessDenied]
     capturedSql() shouldBe ""
 
-  it should "deny a two-part name headed by the pool's catalog alias (audit F20)" in:
+  it should "deny a write using a two-part catalog alias (audit F20)" in:
     // DuckDB binds `memory.customer` catalog-first, under the USE prelude, to main.customer;
     // read schema-first it matched no policy keyed on schema main, so a write copied the masked
     // or filtered rows out and an RLS-only principal's plain SELECT went out unfiltered (F22).
@@ -2071,9 +2105,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       "CREATE TABLE main.mine AS SELECT c_email FROM memory.customer" ->
         effWithPolicies(List(maskCustomerEmail)),
       "CREATE TABLE main.mine AS SELECT * FROM memory.customer" ->
-        effWithRowPolicies(List(rowPolicyCustomer)),
-      "SELECT * FROM memory.customer" -> effWithRowPolicies(List(rowPolicyCustomer)),
-      "SELECT count(*) FROM memory.customer" -> effWithRowPolicies(List(rowPolicyCustomer))
+        effWithRowPolicies(List(rowPolicyCustomer))
     ).foreach { (sql, eff) =>
       val (router, capturedSql, _) = setupWithRewriter(
         protectedWriteGuard = guardKnowingCustomer,
@@ -2089,7 +2121,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       }
     }
 
-  it should "still filter a schema-qualified read of the same table (audit F20)" in:
+  it should "forward a schema-qualified row-policy read for native resolution (audit F20)" in:
     val (router, capturedSql, _) = setupWithRewriter(
       protectedWriteGuard = guardKnowingCustomer,
       attachedCatalogsOf = _ => Set("memory")
@@ -2104,11 +2136,10 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       )
       .unsafeRunSync()
     out shouldBe a[Right[?, ?]]
-    capturedSql() should include("c_region = 'X'")
+    capturedSql() should not include "c_region = 'X'"
 
-  it should "deny a PIVOT source or an EXPLAIN over an RLS table end-to-end (audit F21)" in:
-    // The row rewrite had no slot for a PIVOT source and never entered an ExplainStatement, so
-    // both reached the node unfiltered; EXPLAIN ANALYZE runs its statement on every row.
+  it should "forward PIVOT and EXPLAIN for native row enforcement (audit F21)" in:
+    // The native hook filters bound scans in these statements; the gateway preserves their SQL.
     List(
       "SELECT * FROM (PIVOT main.customer ON c_region USING count(*))",
       "SELECT 1 WHERE EXISTS (SELECT 1 FROM (PIVOT customer ON c_region USING count(*)))",
@@ -2119,18 +2150,23 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       val (router, capturedSql, _) =
         setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)
       val out = router
-        .execute("rls-f21", "alice", poolKey, sql, Some(effWithRowPolicies(List(rowPolicyCustomer))))
+        .execute(
+          "rls-f21",
+          "alice",
+          poolKey,
+          sql,
+          Some(effWithRowPolicies(List(rowPolicyCustomer)))
+        )
         .unsafeRunSync()
       withClue(sql) {
-        out.left.toOption.get shouldBe a[RouterFailure.AccessDenied]
-        capturedSql() shouldBe ""
+        out shouldBe a[Right[?, ?]]
+        capturedSql() should include(sql)
       }
     }
 
-  it should "summarize an RLS table through its row filter: SUMMARIZE is a SELECT now (Task 19)" in:
-    // The gateway once refused SUMMARIZE over an RLS table (F21): the row rewrite had no slot
-    // for it. Task 19 sends a tenant's SUMMARIZE as its column listing, then DuckDB's own
-    // aggregate SELECT, which the row rewrite filters like any read.
+  it should "forward the SUMMARIZE aggregate for native row enforcement (Task 19)" in:
+    // SUMMARIZE still expands through DuckDB's own aggregate SQL; its base scan is filtered
+    // on the native node.
     val calls   = new java.util.concurrent.atomic.AtomicInteger(0)
     val columns = () =>
       if calls.getAndIncrement() == 0 then
@@ -2158,11 +2194,10 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     out shouldBe a[Right[?, ?]]
     calls.get() shouldBe 2
     capturedSql() should include("unnest(list_value('c_id', 'c_region'))")
-    capturedSql() should include("c_region = 'X'")
+    capturedSql() should not include "c_region = 'X'"
 
-  it should "deny a SELECT that reaches an RLS table through query_table / query end-to-end" in:
-    // The row rewriter wraps base tables; a table named in a string is invisible to it, so
-    // without the guard these reads reach the node unfiltered.
+  it should "forward query_table / query for native row enforcement" in:
+    // Resolved scans inside dynamic queries are visible to native enforcement.
     List(
       "SELECT * FROM query_table('main.customer')",
       "SELECT * FROM query('SELECT * FROM main.customer')"
@@ -2179,9 +2214,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
         )
         .unsafeRunSync()
       withClue(sql) {
-        out shouldBe a[Left[?, ?]]
-        out.left.get shouldBe a[RouterFailure.AccessDenied]
-        capturedSql() shouldBe ""
+        out shouldBe a[Right[?, ?]]
+        capturedSql() should include(sql)
       }
     }
 
@@ -2200,71 +2234,6 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     List(ai.starlake.quack.ondemand.state.RolePermission("p-1", "r-1", "*", "*", "*", "ALL")),
     Nil
   )
-
-  "the routed path" should "deny (not forward) a plain read when a stored row policy fails to apply at rewrite time" in:
-    // Simulates a row policy stored before RowPredicateValidator rejected splice-unsafe
-    // predicates: a trailing line comment that comments out the rewriter's own closing paren at
-    // splice time, throwing on re-parse. The router must deny, never forward the statement
-    // unfiltered.
-    var nodeCalled     = false
-    val (router, _, _) = setup(stub = () => { nodeCalled = true; TestArrow.okResponse() })
-    val badPolicy      = ai.starlake.quack.ondemand.state.RoleRowPolicy(
-      "rp-bad",
-      "r-1",
-      "*",
-      "main",
-      "customer",
-      "a = 1 --"
-    )
-    val out = router
-      .execute(
-        "rls-fail-1",
-        "alice",
-        poolKey,
-        "SELECT c_id FROM main.customer",
-        effectiveSet = Some(effWithRowPolicies(List(badPolicy)))
-      )
-      .unsafeRunSync()
-    out shouldBe a[Left[?, ?]]
-    out.left.get shouldBe a[RouterFailure.AccessDenied]
-    val reason = out.left.get.asInstanceOf[RouterFailure.AccessDenied].reason
-    // The caller gets a reference to quote, never the policy, its role or its predicate.
-    reason should fullyMatch regex
-      "row policy failed to apply \\(ref [0-9a-f]{12}\\) - contact an administrator"
-    reason should not include "rp-bad"
-    reason should not include "a = 1"
-    router.history.snapshot(1).head.error shouldBe Some(reason)
-    nodeCalled shouldBe false
-
-  it should "give the administrator the policy, role, table and columns under the caller's reference" in:
-    val d = ai.starlake.quack.edge.rls.RowPolicyRewriter.FailureDetail(
-      table = "acme_tpch.tpch1.customer",
-      policyIds = List("rp-1", "rp-2"),
-      roles = List("eu_readers"),
-      cause = ai.starlake.quack.edge.rls.RowPolicyRewriter.MissingColumnCause,
-      missingColumns = List("region")
-    )
-    val audit = FlightSqlRouter.rowPolicyFailureAudit("0123456789ab", "why", Some(d))
-    audit shouldBe Map(
-      "rowPolicyRef"            -> "0123456789ab",
-      "rowPolicyFailure"        -> "why",
-      "rowPolicyTable"          -> "acme_tpch.tpch1.customer",
-      "rowPolicies"             -> "rp-1,rp-2",
-      "rowPolicyRoles"          -> "eu_readers",
-      "rowPolicyCause"          -> "missing_column",
-      "rowPolicyMissingColumns" -> "region"
-    )
-    audit.keySet.intersect(FlightSqlRouter.ReservedAuditKeys) shouldBe empty
-    val line =
-      FlightSqlRouter.rowPolicyFailureLogLine("0123456789ab", poolKey, "alice", "why", Some(d))
-    line should include("(ref 0123456789ab)")
-    line should include("table=acme_tpch.tpch1.customer roles=eu_readers policies=rp-1,rp-2")
-    line should include("missingColumns=region")
-    // A failure outside one policy's wrap still carries the reference.
-    FlightSqlRouter.rowPolicyFailureAudit("0123456789ab", "why", None) shouldBe
-      Map("rowPolicyRef" -> "0123456789ab", "rowPolicyFailure" -> "why")
-
-  // ---- ActiveStatementRegistry integration tests ----
 
   it should "track the statement in the registry until the caller closes the stream" in:
     val registry     = new ActiveStatementRegistry()
@@ -2397,7 +2366,14 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     val pk2  = PoolKey("acme", "acme_default", "sales")
     sup2.createTenant(ai.starlake.quack.model.Tenant(pk2.tenant)).unsafeRunSync()
     sup2
-      .createTenantDb(pk2.tenant, pk2.tenantDb, TenantDbKind.InMemory, Map.empty, "", writerTrusted = true)
+      .createTenantDb(
+        pk2.tenant,
+        pk2.tenantDb,
+        TenantDbKind.InMemory,
+        Map.empty,
+        "",
+        writerTrusted = true
+      )
       .unsafeRunSync()
     sup2.createPool(pk2, RoleDistribution(0, 0, 2)).unsafeRunSync()
 
@@ -2411,7 +2387,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
             authorize: () => String
         ) =
           IO.pure(stub())
-    val adapter2  = new QuackHttpAdapter(client2, tkr, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
+    val adapter2 =
+      new QuackHttpAdapter(client2, tkr, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     val sessions2 = new SessionRegistry
     val registry2 = new ActiveStatementRegistry()
     val router2   = new FlightSqlRouter(
@@ -2445,7 +2422,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     val keys      = markingKeys()
     val firstNode = new java.util.concurrent.atomic.AtomicReference[String]("")
     val markWith  = new java.util.concurrent.atomic.AtomicReference[String => String](identity)
-    val bknd = new QuackBackend:
+    val bknd      = new QuackBackend:
       def allowsLocalFiles = true
 
       private val n          = TrieMap.empty[String, RunningNode]
@@ -2473,7 +2450,14 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     val pk2  = PoolKey("acme", "acme_default", "sales")
     sup2.createTenant(ai.starlake.quack.model.Tenant(pk2.tenant)).unsafeRunSync()
     sup2
-      .createTenantDb(pk2.tenant, pk2.tenantDb, TenantDbKind.InMemory, Map.empty, "", writerTrusted = true)
+      .createTenantDb(
+        pk2.tenant,
+        pk2.tenantDb,
+        TenantDbKind.InMemory,
+        Map.empty,
+        "",
+        writerTrusted = true
+      )
       .unsafeRunSync()
     sup2.createPool(pk2, RoleDistribution(0, 0, 2)).unsafeRunSync()
     val nodes2  = sup2.get(pk2).get.nodes
@@ -2492,8 +2476,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
             if callCount.getAndIncrement() % 2 == 0 then
               firstNode.set(node.nodeId)
               QuackResponse.Failed(QuackError.Transient("node temporarily gone"), 1L)
-            else
-              markedUnavailable(keys, markWith.get()(node.nodeId), nonce)
+            else markedUnavailable(keys, markWith.get()(node.nodeId), nonce)
           }
     val router2 =
       new FlightSqlRouter(
@@ -2552,9 +2535,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
 
   /** Like setup() but the pool is DuckLake-kind (kindWire "ducklake" + metastore dbName), the
     * client records (prelude, sql) pairs, and stampWrites is on. DuckLake pre-init inside
-    * createTenantDb fails fast against pgPort 0 and is swallowed with a warning by design.
-    * `nodes` dual nodes serve the pool; `requiredAnswer` is what a send whose stamp is required
-    * answers, in call order (the last repeats).
+    * createTenantDb fails fast against pgPort 0 and is swallowed with a warning by design. `nodes`
+    * dual nodes serve the pool; `requiredAnswer` is what a send whose stamp is required answers, in
+    * call order (the last repeats).
     */
   private def stampedFixture(
       stampWrites: Boolean = true,
@@ -2587,8 +2570,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
 
     val tracker = new NodeLoadTracker
     val admin   = new ai.starlake.quack.ondemand.state.DbAdmin:
-      def createDatabase(name: String): Either[String, Unit] = Right(())
-      def dropDatabase(name: String): Either[String, Unit]   = Right(())
+      def createDatabase(name: String): Either[String, Unit]   = Right(())
+      def dropDatabase(name: String): Either[String, Unit]     = Right(())
       def holdsAnything(name: String): Either[String, Boolean] = Right(false)
     val sup = new PoolSupervisor(
       backend,
@@ -2647,7 +2630,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
             required += ((prelude, sql))
             requiredAnswer(math.min(required.size - 1, requiredAnswer.size - 1))()
           }
-    val adapter  = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
+    val adapter =
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     val sessions = new SessionRegistry
     val router   = new FlightSqlRouter(
       sup,
@@ -2752,7 +2736,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       QuackResponse.Failed(QuackError.Permanent("Catalog Error: no such function"), 3L),
       QuackResponse.Failed(QuackError.Transient("connection reset", notSent = true), 3L)
     ).foreach { failure =>
-      val f = stampedFixture(nodes = 1, requiredAnswer = List(() => failure))
+      val f   = stampedFixture(nodes = 1, requiredAnswer = List(() => failure))
       val out = f.router
         .execute(
           "c-s16",
@@ -2775,8 +2759,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     // failed, not only that no node was left.
     val f = stampedFixture(
       nodes = 1,
-      requiredAnswer = List(
-        () => QuackResponse.Failed(QuackError.Transient("connection reset", notSent = true), 3L)
+      requiredAnswer = List(() =>
+        QuackResponse.Failed(QuackError.Transient("connection reset", notSent = true), 3L)
       )
     )
     f.router
@@ -2934,8 +2918,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
 
     val tracker = new NodeLoadTracker
     val admin   = new ai.starlake.quack.ondemand.state.DbAdmin:
-      def createDatabase(name: String): Either[String, Unit] = Right(())
-      def dropDatabase(name: String): Either[String, Unit]   = Right(())
+      def createDatabase(name: String): Either[String, Unit]   = Right(())
+      def dropDatabase(name: String): Either[String, Unit]     = Right(())
       def holdsAnything(name: String): Either[String, Boolean] = Right(false)
     val sup = new PoolSupervisor(backend, tracker, new InMemoryControlPlaneStore(), dbAdmin = admin)
     sup.createTenant(ai.starlake.quack.model.Tenant(poolKey.tenant)).unsafeRunSync()
@@ -2984,7 +2968,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
             else TestArrow.okResponse()
           }
 
-    val adapter  = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
+    val adapter =
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     val sessions = new SessionRegistry
     val router   = new FlightSqlRouter(
       sup,
@@ -3027,8 +3012,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     @volatile var routerRef: FlightSqlRouter = null
     // Both calls are in their send when each counts the sessions, and neither returns (closing its
     // own) before the other has counted.
-    val bothIn = new java.util.concurrent.CyclicBarrier(2)
-    val seen   = new java.util.concurrent.CopyOnWriteArrayList[Integer]()
+    val bothIn                    = new java.util.concurrent.CyclicBarrier(2)
+    val seen                      = new java.util.concurrent.CopyOnWriteArrayList[Integer]()
     val stub: () => QuackResponse = () =>
       bothIn.await(5, java.util.concurrent.TimeUnit.SECONDS)
       seen.add(routerRef.sessions.size)
@@ -3044,7 +3029,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       Nil
     )
     import cats.syntax.parallel.*
-    val one = router.executeOneShot("c-2/undrop", "alice", poolKey, "SELECT 1", eff)
+    val one    = router.executeOneShot("c-2/undrop", "alice", poolKey, "SELECT 1", eff)
     val (a, b) = (one, one).parTupled.unsafeRunSync()
     List(a, b).foreach(_.foreach(_.close()))
     seen.toArray.toList shouldBe List(2, 2)
@@ -3174,7 +3159,14 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     val sup     = new PoolSupervisor(backend, tracker, new InMemoryControlPlaneStore())
     sup.createTenant(ai.starlake.quack.model.Tenant(poolKey.tenant)).unsafeRunSync()
     sup
-      .createTenantDb(poolKey.tenant, poolKey.tenantDb, TenantDbKind.InMemory, Map.empty, dataPath, writerTrusted = true)
+      .createTenantDb(
+        poolKey.tenant,
+        poolKey.tenantDb,
+        TenantDbKind.InMemory,
+        Map.empty,
+        dataPath,
+        writerTrusted = true
+      )
       .unsafeRunSync()
     sup.createPool(poolKey, distribution).unsafeRunSync()
     if failResumeStarts then failStart.set(true)
@@ -3207,8 +3199,9 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       ) =
         checkBounds.synchronized(checkBounds += within)
         answer(endpoint)
-    val adapter = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
-    val router  = new FlightSqlRouter(
+    val adapter =
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
+    val router = new FlightSqlRouter(
       sup,
       new SessionRegistry,
       tracker,
@@ -3235,7 +3228,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     sup.get(poolKey).get.nodes should not be empty
 
   it should "hold the statement until the respawned node answers, not just until it is routable" in:
-    val (router, sup, queries) = setupWithSupervisor(resumePollInterval = 20.millis, refusedQueries = 3)
+    val (router, sup, queries) =
+      setupWithSupervisor(resumePollInterval = 20.millis, refusedQueries = 3)
     sup.suspendPool(poolKey, "rest").unsafeRunSync()
     val r = router
       .execute("wake-5", "alice", poolKey, "SELECT 1", recordExecution = true)
@@ -3340,9 +3334,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     val (router, sup, _) = setupWithSupervisor(
       resumeHoldTimeout = 30.seconds,
       resumePollInterval = 20.millis,
-      nodeAnswers = Some(n =>
-        if n.port == 28000 then IO.uncancelable(_ => IO.never) else IO.pure(true)
-      ),
+      nodeAnswers =
+        Some(n => if n.port == 28000 then IO.uncancelable(_ => IO.never) else IO.pure(true)),
       readinessTimeout = 200.millis,
       distribution = RoleDistribution(0, 0, 2),
       sent = sent
@@ -3437,8 +3430,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
 
     val tracker = new NodeLoadTracker
     val admin   = new ai.starlake.quack.ondemand.state.DbAdmin:
-      def createDatabase(name: String): Either[String, Unit] = Right(())
-      def dropDatabase(name: String): Either[String, Unit]   = Right(())
+      def createDatabase(name: String): Either[String, Unit]   = Right(())
+      def dropDatabase(name: String): Either[String, Unit]     = Right(())
       def holdsAnything(name: String): Either[String, Boolean] = Right(false)
     val sup = new PoolSupervisor(backend, tracker, new InMemoryControlPlaneStore(), dbAdmin = admin)
     sup.createTenant(Tenant(poolKey.tenant)).unsafeRunSync()
@@ -3469,11 +3462,12 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
           authorize: () => String
       ) =
         IO.pure(TestArrow.okResponse())
-    val adapter = new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
-    val reg     = new SimpleMeterRegistry
-    val ri      = new ai.starlake.quack.observability.metrics.RoutingInstruments(reg)
-    val dir     = new ai.starlake.quack.route.PlacementDirectory()
-    val router  = new FlightSqlRouter(
+    val adapter =
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
+    val reg    = new SimpleMeterRegistry
+    val ri     = new ai.starlake.quack.observability.metrics.RoutingInstruments(reg)
+    val dir    = new ai.starlake.quack.route.PlacementDirectory()
+    val router = new FlightSqlRouter(
       sup,
       new SessionRegistry,
       tracker,
@@ -3955,8 +3949,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync()
       .map(_.value) shouldBe Right("count")
 
-  "a row policy holding IS DISTINCT FROM a literal" should "pass the rewrite scope check" in:
-    // `IS DISTINCT FROM 'X'` takes a value; the wrap carries the policy's SQL.
+  "a row policy holding IS DISTINCT FROM a literal" should "keep its predicate out of the submitted SQL" in:
+    // Row predicates travel in the signed handle, independently of caller SQL.
     val withRows = wildcardAllSet.copy(rowPolicies =
       List(
         ai.starlake.quack.ondemand.state
@@ -3967,7 +3961,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     router
       .execute("file-5", "alice", poolKey, "SELECT c_id FROM customer", Some(withRows))
       .unsafeRunSync() shouldBe a[Right[?, ?]]
-    captured() should include("IS DISTINCT FROM 'X'")
+    captured() should not include "IS DISTINCT FROM 'X'"
     router
       .execute(
         "file-6",
@@ -3979,9 +3973,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync() shouldBe a[Right[?, ?]]
 
   // `histogram` / `histogram_values` are 2.0 table macros whose body reads `query_table(source)`.
-  "a query_table-reading table macro" should "never reach the node for a row-policy principal" in:
-    // histogram_values runs query_table on its string argument: the row rewriter never sees the
-    // table, so the protected-write guard refuses the call (CatalogReachingCalls.readingTableMacro)
+  "a query_table-reading table macro" should "reach native row enforcement" in:
+    // The node judges macro expansion and may refuse a nonliteral query_table body.
     val rls                   = Some(effWithRowPolicies(List(rowPolicyCustomer)))
     val (router, captured, _) = setupWithRewriter(protectedWriteGuard = guardKnowingCustomer)
     List(
@@ -3990,11 +3983,11 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     ).foreach { sql =>
       withClue(sql) {
         router.execute("hist-m4", "alice", poolKey, sql, rls).unsafeRunSync() shouldBe
-          a[Left[?, ?]]
+          a[Right[?, ?]]
+        captured() should include(sql)
       }
     }
-    captured() shouldBe ""
-    // the aggregate of that name is a value, left to the row rewriter
+    // The aggregate of that name remains a regular native read.
     router
       .execute("hist-m5", "alice", poolKey, "SELECT histogram(c_region) FROM customer", rls)
       .unsafeRunSync() shouldBe a[Right[?, ?]]
@@ -4020,7 +4013,7 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       enabled = true
     )
 
-  "a backtick-quoted table or column" should "be filtered and masked" in:
+  "a backtick-quoted table or column" should "be masked while leaving row enforcement to the node" in:
     val twins = List(
       "SELECT c_id, c_email, c_region FROM `customer`" ->
         "SELECT c_id, c_email, c_region FROM \"customer\"",
@@ -4039,17 +4032,15 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       withClue(backtick) {
         val b = run(backtick)
         b.map(_.contains("`")) should not be Right(true)
-        // Each rewrite draws its own row-policy alias, read as one name here.
-        def same(sql: String) = sql.toLowerCase.replaceAll("__qod_rls_[0-9a-f]{32}", "__qod_rls")
-        b.map(same) shouldBe run(twin).map(same)
+        b shouldBe run(twin)
         b.foreach { sent =>
-          sent should include("c_region = 'X'")
+          sent should not include "c_region = 'X'"
           sent should not include "c_email LIKE"
         }
       }
     }
     val table = run(twins.head._1)
-    table.toOption.get should (include("'***'") and include("c_region = 'X'"))
+    table.toOption.get should include("'***'")
 
   it should "not launder a masked column into a table through CTAS" in:
     val (router, captured, _) = setupWithRewriter(
@@ -4117,7 +4108,8 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
       () =>
         out =
           try Right(body)
-          catch case e: Throwable => Left(e), "deep-nesting",
+          catch case e: Throwable => Left(e),
+      "deep-nesting",
       1L << 20
     )
     t.start()
@@ -4180,7 +4172,14 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     val sup     = new PoolSupervisor(backend, tracker, new InMemoryControlPlaneStore())
     sup.createTenant(Tenant(poolKey.tenant)).unsafeRunSync()
     sup
-      .createTenantDb(poolKey.tenant, poolKey.tenantDb, TenantDbKind.InMemory, Map.empty, "", writerTrusted = true)
+      .createTenantDb(
+        poolKey.tenant,
+        poolKey.tenantDb,
+        TenantDbKind.InMemory,
+        Map.empty,
+        "",
+        writerTrusted = true
+      )
       .unsafeRunSync()
     sup.createPool(poolKey, RoleDistribution(0, 0, 2)).unsafeRunSync()
     val sent   = TrieMap.empty[String, Int]
@@ -4220,4 +4219,3 @@ class FlightSqlRouterSpec extends AnyFlatSpec with Matchers:
     sent.toMap shouldBe Map(s"quack:127.0.0.1:${survivor.port}" -> 1)
     tracker.snapshot(first.nodeId).copy(draining = false) shouldBe
       ai.starlake.quack.route.NodeLoad.empty
-

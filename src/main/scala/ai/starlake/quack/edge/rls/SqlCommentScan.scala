@@ -1,24 +1,7 @@
 package ai.starlake.quack.edge.rls
 
-/** String/identifier-literal-aware scan for SQL constructs that are unsafe once a validated
-  * predicate or transform expression is spliced textually into a larger statement.
-  * [[RowPolicyRewriter]] and [[ai.starlake.quack.edge.cls.ColumnPolicyRewriter]] both embed the
-  * create-time-validated string directly into generated SQL (`"(" + predicate + ")"`, joined with
-  * `" OR "` for row policies); jsqlparser's own parse of the predicate/transform in isolation
-  * proves nothing about what happens once it is concatenated. A trailing line comment (two hyphens)
-  * can swallow the rewriter's own closing parenthesis, a block comment (slash-star, star-slash) can
-  * hide arbitrary following text, and a bare semicolon can smuggle a second statement past a parser
-  * that only validates the first one - and jsqlparser accepts (and silently truncates at) all three
-  * rather than failing the parse, so none of them get caught by the parse step alone.
-  *
-  * The scan tracks single-quoted string-literal state (honouring the `''` escape) and double-quoted
-  * identifier state so a comment marker or semicolon that appears INSIDE a literal or a quoted
-  * identifier (e.g. `note = '--x'`, `"weird--name"`) is never flagged - those characters are
-  * ordinary content there, not comment/statement syntax. Mirrors the equivalent scan in
-  * [[ai.starlake.quack.edge.admin.AdminSqlParser.parenExpression]].
-  *
-  * Shared by [[RowPredicateValidator]] and [[ai.starlake.quack.edge.cls.TransformSqlValidator]] so
-  * both create-time validators enforce the same splice-safety class.
+/** Literal-aware validation shared by row predicates and column transforms. Row predicates are
+  * independently parsed and bound on the node; column transforms still use gateway rewriting.
   */
 private[edge] object SqlCommentScan:
 

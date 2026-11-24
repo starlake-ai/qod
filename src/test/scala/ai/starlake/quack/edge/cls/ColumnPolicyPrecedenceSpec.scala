@@ -164,20 +164,3 @@ class ColumnPolicyPrecedenceSpec extends AnyFlatSpec with Matchers:
           case other          => fail(s"${ps.map(_.id)}: expected Denied, got $other")
       }
     }
-
-  // ---- row policies (review M2) ------------------------------------------------------------
-
-  "row policies on two tables whose names differ in a non-ASCII letter's case" should
-    "each filter only its own table" in {
-      val rls  = ai.starlake.quack.edge.rls.RowPolicyRewriterSpec.withNoCatalog(enabled = true)
-      val p1   = RoleRowPolicy("rp-1", "r-1", "*", "main", "Clés", "id = 1")
-      val p2   = RoleRowPolicy("rp-2", "r-1", "*", "main", "clÉs", "region = 'EU'")
-      val eff  = EffectiveSet(user, Nil, Nil, Nil, Nil, Nil, List(p1, p2))
-      val rctx =
-        ai.starlake.quack.edge.rls.SchemaContext(Some(Catalog), Some("main"), None)
-      rls.rewrite("SELECT * FROM \"Clés\"", StatementKind.Select, eff, rctx) match
-        case ai.starlake.quack.edge.rls.RowPolicyRewriter.Rewritten(out) =>
-          out should include("id = 1")
-          out should not include "region"
-        case other => fail(s"expected Rewritten, got $other")
-    }
