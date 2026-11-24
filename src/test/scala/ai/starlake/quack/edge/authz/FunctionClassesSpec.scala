@@ -48,9 +48,11 @@ class FunctionClassesSpec extends AnyFlatSpec with Matchers:
     * reviewed.
     */
   private val ExpectedRestrictedScalar = Set(
+    "__aws__expired",
     "current_setting",
     "duckdb_aws_session_id",
     "duckdb_format_sql",
+    "ducklake_unreadable_macro_default",
     "index_key",
     "json_serialize_plan",
     "postgres_close_pinned_connection",
@@ -211,11 +213,13 @@ class FunctionClassesSpec extends AnyFlatSpec with Matchers:
       "nullif",
       "split_part",
       "fdiv",
-      "fmod",
       "list_sum",
       "array_append"
     )
       .foreach(n => withClue(n)(macroClass("main", n) shouldBe Some(Allowed)))
+    // fmod is a scalar since DuckDB 2.0.1, no longer a macro
+    macroClass("main", "fmod") shouldBe None
+    FunctionClasses.all.get(FunctionClasses.Key("main", "fmod", "scalar")) shouldBe Some(Allowed)
     List("pg_typeof", "has_table_privilege", "current_database")
       .foreach(n => withClue(n)(macroClass("pg_catalog", n) shouldBe Some(Allowed)))
     // their bodies call a superuser-class function

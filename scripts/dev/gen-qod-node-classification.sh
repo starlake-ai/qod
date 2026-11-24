@@ -29,8 +29,9 @@ fi
 # object-store and federation setup SQL (httpfs, azure, iceberg, aws, postgres) and qod-node's strict
 # init (quack). mysql is left out: the mysql extension is not in the 2.0 toolchain
 # (RdbmsConfig.scala), so a node that loads it gets functions no table classifies, refused to
-# non-superusers.
-extensions=(httpfs aws azure postgres iceberg avro ducklake quack)
+# non-superusers. avro comes before iceberg: from DuckDB 2.0.1 iceberg's init needs avro loaded,
+# and qod-node does not autoinstall it.
+extensions=(httpfs aws azure postgres avro iceberg ducklake quack)
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT

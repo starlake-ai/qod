@@ -115,7 +115,7 @@ function Resolve-DuckDbVersion {
     $line = Select-String -Path $buildSbt -Pattern '^val libquackwireVersion' | Select-Object -First 1
     if ($line -and $line.Line -match '"([0-9]+\.[0-9]+\.[0-9]+)') { return $Matches[1] }
   }
-  return '2.0.0'
+  return '2.0.1'
 }
 
 # The DuckDB build must match the JVM's architecture, not only the OS's: the JVM loads the
