@@ -17,6 +17,7 @@ using namespace duckdb;
 int failures = 0;
 int checks = 0;
 int64_t now = 1761200000000;
+std::string last_description;
 struct Client : ClientContextState {};
 
 std::string Run(Connection &con, const std::string &sql) {
@@ -67,7 +68,8 @@ int main() {
 	DuckDB db(nullptr);
 	db.LoadStaticExtension<qod_test::BoundedScanFixture>();
 	auto authz = std::make_shared<qod::NodeAuthz>(qod_test::kNode, qod_test::kKey, [] { return now; });
-	qod::RegisterNodeAuthz(*db.instance, authz, [](const qod::DecideCall &) {
+	qod::RegisterNodeAuthz(*db.instance, authz, [](const qod::DecideCall &call) {
+		last_description = call.description;
 		qod::DecideResult result;
 		result.status = qod::DecideResult::Status::Allow;
 		result.has_verdict = true;
@@ -133,6 +135,28 @@ int main() {
 	Expect("install superuser", Run(root, qod_test::Prelude(qod_test::MintWith(admin))), "true");
 	Expect("superuser scan sealed with no row policy",
 	       Run(root, "SELECT id FROM qod_test_bounded_scan('memory.main.docs', 1)"), "2");
+
+	handle = qod_test::MintSpec();
+	handle.principal_id = "alice";
+	handle.exp = now + 60000;
+	handle.row_policies = {{"p1", "memory", "main", "docs", "owner = 'alice'"}};
+	handle.policy_version = 50;
+	install();
+	Expect("filter use", Run(user, "SELECT id FROM qod_test_bounded_scan('memory.main.docs', 3, uses := ['secret'])"), "1");
+	Expect("description lists a non-projected field use",
+	       last_description.find("\"secret\"") != std::string::npos ? "listed" : last_description, "listed");
+	handle.column_policies = {{"d1", "memory", "main", "docs", "secret", "deny", ""}};
+	++handle.policy_version;
+	install();
+	Refused("denied column used inside the remote request",
+	        Run(user, "SELECT id FROM qod_test_bounded_scan('memory.main.docs', 3, uses := ['secret'])"), "field_denied");
+	handle.column_policies = {{"m1", "memory", "main", "docs", "secret", "mask", "secret || '!'"}};
+	++handle.policy_version;
+	install();
+	Refused("masked column used inside the remote request",
+	        Run(user, "SELECT id FROM qod_test_bounded_scan('memory.main.docs', 3, uses := ['secret'])"), "field_denied");
+	Expect("masked column not used remotely stays allowed",
+	       Run(user, "SELECT id FROM qod_test_bounded_scan('memory.main.docs', 3)"), "1");
 
 	std::cout << checks << " checks, " << failures << " failures" << std::endl;
 	return failures == 0 ? 0 : 1;

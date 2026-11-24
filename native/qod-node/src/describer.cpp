@@ -1,5 +1,6 @@
 #include "describer.hpp"
 #include "row_policies.hpp"
+#include "protected_scan.hpp"
 
 #include "crypto.hpp"
 #include "file_functions.hpp"
@@ -1684,6 +1685,12 @@ void Walker::Get(LogicalGet &get, const std::string &via) {
 		for (auto &index : get.GetColumnIds()) {
 			if (!index.IsVirtualColumn()) {
 				columns.insert(Text(get.GetColumnName(index)));
+			}
+		}
+		// A connector scan's remote request may read columns it never projects.
+		if (auto scan = AsProtectedScan(get)) {
+			for (auto &use : scan->FieldUses()) {
+				columns.insert(use.column);
 			}
 		}
 		if (table->ParentCatalog().GetCatalogType() == "ducklake") {
