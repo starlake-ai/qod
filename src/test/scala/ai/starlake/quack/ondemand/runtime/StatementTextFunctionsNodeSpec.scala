@@ -12,6 +12,7 @@ import ai.starlake.quack.edge.authz.{
   MintedHandles,
   NodeKeys,
   NodePrincipal,
+  PolicyRoute,
   PolicyVersions,
   ReadOnlyCatalogs
 }
@@ -30,6 +31,7 @@ import ai.starlake.quack.ondemand.state.{
   RoleRowPolicy
 }
 import cats.effect.IO
+import cats.syntax.all.*
 import cats.effect.unsafe.implicits.global
 import com.sun.net.httpserver.HttpServer
 import io.circe.parser.parse
@@ -141,14 +143,16 @@ class StatementTextFunctionsNodeSpec extends AnyFlatSpec with Matchers with Befo
         readOnlyCatalogs = ReadOnlyCatalogs.none,
         versions = PolicyVersions.zero
       )
-      val app = new DecideRoute(
+      // A policy holder's node fetches the handle's policy snapshot before its first decision.
+      val decide = new DecideRoute(
         keys,
         minted,
         decider,
         new DryRunResults(),
         key => pools.get(key).flatMap(FlightSqlRouter.usePath).getOrElse(""),
         AuthzInstruments.noop
-      ).routes.orNotFound
+      )
+      val app = (decide.routes <+> new PolicyRoute(keys).routes).orNotFound
       server.createContext(
         "/",
         exchange =>

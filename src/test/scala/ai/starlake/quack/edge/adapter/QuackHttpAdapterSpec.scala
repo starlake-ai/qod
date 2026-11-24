@@ -449,7 +449,7 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
 
   private val CountersRow =
     "SELECT 1::BIGINT, 2::BIGINT, 3::BIGINT, 4::BIGINT, 5::BIGINT, 6::BIGINT, 7::BIGINT, " +
-      "8::BIGINT, 9::BIGINT, 10::BIGINT"
+      "8::BIGINT, 9::BIGINT, 10::BIGINT, 11::BIGINT"
 
   "authzStats" should "read the node's counters as the system principal, without tracker bookkeeping" in:
     val client = new FakeClient(
@@ -463,7 +463,7 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
     val adapter =
       new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
     adapter.authzStats(node("as1")).unsafeRunSync() shouldBe
-      Some(NodeAuthzStats(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L, 10L))
+      Some(NodeAuthzStats(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L, 10L, 11L))
     val payload = ai.starlake.quack.edge.authz.HandleInspector.payload(client.preludes.head)
     payload.hcursor.downField("principal").get[Boolean]("system") shouldBe Right(true)
     tracker.snapshot("as1").totalServed shouldBe 0L

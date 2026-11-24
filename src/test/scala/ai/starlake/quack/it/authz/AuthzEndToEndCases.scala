@@ -1668,6 +1668,10 @@ abstract class AuthzEndToEndCases(
   private val TextRefusal =
     "function current_query is not available to principals with column or row policies"
 
+  /** The node decider's refusal of a statement-text function to a policy holder. */
+  private def statementTextRefusal(name: String): String =
+    s"function $name is not available to principals with column or row policies"
+
   /** `sql`, whose own text names `name`, is refused to `user` by the gateway's statement-text
     * screen before any node, through every door.
     */
@@ -1684,20 +1688,25 @@ abstract class AuthzEndToEndCases(
   "current_query()" should "be refused to a policy holder and allowed to a principal without" in {
     ready()
     // mona holds a mask (on feed_a), rhea a row filter (on pgfed.e2e.orders): every policy counts,
-    // whatever table the statement reads. A statement naming the function is refused by the
-    // gateway's screen; the node's rule is pinned on a live node by StatementTextFunctionsNodeSpec.
-    List("mona", "rhea").foreach(u =>
-      screened(u, "lake", "SELECT current_query() AS q", "current_query")
+    // whatever table the statement reads. A column-policy holder's statement naming the function
+    // is refused by the gateway's screen. A row-policy holder's single SELECT goes to the node
+    // unscreened (row policies are enforced there), so rhea reads the node's refusal.
+    screened("mona", "lake", "SELECT current_query() AS q", "current_query")
+    refused(
+      "rhea",
+      "lake",
+      "SELECT current_query() AS q",
+      node = statementTextRefusal("current_query")
     )
     screened("mona", "lake", "SELECT pg_catalog.current_query() AS q", "current_query")
     screened("mona", "lake", "SELECT 1 AS one, current_query() AS q", "current_query")
     allowed("bob", "lake", "SELECT current_query() AS q")
     allowed("bob", "lake", "SELECT count(*) FROM duckdb_prepared_statements()", Some(List("0")))
-    screened(
+    refused(
       "rhea",
       "lake",
       "SELECT count(*) FROM duckdb_prepared_statements()",
-      "duckdb_prepared_statements"
+      node = statementTextRefusal("duckdb_prepared_statements")
     )
     // Booked as a denial.
     val booked = deniedInHistory("pg_catalog.current_query()")
@@ -1732,7 +1741,7 @@ abstract class AuthzEndToEndCases(
     def ofText(rows: List[Json]) =
       rows.filter(_.hcursor.get[String]("error").exists(_.contains(TextRefusal)))
     def users(rows: List[Json]) = rows.flatMap(_.hcursor.get[String]("username").toOption).toSet
-    val booked = ofText(
+    val booked                  = ofText(
       deniedInHistory("stmt_text_v", rows => Set("mona", "rhea").subsetOf(users(ofText(rows))))
     )
     booked.flatMap(_.hcursor.get[String]("username").toOption) should contain allOf ("mona", "rhea")
@@ -2061,9 +2070,9 @@ abstract class AuthzEndToEndCases(
       until: List[Json] => Boolean = _.nonEmpty
   ): List[Json] = inHistory("denied", fragment, until)
 
-  /** The statement history rows of `status` whose text holds `fragment`, once `until` holds of
-    * them (some are recorded, by default) or 15 s have passed: history is written after the
-    * answer, so a case expecting several principals' rows waits for all of them.
+  /** The statement history rows of `status` whose text holds `fragment`, once `until` holds of them
+    * (some are recorded, by default) or 15 s have passed: history is written after the answer, so a
+    * case expecting several principals' rows waits for all of them.
     */
   private def inHistory(
       status: String,

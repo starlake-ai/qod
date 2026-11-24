@@ -563,6 +563,12 @@ class FleetSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
     alive(orphan) shouldBe true
     startJoin()
     await("orphan node reaped")(Option.when(!alive(orphan))(()))
+    // The new join process removes the pidfile when it reaps, and writes it again only once a
+    // heartbeat reply hands it the node. Wait for that fresh node first: the pool and server
+    // checks below are already true from the killed process's last heartbeat.
+    val fresh = await("a fresh node pidfile after the restart")(
+      recordNodePid().filter(p => p != orphan && alive(p))
+    )
     val node = await("node running on s1 after the restart") {
       val p = pool()
       Option.when(p.nodes.size == 1 && p.pending == 0)(p.nodes.head)
@@ -575,8 +581,7 @@ class FleetSmokeSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
     }
     s.hcursor.get[Option[Int]]("cpus").toOption.flatten should not be empty
     s.hcursor.get[Option[Long]]("memoryBytes").toOption.flatten should not be empty
-    val fresh = recordNodePid().getOrElse(fail("no node pidfile after the restart"))
-    fresh should not be orphan
+    alive(fresh) shouldBe true
   }
 
   private def scale(size: Int): Long =
