@@ -2,7 +2,6 @@ package ai.starlake.quack.edge.policy
 
 import ai.starlake.quack.edge.cls.{ColumnCatalog, ColumnPolicyRewriter}
 import ai.starlake.quack.edge.policy.TimeTravelCarrier.Carry
-import ai.starlake.quack.edge.rls.RowPolicyRewriter
 import ai.starlake.quack.model.StatementKind
 import ai.starlake.quack.ondemand.rbac.EffectiveSet
 import ai.starlake.quack.ondemand.state.{RbacUser, RoleColumnPolicy, RoleRowPolicy}
@@ -101,7 +100,7 @@ class TimeTravelCarrierSpec extends AnyFlatSpec with Matchers:
     List(RoleRowPolicy("rp-1", "r-1", "*", "main", "customer", "c_region = 'X'"))
   )
 
-  /** Column rewrite, then row rewrite of its output: the order FlightSqlRouter applies them. */
+  /** The gateway applies column masks while the native node owns row filtering. */
   private def stacked(sql: String): String =
     val cls = new ColumnPolicyRewriter(
       new ColumnCatalog.MapCatalog(
@@ -118,14 +117,7 @@ class TimeTravelCarrierSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync() match
       case ColumnPolicyRewriter.Rewritten(s) => s
       case other                             => fail(s"column rewrite: $other")
-    ai.starlake.quack.edge.rls.RowPolicyRewriterSpec.withNoCatalog().rewrite(
-      masked,
-      StatementKind.Select,
-      stackedEff,
-      ai.starlake.quack.edge.rls.SchemaContext(Some("acme_lake"), Some("main"), None)
-    ) match
-      case RowPolicyRewriter.Rewritten(s) => s
-      case other                          => fail(s"row rewrite: $other")
+    masked
 
   /** A schema probe and a filtered, ordered, paged read, both at one snapshot. */
   private val snapshotReads = List(
@@ -134,14 +126,12 @@ class TimeTravelCarrierSpec extends AnyFlatSpec with Matchers:
       """ORDER BY "c_id" DESC LIMIT 101 OFFSET 0"""
   )
 
-  "both policy rewriters" should "mask, filter and keep the clause once, on the base table" in
+  "the column rewriter" should "mask and keep the snapshot for node-side row filtering" in
     snapshotReads.foreach { sql =>
       val out = stacked(sql)
       withClue(s"$sql\n -> $out\n") {
         out should include("'***'")
-        out.replaceAll("__qod_rls_[0-9a-f]{32}", "__qod_rls") should include(
-          s"FROM $Ref AS __qod_rls $At WHERE (__qod_rls.c_region = 'X')"
-        )
+        out should include(s"$Ref $At")
         out.split(java.util.regex.Pattern.quote(At), -1).length - 1 shouldBe 1
       }
     }

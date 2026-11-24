@@ -91,6 +91,24 @@ object ManifestImporter extends LazyLogging:
       importClientSecret(t, existing).left.foreach(err => errs += err)
     }
 
+    // Validate every definition before any tenant, role or policy row changes. Imports share
+    // the exact REST/SQL definition contract; an invalid mask never enters query-time transport.
+    m.roles.foreach { role =>
+      role.columnPolicies.foreach { p =>
+        ai.starlake.quack.edge.cls.ColumnPolicyDefinition
+          .validate(
+            p.catalog,
+            p.schema,
+            p.table,
+            p.column,
+            p.action,
+            p.transformSql
+          )
+          .left
+          .foreach(reason => errs += s"role '${role.name}' column policy '${p.column}': $reason")
+      }
+    }
+
     // Dup detection
     def dup[A, K](xs: List[A], key: A => K, label: String): Unit =
       xs.groupBy(key).collect {
@@ -137,6 +155,12 @@ object ManifestImporter extends LazyLogging:
     }
 
     m.roles.foreach { r =>
+      r.rowPolicies.foreach { p =>
+        ai.starlake.quack.edge.rls.RowPredicateValidator.validate(p.predicateSql) match
+          case ai.starlake.quack.edge.rls.RowPredicateValidator.Invalid(reason) =>
+            errs += s"role '${r.name}': invalid row policy on ${p.catalog}.${p.schema}.${p.table}: $reason"
+          case _ => ()
+      }
       if !knownTenants.contains(r.tenant) then
         errs += s"role '${r.name}': tenant '${r.tenant}' not in YAML or DB"
     }
@@ -982,7 +1006,22 @@ object ManifestImporter extends LazyLogging:
                     tableName = mcp.table,
                     columnName = mcp.column,
                     action = mcp.action,
-                    transformSql = mcp.transformSql
+                    transformSql = ai.starlake.quack.edge.cls.ColumnPolicyDefinition
+                      .validate(
+                        mcp.catalog,
+                        mcp.schema,
+                        mcp.table,
+                        mcp.column,
+                        mcp.action,
+                        mcp.transformSql
+                      )
+                      .fold(
+                        _ =>
+                          throw new IllegalStateException(
+                            "column policy changed after manifest validation"
+                          ),
+                        identity
+                      )
                   )
                 )
               }

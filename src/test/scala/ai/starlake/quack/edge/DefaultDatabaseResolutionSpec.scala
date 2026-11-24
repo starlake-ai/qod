@@ -112,28 +112,6 @@ class DefaultDatabaseResolutionSpec extends AnyFlatSpec with Matchers:
   }
 
   for (name, dd, policyCatalog, expected) <- cases do
-    it should s"make a row policy apply as the node resolves, case $name" in {
-      val (router, _)  = routerWith(dd)
-      val (db, schema) = router.defaultsOf(probeKey)
-      val ctx          = ai.starlake.quack.edge.rls.SchemaContext(db, schema, None)
-      val rw           = ai.starlake.quack.edge.rls.RowPolicyRewriterSpec.withNoCatalog(enabled = true)
-      for (table, form) <- forms do
-        withClue(s"$form name $table: ") {
-          val out = rw.rewrite(
-            s"SELECT count(*) FROM $table",
-            StatementKind.Select,
-            withRows(List(rowPolicyOn(policyCatalog))),
-            ctx
-          )
-          out match
-            case ai.starlake.quack.edge.rls.RowPolicyRewriter.Rewritten(sql) =>
-              filtered(sql) shouldBe expected
-            case ai.starlake.quack.edge.rls.RowPolicyRewriter.Passthrough =>
-              expected shouldBe false
-            case other => fail(s"unexpected $other")
-        }
-    }
-
     it should s"make a column mask apply as the node resolves, case $name" in {
       val (router, _)  = routerWith(dd)
       val (db, schema) = router.defaultsOf(probeKey)
@@ -293,13 +271,14 @@ class DefaultDatabaseResolutionSpec extends AnyFlatSpec with Matchers:
   private val UseTarget = """(?i)USE\s+([^;\s]+)\s*;""".r
 
   for (name, dd, policyCatalog, expected) <- cases; (path, send) <- paths do
-    "the router" should s"apply a row policy as the node resolves, case $name, over $path" in {
+    "the router" should s"forward a row-policy read for native resolution, case $name, over $path" in {
       val (router, sent) = routerWith(dd)
       for (table, form) <- forms do
         withClue(s"$form name $table: ") {
           send(router, s"SELECT count(*) FROM $table", withRows(List(rowPolicyOn(policyCatalog))))
           UseTarget.findFirstMatchIn(sent()).map(_.group(1)) shouldBe Some(s"$Alias.main")
-          filtered(sent()) shouldBe expected
+          sent() should include(s"SELECT count(*) FROM $table")
+          filtered(sent()) shouldBe false
         }
     }
 

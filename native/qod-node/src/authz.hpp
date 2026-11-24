@@ -3,6 +3,7 @@
 #include "credentials.hpp"
 #include "decide_client.hpp"
 #include "handle.hpp"
+#include "policy_client.hpp"
 
 #include <cstdint>
 #include <functional>
@@ -65,6 +66,8 @@ struct Installed {
 	std::string path;
 	//! The handle's read-only catalogs (decision 24): a refresh may change them.
 	std::vector<std::string> read_only;
+	std::vector<RowPolicy> row_policies;
+	std::vector<ColumnPolicy> column_policies;
 };
 
 //! What one verdict admitted: the plan it was taken for and the session it holds for.
@@ -78,6 +81,8 @@ struct Admitted {
 	//! The read-only catalogs the plan was checked against (decision 24): a prepared statement is checked
 	//! again once they change, since an EXECUTE that DuckDB does not rebind shows no plan.
 	std::vector<std::string> read_only;
+	std::vector<RowPolicy> row_policies;
+	std::vector<ColumnPolicy> column_policies;
 };
 
 constexpr int64_t kNeverExpires = std::numeric_limits<int64_t>::max();
@@ -167,6 +172,8 @@ public:
 
 	//! The S3 credential client of this node (its key, its clock, the decide timeout), shared by every
 	//! connection: qod_session installs each principal's own credentials with it (decision 23).
+	PolicyClient &Policies() { return policies_; }
+
 	CredentialClient &Credentials() {
 		return credentials_;
 	}
@@ -189,6 +196,7 @@ private:
 	//! After the four above: initialized from them.
 	DecideClient decider_;
 	CredentialClient credentials_;
+	PolicyClient policies_;
 	NonceLedger ledger_;
 	std::mutex lock_;
 	std::unordered_map<std::string, Installed> connections_;

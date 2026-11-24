@@ -25,7 +25,10 @@ final case class VerifiedHandle(
     exp: Long,
     ctx: String,
     creds: String,
-    readOnly: List[String]
+    readOnly: List[String],
+    rowPolicies: List[NodeRowPolicy] = Nil,
+    columnPolicies: List[NodeColumnPolicy] = Nil,
+    policyBundle: String = ""
 )
 
 /** Session handles: who a statement on a node runs for, vouched for by the manager (design:
@@ -35,9 +38,10 @@ final case class VerifiedHandle(
   * connection; qod-node verifies it and installs the principal on that connection. A handle is
   * `<base64url(payload)>.<hex HMAC-SHA256(node key, payload bytes)>`, the payload a JSON object
   * (`v`, `node`, `replica`, `principal`, `pool`, `policyVersion`, `ctx`, `creds`, `path`,
-  * `readOnly`, `nonce`, `exp`): the MAC covers the bytes as sent, so the two sides never have to
-  * agree on a canonical form. native/qod-node/src/handle.cpp reads it; a nonce makes it single-use
-  * and `exp` bounds it to [[LifetimeMs]].
+  * `readOnly`, `rowPolicies`, `policyBundle`, `columnPolicies`, `nonce`, `exp`): the MAC covers the
+  * bytes as sent, so the two sides never have to agree on a canonical form.
+  * native/qod-node/src/handle.cpp reads it; a nonce makes it single-use and `exp` bounds it to
+  * [[LifetimeMs]].
   *
   * Each node has its own key, derived from the manager's node-key secret and the node id
   * ([[nodeKey]]), so a handle minted for one node never verifies on another. The key reaches the
@@ -53,11 +57,16 @@ object NodeHandles:
     * node protocol 2's (no enforcement in the engine), version 2 is protocols 3 and 4's (no
     * `readOnly`, so a superuser could write into a read-only catalog there), version 3 is protocol
     * 5's (a DuckLake read at an earlier snapshot described under the name it had then, so another
-    * table's grant could cover it: review M1). Writing 4 keeps such a node unhealthy and never
-    * routed to on every backend (Kubernetes pods and fleet servers are not checked by
-    * [[ai.starlake.quack.ondemand.runtime.QodNodeBinary]]).
+    * table's grant could cover it: review M1). Version 4 is protocol 6's, without native RLS.
+    * Version 7 requires signed row-policy snapshots; version 8 also requires native CLS. This keeps
+    * an older node unhealthy and never routed to on every backend (Kubernetes pods and fleet
+    * servers are not checked by [[ai.starlake.quack.ondemand.runtime.QodNodeBinary]]).
     */
-  val Version: Int = 4
+  val Version: Int = 8
+
+  /** A wire/memory bound, not a policy-count limit across the user's databases. */
+  val MaxPayloadBytes: Int         = 2 * 1024 * 1024
+  private val MaxEncodedBytes: Int = ((MaxPayloadBytes + 2) / 3) * 4 + 65
 
   /** Part of what a node answers a statement that carries no current principal (qod-node's
     * kNoPrincipal): the health probe's canary expects it.
@@ -148,7 +157,11 @@ object NodeHandles:
       path: String,
       readOnly: Set[String],
       nowMs: Long,
-      nonce: String = newNonce()
+      nonce: String = newNonce(),
+      rowPolicies: List[NodeRowPolicy] = Nil,
+      columnPolicies: List[NodeColumnPolicy] = Nil,
+      preparedPolicies: Option[NodePolicySnapshot] = None,
+      policyBundle: String = ""
   ): MintedHandle =
     require(principal.id.nonEmpty, "no principal is bound to this statement")
     require(policyVersion >= 0L, "a policy version is never negative")
@@ -159,7 +172,18 @@ object NodeHandles:
       readOnly.forall(ReadOnlyAliasPattern.matches),
       "a read-only catalog alias is 1 to 128 of [a-z0-9_]"
     )
-    val exp     = nowMs + LifetimeMs
+    val exp = nowMs + LifetimeMs
+    require(
+      preparedPolicies.isEmpty || (rowPolicies.isEmpty && columnPolicies.isEmpty),
+      "supply one source of node policies"
+    )
+    val policies = preparedPolicies.getOrElse(NodePolicySnapshot(rowPolicies, columnPolicies))
+    require(
+      policyBundle.isEmpty || (ContextDigestPattern.matches(
+        policyBundle
+      ) && policies.rows.isEmpty && policies.columns.isEmpty),
+      "invalid row policy bundle"
+    )
     val payload = Json
       .obj(
         "v"         -> Json.fromInt(Version),
@@ -172,17 +196,21 @@ object NodeHandles:
           "superuser" -> Json.fromBoolean(principal.superuser),
           "system"    -> Json.fromBoolean(principal.system)
         ),
-        "pool"          -> Json.fromString(pool),
-        "policyVersion" -> Json.fromLong(policyVersion),
-        "ctx"           -> Json.fromString(ctx),
-        "creds"         -> Json.fromString(creds),
-        "path"          -> Json.fromString(path),
-        "readOnly"      -> Json.arr(readOnly.toList.sorted.map(Json.fromString)*),
-        "nonce"         -> Json.fromString(nonce),
-        "exp"           -> Json.fromLong(exp)
+        "pool"           -> Json.fromString(pool),
+        "policyVersion"  -> Json.fromLong(policyVersion),
+        "ctx"            -> Json.fromString(ctx),
+        "creds"          -> Json.fromString(creds),
+        "path"           -> Json.fromString(path),
+        "readOnly"       -> Json.arr(readOnly.toList.sorted.map(Json.fromString)*),
+        "rowPolicies"    -> policies.rowJson,
+        "columnPolicies" -> policies.columnJson,
+        "policyBundle"   -> Json.fromString(policyBundle),
+        "nonce"          -> Json.fromString(nonce),
+        "exp"            -> Json.fromLong(exp)
       )
       .noSpaces
       .getBytes(StandardCharsets.UTF_8)
+    require(payload.length <= MaxPayloadBytes, "node policy handle exceeds the payload byte budget")
     val text = Base64.getUrlEncoder.withoutPadding.encodeToString(payload) + "." +
       hex(hmac(nodeKey(secret, nodeId), payload))
     MintedHandle(text, nonce, exp)
@@ -249,19 +277,23 @@ object NodeHandles:
       expectedNode: String,
       nowMs: Long
   ): Either[String, VerifiedHandle] =
-    text.split("\\.", -1).toList match
-      case List(body, mac) if MacText.matches(mac) =>
-        val payload =
-          try Some(Base64.getUrlDecoder.decode(body))
-          catch case _: IllegalArgumentException => None
-        payload match
-          case None        => Left("malformed handle")
-          case Some(bytes) =>
-            val expected = hex(hmac(nodeKey, bytes)).getBytes(StandardCharsets.US_ASCII)
-            if !MessageDigest.isEqual(expected, mac.getBytes(StandardCharsets.US_ASCII)) then
-              Left("handle does not verify")
-            else readPayload(bytes, expectedNode, nowMs)
-      case _ => Left("malformed handle")
+    if text.length > MaxEncodedBytes then Left("handle exceeds the payload byte budget")
+    else
+      text.split("\\.", -1).toList match
+        case List(body, mac) if MacText.matches(mac) =>
+          val payload =
+            try Some(Base64.getUrlDecoder.decode(body))
+            catch case _: IllegalArgumentException => None
+          payload match
+            case None                                          => Left("malformed handle")
+            case Some(bytes) if bytes.length > MaxPayloadBytes =>
+              Left("handle exceeds the payload byte budget")
+            case Some(bytes) =>
+              val expected = hex(hmac(nodeKey, bytes)).getBytes(StandardCharsets.US_ASCII)
+              if !MessageDigest.isEqual(expected, mac.getBytes(StandardCharsets.US_ASCII)) then
+                Left("handle does not verify")
+              else readPayload(bytes, expectedNode, nowMs)
+        case _ => Left("malformed handle")
 
   private def readPayload(
       bytes: Array[Byte],
@@ -293,12 +325,30 @@ object NodeHandles:
               _        <- Either.cond(CredsPattern.matches(creds), (), "malformed handle payload")
               readOnly <- field[List[String]](c, "readOnly")
               _        <- Either.cond(wellFormedReadOnly(readOnly), (), "malformed handle payload")
-              p        <- c.downField("principal").success.toRight("malformed handle payload")
-              id       <- field[String](p, "id")
-              name     <- field[String](p, "name")
-              tenant   <- field[Option[String]](p, "tenant")
-              su       <- field[Boolean](p, "superuser")
-              system   <- field[Boolean](p, "system")
+              bundle   <- field[String](c, "policyBundle")
+              rows     <- field[List[NodeRowPolicy]](c, "rowPolicies")
+              _        <- Either.cond(
+                bundle.isEmpty || (ContextDigestPattern.matches(bundle) && rows.isEmpty),
+                (),
+                "malformed handle payload"
+              )
+              _ <- Either.cond(
+                rows.forall(NodeRowPolicy.valid),
+                (),
+                "malformed handle payload"
+              )
+              columns <- field[List[NodeColumnPolicy]](c, "columnPolicies")
+              _       <- Either.cond(
+                columns.forall(NodeColumnPolicy.valid) && (bundle.isEmpty || columns.isEmpty),
+                (),
+                "malformed handle payload"
+              )
+              p      <- c.downField("principal").success.toRight("malformed handle payload")
+              id     <- field[String](p, "id")
+              name   <- field[String](p, "name")
+              tenant <- field[Option[String]](p, "tenant")
+              su     <- field[Boolean](p, "superuser")
+              system <- field[Boolean](p, "system")
             yield VerifiedHandle(
               node,
               replica,
@@ -309,7 +359,10 @@ object NodeHandles:
               exp,
               ctx,
               creds,
-              readOnly
+              readOnly,
+              rows,
+              columns,
+              bundle
             )
         }
 

@@ -171,7 +171,7 @@ Which stack mounts which:
 | By Tenant | Stacked QPS per tenant, Outcomes by status |
 | DuckDB Engine | Memory used, spill bytes, spill files, temp storage per node (health-probe scrape) |
 | DuckLake Maintenance | Runs by result, duration percentiles, files compacted, bytes reclaimed, snapshots expired |
-| Security Rewrites | Column- / row-policy rewrites by outcome, rewrite duration means, catalog lookups by result |
+| Security Rewrites | Column-policy rewrites by outcome, rewrite duration means, catalog lookups by result |
 | JVM | Heap used, GC pause rate, live threads, process uptime |
 
 **Kubernetes-only rows** (present in `grafana-dashboard-k8s.json`):
@@ -200,8 +200,8 @@ Which stack mounts which:
 - `qod_maint_duration_seconds` - histogram, labels: `tenant`, `tenant_db`
 - `qod_maint_files_compacted_total` / `qod_maint_bytes_reclaimed_total` / `qod_maint_snapshots_expired_total` - counters, labels: `tenant`, `tenant_db`
 - `column_policy_rewrites_total` - counter, labels: `tenant`, `pool`, `outcome` (`rewritten` / `denied` / `passthrough`)
-- `row_policy_rewrites_total` - counter, labels: `tenant`, `pool`, `outcome` (`rewritten` / `passthrough` / `parse_failed`)
-- `column_policy_rewrite_duration_seconds` / `row_policy_rewrite_duration_seconds` - histograms, labels: `tenant`, `pool`
+- `qod_node_authz_row_policy_refusals_total` - native RLS refusals, labels: `tenant`, `pool`, `node`; policy IDs and scopes are recorded in node logs without predicate SQL.
+- `column_policy_rewrite_duration_seconds` - histograms, labels: `tenant`, `pool`
 - `column_policy_catalog_lookups_total` - counter, labels: `tenant`, `pool`, `result` (`hit` / `miss` / `error`)
 - `routing_tables_total` - counter, labels: `tenant`, `pool`, `result` (`new` / `repeat`)
 - `routing_placements_total` - counter, labels: `tenant`, `pool`, `result` (`stay` / `switch`)

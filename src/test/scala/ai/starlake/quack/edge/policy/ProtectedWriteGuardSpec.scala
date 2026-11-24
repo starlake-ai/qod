@@ -365,7 +365,7 @@ class ProtectedWriteGuardSpec extends AnyFlatSpec with Matchers:
   // query() / query_table() name their target in a string, so the RLS / CLS rewriters see a
   // table function, not a base table, and forward the read unfiltered and unmasked.
 
-  "check on a SELECT" should "deny query_table / query for a principal with a row policy" in
+  "check on a SELECT" should "leave query_table / query to native row enforcement" in
     List(
       "SELECT * FROM query_table('tpch1.customer')",
       "SELECT * FROM query('SELECT * FROM tpch1.customer')",
@@ -377,7 +377,7 @@ class ProtectedWriteGuardSpec extends AnyFlatSpec with Matchers:
           StatementKind.Select,
           eff(tenantUser, rows = List(rowPolicy)),
           ctx
-        ) shouldBe a[Deny]
+        ) shouldBe Allow
       }
     }
 
@@ -390,14 +390,14 @@ class ProtectedWriteGuardSpec extends AnyFlatSpec with Matchers:
     ) shouldBe a[Deny]
   }
 
-  it should "deny a backtick-quoted query_table for a principal with a row policy" in {
+  it should "leave a backtick-quoted query_table to native row enforcement" in {
     // DuckDB 2.0 accepts backtick-quoted function names; this reads the table on the 2.0 CLI.
     guardWithCls().check(
       "SELECT * FROM `query_table`('tpch1.customer')",
       StatementKind.Select,
       eff(tenantUser, rows = List(rowPolicy)),
       ctx
-    ) shouldBe a[Deny]
+    ) shouldBe Allow
   }
 
   it should "leave principals without policies, and superusers, alone" in {
@@ -411,20 +411,20 @@ class ProtectedWriteGuardSpec extends AnyFlatSpec with Matchers:
     ) shouldBe Allow
   }
 
-  it should "deny a quoted name holding a dot, which the rewriters would match as a.b" in
-    // A row policy on main."a.b" is keyed on that one name; the rewriter sees schema a, table b.
-    List("SELECT * FROM \"a.b\"", "DELETE FROM \"a.b\"").foreach { sql =>
-      withClue(sql) {
-        guardWithCls().check(
-          sql,
-          StatementKind.Select,
-          eff(tenantUser, rows = List(rowPolicy)),
-          ctx
-        ) match
-          case Deny(reason) => reason should include("quoted identifier containing a dot")
-          case other        => fail(s"expected Deny, got $other")
-      }
-    }
+  it should "leave a dotted quoted name to native RLS, while still screening writes" in {
+    guardWithCls().check(
+      "SELECT * FROM \"a.b\"",
+      StatementKind.Select,
+      eff(tenantUser, rows = List(rowPolicy)),
+      ctx
+    ) shouldBe Allow
+    guardWithCls().check(
+      "DELETE FROM \"a.b\"",
+      StatementKind.Dml,
+      eff(tenantUser, rows = List(rowPolicy)),
+      ctx
+    ) shouldBe a[Deny]
+  }
 
   it should "leave an ordinary SELECT to the rewriters" in {
     guardWithCls().check(
@@ -813,7 +813,7 @@ class ProtectedWriteGuardSpec extends AnyFlatSpec with Matchers:
       }
     }
 
-  it should "be denied in a plain SELECT, before the rewriters read it schema-first" in
+  it should "be screened for CLS and resolved natively for RLS in a plain SELECT" in
     List(
       "SELECT * FROM acme_tpch.customer",
       "SELECT 1 FROM acme_tpch.customer",
@@ -824,9 +824,11 @@ class ProtectedWriteGuardSpec extends AnyFlatSpec with Matchers:
     ).foreach { sql =>
       maskAndRow.foreach { e =>
         withClue(s"$sql ${e.columnPolicies.size}/${e.rowPolicies.size}") {
-          withAttached(sql, e) match
-            case Deny(reason) => reason should include("ambiguous two-part name")
-            case other        => fail(s"expected Deny, got $other")
+          if e.columnPolicies.isEmpty then withAttached(sql, e) shouldBe Allow
+          else
+            withAttached(sql, e) match
+              case Deny(reason) => reason should include("ambiguous two-part name")
+              case other        => fail(s"expected Deny, got $other")
         }
       }
     }
@@ -852,7 +854,7 @@ class ProtectedWriteGuardSpec extends AnyFlatSpec with Matchers:
 
   // histogram_values(source, col) runs query_table(source) and histogram runs histogram_values:
   // the rewriters see a table function, never the protected table its string names.
-  "a reading table macro" should "be denied to a principal with policies, in a table position" in
+  "a reading table macro" should "be resolved natively for a row-policy principal" in
     List(
       "SELECT * FROM histogram('tpch1.customer', c_email)",
       "SELECT * FROM histogram_values('tpch1.customer', c_region)",
@@ -866,9 +868,7 @@ class ProtectedWriteGuardSpec extends AnyFlatSpec with Matchers:
           StatementKind.Select,
           eff(tenantUser, rows = List(rowPolicy)),
           ctx
-        ) match
-          case Deny(reason) => reason should include("histogram")
-          case other        => fail(s"expected Deny, got $other")
+        ) shouldBe Allow
       }
     }
 

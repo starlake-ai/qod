@@ -880,18 +880,18 @@ int main() {
 		auto result = probe.Query(stats_sql);
 		auto &expected = qod::AuthzStatsColumns();
 		auto shaped = !result->HasError() && result->RowCount() == 1 && result->GetNames().size() == expected.size() &&
-		              expected.size() == 10;
+		              expected.size() == 11;
 		for (size_t i = 0; shaped && i < expected.size(); i++) {
 			shaped = result->GetNames()[i].GetIdentifierName() == expected[i] &&
 			         result->GetTypes()[i] == duckdb::LogicalType::BIGINT;
 		}
 		Check(result->HasError() ? result->GetError() : "", !shaped, "",
-		      "the system principal reads one row of ten BIGINT columns, by name, in order");
+		      "the system principal reads one row of eleven BIGINT columns, by name, in order");
 		// Task 8's seven counters keep their place; the cache columns come after them (addendum 6).
 		const std::vector<std::string> order = {"plan_cache_hits",    "plan_cache_misses",       "decide_calls",
 		                                        "decide_unavailable", "decide_refused",          "local_refusals",
 		                                        "screen_calls",       "verdict_cache_size",      "verdict_cache_evictions",
-		                                        "credential_sets_size"};
+		                                        "credential_sets_size", "row_policy_refusals"};
 		Check("", expected != order, "", "the columns, Task 8's first and the cache columns appended");
 	}
 	Check("", Counter(probe, "verdict_cache_size") != static_cast<int64_t>(authz->Decider().Cache().Size()), "",

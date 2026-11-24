@@ -184,6 +184,40 @@ jobs:
           path: native/qod-node/build-release/qod-node
           if-no-files-found: error
 
+      - name: Set up Java for the manager/node security integration
+        if: matrix.platform == 'linux-x86_64'
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: sbt
+
+      - name: Set up sbt
+        if: matrix.platform == 'linux-x86_64'
+        uses: sbt/setup-sbt@v1
+
+      - name: Test signed row and column policies through the real manager and node
+        if: matrix.platform == 'linux-x86_64'
+        env:
+          SBT_OPTS: '-Xss8M -Xmx4G'
+        run: |
+          set -euo pipefail
+          cache="$RUNNER_TEMP/manager-duckdb"
+          mkdir -p "$cache"
+          ln -s "$DUCKDB_HOME" "$cache/$DUCKDB_VERSION"
+          export DUCKDB_CACHE_DIR="$cache"
+          export QOD_NODE_BIN="$PWD/native/qod-node/build/qod-node"
+          "$DUCKDB_HOME/bin/duckdb" -c 'INSTALL ducklake; INSTALL httpfs; INSTALL quack;'
+          # Resource generation is skipped to avoid rebuilding the UI and unrelated platform
+          # bundles. Stage the host JNI library in the ordinary runtime resource layout.
+          mkdir -p src/main/resources/native/linux-x86_64
+          cp libquackwire/binaries/linux-x86_64/libquackwire.so src/main/resources/native/linux-x86_64/
+          cp libquackwire/binaries/VERSION src/main/resources/native/
+          sbt -no-colors 'set Compile / resourceGenerators := Seq.empty' \
+            'testOnly ai.starlake.quack.ondemand.runtime.QodNodeDecideSpec ai.starlake.quack.edge.authz.PolicyRouteSpec' \
+            2>&1 | tee "$RUNNER_TEMP/row-policy-integration.log"
+          ! grep -Eq '\*\*\* (CANCELED|ABORTED) \*\*\*' "$RUNNER_TEMP/row-policy-integration.log"
+
   windows:
     name: ${{ matrix.platform }}
     needs: pin

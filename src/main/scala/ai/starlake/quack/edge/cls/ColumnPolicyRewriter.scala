@@ -95,7 +95,8 @@ final class ColumnPolicyRewriter(
     catalog: ColumnCatalog,
     inner: SchemaAwareSqlRewriter = new JsqltranspilerRewriter,
     unresolvedMode: UnresolvedMode = UnresolvedMode.Pass,
-    enabled: Boolean = true
+    enabled: Boolean = true,
+    val nativeEnforcement: Boolean = false
 ):
   import ColumnPolicyRewriter._
 
@@ -105,7 +106,7 @@ final class ColumnPolicyRewriter(
       eff: EffectiveSet,
       ctx: SchemaContext
   ): IO[Outcome] =
-    if !enabled then IO.pure(Passthrough)
+    if !enabled || nativeEnforcement then IO.pure(Passthrough)
     else if eff.user.isSuperuser then IO.pure(Passthrough)
     else if kind != StatementKind.Select then IO.pure(Passthrough)
     else if eff.columnPolicies.isEmpty then IO.pure(Passthrough)
@@ -123,14 +124,14 @@ final class ColumnPolicyRewriter(
             // walk and every step after it parse the statement DuckDB runs. The router hands every
             // policy step the normalized text already; normalizing again changes nothing.
             val normalized = MisreadNames.normalized(input.text, columnPolicies = true)
-            normalized.refusal.fold(carryTimeTravel(normalized.text, eff, ctx))(reason =>
-              IO.pure(Denied(reason))
-            ).map {
-              // The rewrite is printed from the parser input, which is not the caller's statement
-              // here (ParserInput.Rendered.exact): shipping it would run a different statement.
-              case Rewritten(_) if !input.exact => Denied(InexactRefusal)
-              case other                        => other
-            }
+            normalized.refusal
+              .fold(carryTimeTravel(normalized.text, eff, ctx))(reason => IO.pure(Denied(reason)))
+              .map {
+                // The rewrite is printed from the parser input, which is not the caller's statement
+                // here (ParserInput.Rendered.exact): shipping it would run a different statement.
+                case Rewritten(_) if !input.exact => Denied(InexactRefusal)
+                case other                        => other
+              }
       }
 
   /** A time-travel clause is invisible to jsqlparser: carry it through the rewrite on its table
@@ -379,8 +380,8 @@ private[edge] object PositionalReferences:
 
   private val PositionalRe = """^#(\d+)$""".r
 
-  /** The 1-based position a column named `#n` stands for, or None for any other name; a `#n`
-    * whose number does not fit an Int reads as position 0, which no column has.
+  /** The 1-based position a column named `#n` stands for, or None for any other name; a `#n` whose
+    * number does not fit an Int reads as position 0, which no column has.
     */
   def position(columnName: String): Option[Int] =
     columnName match

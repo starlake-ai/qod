@@ -101,6 +101,7 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
 
   override def beforeAll(): Unit =
     if liveReady then
+      decide.serveRowPolicies(keys)
       dir = Files.createTempDirectory("qod-quack-compat")
       val init =
         s"""ATTACH '$dir/acme.duckdb' AS acme_db;

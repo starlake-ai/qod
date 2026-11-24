@@ -28,8 +28,8 @@ import net.sf.jsqlparser.statement.update.{Update, UpdateSet}
 
 import scala.jdk.CollectionConverters._
 
-/** What a write does with its own target table, for the protected-write guard: the row rewriter
-  * never sees a write, so a write aimed at a row-policy table reaches every row, the hidden ones
+/** What a write does with its own target table, for the protected-write guard: read-side RLS never
+  * sees a write, so a write aimed at a row-policy table reaches every row, the hidden ones
   * included, and a write that reads a masked column of its target in a WHERE, a SET value, a
   * RETURNING or an ON CONFLICT clause reads it raw (owner ruling D27).
   *

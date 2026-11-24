@@ -10,7 +10,6 @@ import ai.starlake.quack.edge.cls.{
   UnresolvedMode
 }
 import ai.starlake.quack.model.{PoolKey, TenantDb, TenantDbKind}
-import ai.starlake.quack.edge.rls.RowPolicyRewriter
 import ai.starlake.quack.observability.metrics.StatementInstruments
 import ai.starlake.quack.ondemand.PoolSupervisor
 import ai.starlake.quack.ondemand.catalog.DuckLakeCatalogReader
@@ -22,7 +21,7 @@ import io.circe.Json
 import scala.concurrent.duration.FiniteDuration
 
 /** Statement-pipeline components built from operator config, extracted from Main.bootManager: the
-  * routing classifier and the CLS / RLS rewriters.
+  * routing classifier, CLS rewriter and protected-write guard.
   */
 object EdgeRewriters extends LazyLogging:
 
@@ -63,11 +62,12 @@ object EdgeRewriters extends LazyLogging:
     new ColumnPolicyRewriter(
       catalog = catalog,
       unresolvedMode = unresolvedTableMode(),
-      enabled = clsEnabled
+      enabled = clsEnabled,
+      nativeEnforcement = ai.starlake.quack.edge.cls.ColumnPolicyEnforcement.nativeEnabled()
     )
 
-  /** `quack-on-demand.cls.unresolvedTable`: what the column and row policy rewriters do with a
-    * table whose column list cannot be read.
+  /** `quack-on-demand.cls.unresolvedTable`: what the column policy rewriter does with a table whose
+    * column list cannot be read.
     */
   private def unresolvedTableMode(): UnresolvedMode =
     com.typesafe.config.ConfigFactory
@@ -181,17 +181,8 @@ object EdgeRewriters extends LazyLogging:
         .getBoolean("enabled")
     val rlsEnabled =
       com.typesafe.config.ConfigFactory.load().getBoolean("quack-on-demand.rls.enabled")
-    new ai.starlake.quack.edge.policy.ProtectedWriteGuard(catalog, clsEnabled, rlsEnabled)
-
-  /** SELECT-path row-filter rewriter, over the same [[columnCatalog]] as the column rewriter and
-    * the guard: a predicate naming a column its table does not have fails the policy.
-    */
-  def rowPolicyRewriter(catalog: ColumnCatalog): RowPolicyRewriter =
-    val rlsEnabled: Boolean =
-      com.typesafe.config.ConfigFactory.load().getBoolean("quack-on-demand.rls.enabled")
-    if !rlsEnabled then
-      logger.info(
-        "row-level security is DISABLED (quack-on-demand.rls.enabled=false). " +
-          "Every statement bypasses the row-policy rewriter."
-      )
-    new RowPolicyRewriter(catalog, unresolvedTableMode(), enabled = rlsEnabled)
+    new ai.starlake.quack.edge.policy.ProtectedWriteGuard(
+      catalog,
+      clsEnabled,
+      rlsEnabled
+    )

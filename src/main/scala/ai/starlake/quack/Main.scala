@@ -618,7 +618,11 @@ object Main extends IOApp with LazyLogging:
             issued = Some(issuedHandles),
             minted = Some(mintedHandles),
             paths = key => usePaths.get()(key),
-            readOnlyCatalogs = readOnlyCatalogs
+            readOnlyCatalogs = readOnlyCatalogs,
+            rowPoliciesEnabled =
+              com.typesafe.config.ConfigFactory.load().getBoolean("quack-on-demand.rls.enabled"),
+            nativeColumnPoliciesEnabled =
+              ai.starlake.quack.edge.cls.ColumnPolicyEnforcement.nativeEnabled()
           )
     // After the store: the fleet backend claims servers through it (FleetServerStore).
     val backend: QuackBackend = BootFactories.quackBackend(mgrCfg, store, qodNodeBin, nodeKeys)
@@ -1390,7 +1394,6 @@ object Main extends IOApp with LazyLogging:
           .seconds
       )
       val columnPolicyRewriter = EdgeRewriters.columnPolicyRewriter(columnCatalog)
-      val rowPolicyRewriter    = EdgeRewriters.rowPolicyRewriter(columnCatalog)
       val protectedWriteGuard  = EdgeRewriters.protectedWriteGuard(columnCatalog)
 
       // SQL admin dialect (GRANT/REVOKE, ROW/COLUMN POLICY, ALTER GROUP, admin SHOW forms)
@@ -1571,7 +1574,6 @@ object Main extends IOApp with LazyLogging:
         stmtInstruments,
         classifier,
         columnPolicyRewriter,
-        rowPolicyRewriter,
         activeStatements,
         eventJournal,
         stampWrites = mgrCfg.stampWrites,
@@ -2341,7 +2343,11 @@ object Main extends IOApp with LazyLogging:
         internalHost,
         internalPort,
         mgrCfg.nodeAuthz.internalMaxConnections,
-        List(credentialsRoute.routes, decideRoute.routes)
+        List(
+          credentialsRoute.routes,
+          decideRoute.routes,
+          new ai.starlake.quack.edge.authz.PolicyRoute(nodeKeys).routes
+        )
       )
       // One managed-object-store client for both the boot probe below and the purge
       // worker further down. Constructed unconditionally: the SDK client it wraps is

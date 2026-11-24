@@ -9,7 +9,7 @@ class NodeAuthzStatsSpec extends AnyFlatSpec with Matchers:
 
   private val Row =
     "SELECT 1::BIGINT, 2::BIGINT, 3::BIGINT, 4::BIGINT, 5::BIGINT, 6::BIGINT, 7::BIGINT, " +
-      "8::BIGINT, 9::BIGINT, 10::BIGINT"
+      "8::BIGINT, 9::BIGINT, 10::BIGINT, 11::BIGINT"
 
   /** The seven counters of Task 8 and the verdict cache's evictions, then the two sizes. */
   private def stats(vs: Long*): NodeAuthzStats = vs.toList match
@@ -23,7 +23,7 @@ class NodeAuthzStatsSpec extends AnyFlatSpec with Matchers:
     NodeAuthzStats.sql shouldBe
       "SELECT plan_cache_hits, plan_cache_misses, decide_calls, decide_unavailable, " +
       "decide_refused, local_refusals, screen_calls, verdict_cache_size, verdict_cache_evictions, " +
-      "credential_sets_size FROM system.main.qod_authz_stats()"
+      "credential_sets_size, row_policy_refusals FROM system.main.qod_authz_stats()"
 
   "NodeAuthzStats.Columns" should "name the columns qod-node's qod_authz_stats() returns, in order" in:
     val source = Files.readString(Paths.get("native/qod-node/src/authz_stats.cpp"))
@@ -42,20 +42,24 @@ class NodeAuthzStatsSpec extends AnyFlatSpec with Matchers:
       "screen_calls",
       "verdict_cache_size",
       "verdict_cache_evictions",
-      "credential_sets_size"
+      "credential_sets_size",
+      "row_policy_refusals"
     )
-    NodeAuthzStats.Counters shouldBe NodeAuthzStats.Columns.take(7) :+ "verdict_cache_evictions"
+    NodeAuthzStats.Counters shouldBe NodeAuthzStats.Columns.take(7) ++ List(
+      "verdict_cache_evictions",
+      "row_policy_refusals"
+    )
     NodeAuthzStats.Sizes shouldBe List("verdict_cache_size", "credential_sets_size")
 
   "NodeAuthzStats.fromReader" should "decode the one row of ten columns" in:
     NodeAuthzStats.fromReader(TestArrow.readerFor(Row)) shouldBe
-      Some(NodeAuthzStats(1, 2, 3, 4, 5, 6, 7, 8, 9, 10))
+      Some(NodeAuthzStats(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11))
 
   it should "return None on an empty result, another shape, a cell that is not a number" in:
     NodeAuthzStats.fromReader(TestArrow.emptyReader()) shouldBe None
     NodeAuthzStats.fromReader(TestArrow.oneRowReader()) shouldBe None
     NodeAuthzStats.fromReader(
-      TestArrow.readerFor(Row + ", 11::BIGINT")
+      TestArrow.readerFor(Row + ", 12::BIGINT")
     ) shouldBe None
     // A node from before the cache columns: seven counters only.
     NodeAuthzStats.fromReader(
