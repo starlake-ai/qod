@@ -208,6 +208,11 @@ jobs:
           export DUCKDB_CACHE_DIR="$cache"
           export QOD_NODE_BIN="$PWD/native/qod-node/build/qod-node"
           "$DUCKDB_HOME/bin/duckdb" -c 'INSTALL ducklake; INSTALL httpfs; INSTALL quack;'
+          # Resource generation is skipped to avoid rebuilding the UI and unrelated platform
+          # bundles. Stage the host JNI library in the ordinary runtime resource layout.
+          mkdir -p src/main/resources/native/linux-x86_64
+          cp libquackwire/binaries/linux-x86_64/libquackwire.so src/main/resources/native/linux-x86_64/
+          cp libquackwire/binaries/VERSION src/main/resources/native/
           sbt -no-colors 'set Compile / resourceGenerators := Seq.empty' \
             'testOnly ai.starlake.quack.ondemand.runtime.QodNodeDecideSpec ai.starlake.quack.edge.authz.RowPolicyRouteSpec' \
             2>&1 | tee "$RUNNER_TEMP/row-policy-integration.log"
