@@ -142,31 +142,43 @@ def test_build_manifest_refuses_a_pypi_answer_without_this_releases_wheel(releas
         release_manifest.build_manifest(release_manifest.read_pins(), VERSION, "c", jar, exes, pypi)
 
 
+# The sbt pin's spacing follows scalafmt's column alignment, so it is found by pattern.
+SBT_DUCKDB_PIN = r'val duckdb\s*= "'
+
+
+def _pin(text: str, pattern: str) -> str:
+    """The text `pattern` matches in `text`, which must hold it."""
+    found = re.search(pattern, text)
+    assert found, f"no {pattern!r}"
+    return found.group(0)
+
+
 @pytest.mark.parametrize(
-    ("rel", "old", "new", "message"),
+    ("rel", "pattern", "inserted", "message"),
     [
-        ("project/Versions.scala", 'val duckdb         = "', 'val duckdb         = "9.', "the build links"),
-        ("native/qod-node/CMakeLists.txt", "set(QOD_NODE_PROTOCOL ", "set(QOD_NODE_PROTOCOL 10", "node protocol"),
-        ("cli/src/qod_cli/launcher.py", 'DUCKDB_CLI_VERSION = "', 'DUCKDB_CLI_VERSION = "9.', "provisions DuckDB 9."),
+        ("project/Versions.scala", SBT_DUCKDB_PIN, "9.", "the build links"),
+        ("native/qod-node/CMakeLists.txt", r"set\(QOD_NODE_PROTOCOL ", "10", "node protocol"),
+        ("cli/src/qod_cli/launcher.py", 'DUCKDB_CLI_VERSION = "', "9.", "provisions DuckDB 9."),
     ],
 )
-def test_read_pins_refuses_files_that_disagree(tmp_path, rel, old, new, message):
+def test_read_pins_refuses_files_that_disagree(tmp_path, rel, pattern, inserted, message):
     repo = _fake_repo(tmp_path)
     text = (repo / rel).read_text(encoding="utf-8")
-    assert old in text
-    (repo / rel).write_text(text.replace(old, new, 1), encoding="utf-8")
+    old = _pin(text, pattern)
+    (repo / rel).write_text(text.replace(old, old + inserted, 1), encoding="utf-8")
     with pytest.raises(release_manifest.ManifestError, match=message):
         release_manifest.read_pins(repo)
 
 
 def test_read_pins_refuses_a_duckdb_release_with_no_asset_sha256(tmp_path):
     repo = _fake_repo(tmp_path)
-    for rel, old in (
-        ("cli/src/qod_cli/launcher.py", f'DUCKDB_CLI_VERSION = "{launcher.DUCKDB_CLI_VERSION}"'),
-        ("project/Versions.scala", f'val duckdb         = "{launcher.DUCKDB_CLI_VERSION}'),
+    version = re.escape(launcher.DUCKDB_CLI_VERSION)
+    for rel, pattern in (
+        ("cli/src/qod_cli/launcher.py", f'DUCKDB_CLI_VERSION = "{version}"'),
+        ("project/Versions.scala", SBT_DUCKDB_PIN + version),
     ):
         text = (repo / rel).read_text(encoding="utf-8")
-        assert old in text
+        old = _pin(text, pattern)
         (repo / rel).write_text(text.replace(old, old.replace(launcher.DUCKDB_CLI_VERSION, "9.9.9"), 1), encoding="utf-8")
     with pytest.raises(release_manifest.ManifestError, match="pins no DuckDB 9.9.9 asset sha256"):
         release_manifest.read_pins(repo)
