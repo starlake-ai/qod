@@ -7,7 +7,8 @@ DuckDB 2.0.1 C++ planner interfaces. The gateway SQL rewrite and enforcement sel
 have been removed. `QOD_RLS_ENABLED=false` disables row policies; every manager replica
 must use the same setting.
 
-Node protocol 10 and signed handle version 8 are mandatory.
+Node protocol 10 and signed handle version 8 are mandatory, the same generation as
+[native column security](node-column-security.md).
 Rebuild and vendor every platform's qod-node binary, deploy the matching node image
 and fleet CLI, and restart the nodes before enabling the feature. Older handles and nodes fail closed. No policy-table or DuckLake metadata migration is required.
 
@@ -145,9 +146,6 @@ exports `qod_node_authz_row_policy_refusals_total` with tenant/pool/node labels 
 its existing health probe. The boot report checks unsupported stored expressions,
 including wildcard scopes, in addition to missing-column diagnostics. Full native
 type and function-resolution checks still run against the actual scan at bind time.
-
-The protocol generation differs from the separately stacked CLS implementation;
-that stack must be rebased and fenced consistently before a combined deployment.
 
 Connectors built outside this repository can honor these policies for their own scans; see
 [connector extension points](connector-spis.md).
