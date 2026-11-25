@@ -65,6 +65,20 @@ class FederatedSourceProvidersSpec extends AnyFlatSpec with Matchers:
     FederatedSourceProviders.validate(List(clash)).isLeft shouldBe true
   }
 
+  it should "refuse a wire longer than the source_type column" in {
+    def named(w: String) = new FederatedSourceProvider:
+      val wire                                   = w
+      val extensionName                          = "x"
+      val reservedSecretPrefixes: List[String]   = Nil
+      def errors(s: FederatedSource, r: Set[String]) = Nil
+      def normalizedConfig(raw: String)          = Right(raw)
+      def renderTemplate(s: FederatedSource, r: Set[String]) = Right("")
+    FederatedSourceProviders.validate(List(named("a" * 32))) shouldBe Right(())
+    FederatedSourceProviders.validate(List(named("a" * 33))).left.toOption.get should include(
+      "longer than 32 characters"
+    )
+  }
+
   it should "refuse two providers with one wire" in {
     FederatedSourceProviders.validate(List(TestProvider, TestProvider)).isLeft shouldBe true
   }

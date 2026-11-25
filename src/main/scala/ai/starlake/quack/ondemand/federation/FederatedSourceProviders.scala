@@ -9,20 +9,29 @@ import ai.starlake.quack.spi.FederatedSourceProvider
 object FederatedSourceProviders:
   private val WirePattern = "^[a-z0-9_]+$".r
 
+  /** The width of `qodstate_federated_source.source_type` (VARCHAR(32), migration 0038). */
+  val MaxWireLength = 32
+
   @volatile private var byWire: Map[String, FederatedSourceProvider] = Map.empty
 
   def validate(ps: List[FederatedSourceProvider]): Either[String, Unit] =
     val wires    = ps.map(_.wire)
     val builtIns = FederatedSourceType.builtIns.map(_.wire).toSet
-    wires.find(w => WirePattern.findFirstIn(w).isEmpty) match
-      case Some(bad) => Left(s"provider wire '$bad' is not lowercase [a-z0-9_]+")
-      case None =>
-        wires.find(builtIns.contains) match
-          case Some(clash) => Left(s"provider wire '$clash' collides with a built-in source type")
-          case None =>
-            wires.diff(wires.distinct).headOption match
-              case Some(dup) => Left(s"two providers declare source type '$dup'")
-              case None      => Right(())
+    val problem  =
+      wires.find(w => WirePattern.findFirstIn(w).isEmpty)
+        .map(bad => s"provider wire '$bad' is not lowercase [a-z0-9_]+")
+        .orElse(
+          wires.find(_.length > MaxWireLength)
+            .map(long => s"provider wire '$long' is longer than $MaxWireLength characters")
+        )
+        .orElse(
+          wires.find(builtIns.contains)
+            .map(clash => s"provider wire '$clash' collides with a built-in source type")
+        )
+        .orElse(
+          wires.diff(wires.distinct).headOption.map(dup => s"two providers declare source type '$dup'")
+        )
+    problem.toLeft(())
 
   def install(ps: List[FederatedSourceProvider]): Either[String, Unit] =
     validate(ps).map { _ =>

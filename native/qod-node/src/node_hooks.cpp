@@ -873,25 +873,33 @@ void PostBind(PlannerExtensionInput &input, BoundStatement &statement) {
 		auto privileged = installed.principal.superuser || installed.principal.system;
 		// Placement errors happen before Enforce's description/verification boundary. Count
 		// them here, and leave later refusals to Enforce so every refusal increments once.
+		bool row_policy_counted = false;
 		try {
 			if (!privileged) {
-			ApplyColumnPolicies(context, input.binder, statement.plan, installed.column_policies);
-			ApplyRowPolicies(context, statement.plan, installed.row_policies,
-						 [&](const RowPolicy &p, const std::string &cause) {
-							 gate.authz->Stats().row_policy_refusals++;
-							 std::cerr << "QoD row policy refusal "
-									   << CanonicalJson(JsonObject({{"policy", JsonString(p.id)},
-																	{"catalog", JsonString(p.catalog)},
-																	{"schema", JsonString(p.schema)},
-																	{"table", JsonString(p.table)},
-																	{"cause", JsonString(cause)}}))
-									   << std::endl;
-						 });
+				ApplyColumnPolicies(context, input.binder, statement.plan, installed.column_policies);
+				ApplyRowPolicies(context, statement.plan, installed.row_policies,
+							 [&](const RowPolicy &p, const std::string &cause) {
+								 row_policy_counted = true;
+								 gate.authz->Stats().row_policy_refusals++;
+								 std::cerr << "QoD row policy refusal "
+										   << CanonicalJson(JsonObject({{"policy", JsonString(p.id)},
+																		{"catalog", JsonString(p.catalog)},
+																		{"schema", JsonString(p.schema)},
+																		{"table", JsonString(p.table)},
+																		{"cause", JsonString(cause)}}))
+										   << std::endl;
+							 });
 			}
 			// Every principal: a connector's own mandatory scope is sealed even when no policy applies.
 			ApplyProtectedScans(context, *statement.plan,
 			                    privileged ? std::vector<ColumnPolicy> {} : installed.column_policies);
-		} catch (PermissionException &) {
+		} catch (PermissionException &error) {
+			// Enforce's rule; a binding failure ApplyRowPolicies already counted is not counted twice.
+			auto reason = std::string(error.what());
+			if (!row_policy_counted &&
+			    (reason.find("row-policy") != std::string::npos || reason.find("row policy") != std::string::npos ||
+			     reason.find("row policies") != std::string::npos))
+				gate.authz->Stats().row_policy_refusals++;
 			gate.authz->Stats().local_refusals++;
 			throw;
 		}

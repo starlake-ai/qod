@@ -16,7 +16,8 @@ included, after column and row policies are applied. For each scan it:
 1. Refuses the statement if a field the scan uses in its remote request (`FieldUses()`,
    kinds `Filter` and `VectorLineage`) has a column policy on it. `Projection` uses are
    ordinary projected columns and are covered by normal column policies. FieldUses are also
-   reported to the describer as column reads.
+   reported to the describer as column reads. `FieldUse.column` must use the column's
+   spelling in the table entry, since that is the name policies and reads are matched on.
 2. Calls `AcceptRowPolicies` with the scan's bound row policies and the predicates.
 3. Refuses a bounded scan whose `LoweringResult.exact` is false.
 4. Seals the scan with a digest of the policies (`PolicyDigest`: SHA-256 over policy ids and
@@ -24,6 +25,11 @@ included, after column and row policies are applied. For each scan it:
 
 `VerifyProtectedScans` runs again in `Enforce`, before optimization, and rechecks every seal
 against the policies of the boundary above the scan.
+
+Bind runs before core has handed the scan its policies, so the table function's bind MUST
+perform no remote I/O. A connector scan on an internal (non-quack) connection is never
+sealed, because core runs the obligation only for quack sessions, so it always refuses at
+`RequireSealed()`.
 
 ### Predicate shape
 
@@ -38,7 +44,9 @@ and the connector still enforces its own mandatory scope.
 
 `exact = true` means the connector enforces exactly the rows for which the policy predicates
 are TRUE, before any candidate limit it applies. A row where a policy evaluates to NULL, or
-fails to evaluate, must not be returned. If the connector cannot guarantee that, return
+fails to evaluate, must not be returned. Virtual columns such as scores or ranks must not
+depend on rows the policy excludes: a rank computed over the whole remote set reveals that
+hidden rows exist. If the connector cannot guarantee that, return
 `exact = false` with a `refusal_code` (lowercase `[a-z_]+`, for example `policy_unsupported`;
 anything else is reported as that one code).
 
@@ -83,14 +91,17 @@ code compiled into qod-node with `RegisterLinkedFunctionClass(lower_name, type, 
 (`linked_function_classes.hpp`), where `type` is scalar, aggregate or table. Registration is
 only possible before `FreezeLinkedFunctionClasses()`, which `Serve` calls before it
 installs authorization. After the freeze, for a name the compiled table already classifies,
-for another type, or for a Superuser or File class, registration throws `std::logic_error`.
+for a type other than scalar, aggregate or table, or for a Superuser or File class, registration throws `std::logic_error`.
 
 ### Build marker
 
-A linked build's `--build-info` marker carries a `;extra=<names>` suffix, only when extras
-are linked. The open build's marker is unchanged. `scripts/release/qod-node-build-info.sh`
-and `process_test.sh` parse the open marker, so release tooling for linked builds must
-account for the suffix.
+A linked build's `--build-info` output carries a `;extra=<names>` suffix, only when extras
+are linked. The open build's marker is unchanged. The suffix is appended at run time, so the
+literal compiled into the binary is the base marker in both builds:
+`scripts/release/qod-node-build-info.sh` greps the binary's bytes, finds that base literal
+in a linked build and never sees `;extra=`. Only a parser of `--build-info` output anchored
+at the end of the line (such as `process_test.sh`) rejects the suffix, so tooling that runs a
+linked binary must accept it.
 
 ## Manager
 
@@ -98,11 +109,13 @@ Implement `ai.starlake.quack.spi.FederatedSourceProvider` and return it from
 `ManagerModule.federatedSourceProviders`; return function classes for the linked node's
 functions from `ManagerModule.functionClasses` as (name, type, class) with class allowed or
 listing. Both are read right after the module is constructed, before `start()`, because pool
-restore renders sources before modules start.
+restore renders sources before modules start. A function classed allowed this way becomes
+usable in row-policy predicates, like a built-in allowed function.
 
-The provider supplies `wire` (the `sourceType` value, lowercase `[a-z0-9_]+`),
-`extensionName`, `reservedSecretPrefixes`, `errors`, `normalizedConfig` and
-`renderTemplate`. Its rendered SQL may contain `{{alias}}` and `{{secret.NAME}}`
+The provider supplies `wire` (the `sourceType` value, lowercase `[a-z0-9_]+`, at most 32
+characters), `extensionName`, `reservedSecretPrefixes`, `errors`, `normalizedConfig` and
+`renderTemplate`. `extensionName` is informational in this release: core does not load or
+check it. Its rendered SQL may contain `{{alias}}` and `{{secret.NAME}}`
 placeholders; core substitutes them, the provider never does. A source of a plugin type
 stores its config as raw JSON in the REST field `pluginConfig`; `config` stays for
 `iceberg_rest` sources only.
@@ -110,6 +123,11 @@ stores its config as raw JSON in the REST field `pluginConfig`; `config` stays f
 Secrets: the provider's config is echoed back by the REST API, so it must hold secrets only
 as `{{secret.NAME}}` placeholders, and the provider's `errors()` should reject literal
 credentials.
+
+Ambient credentials: there is no superuser-only hook for plugin types, so any tenant admin
+who may write sources can create one. A provider must refuse in `errors()` any config whose
+ATTACH would use the node's ambient credentials (environment, instance role, credential
+chain, local files) instead of the source's own secrets.
 
 Quoting: core refuses a plugin source whose rendered template has a `{{secret.NAME}}`
 placeholder outside a single-quoted literal. There is no plain-token fallback as for legacy

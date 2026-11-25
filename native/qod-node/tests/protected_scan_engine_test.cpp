@@ -115,8 +115,11 @@ int main() {
 	handle.row_policies = {{"p3", "memory", "main", "docs", "id = 2"}};
 	++handle.policy_version;
 	install();
+	auto row_refusals = authz->Stats().row_policy_refusals.load();
 	Refused("inexact lowering refuses before any fetch",
 	        Run(user, "SELECT id FROM qod_test_bounded_scan('memory.main.docs', 1)"), "policy_unsupported");
+	Expect("the refusal counts once as a row policy refusal",
+	       std::to_string(authz->Stats().row_policy_refusals.load() - row_refusals), "1");
 	Expect("unbounded scan keeps the local row filter for an inexact lowering",
 	       Run(user, "SELECT id FROM qod_test_bounded_scan('memory.main.docs', 3, bounded := false) ORDER BY id"), "2");
 	Refused("a connector refusal code outside [a-z_]+ is reported as policy_unsupported",
