@@ -147,6 +147,15 @@
         { "when": "after", "boot_refuses_until_done": false, "text": "Unset QOD_CLS_ENFORCEMENT, QOD_CLS_UNRESOLVED_TABLE and QOD_RLS_ENFORCEMENT: they were removed and are ignored. Review the native policy limits (docs/node-column-security.md, docs/node-row-security.md): writes to a table a column or row policy covers, view-scoped policies, unsupported column types and unsupported predicates are now refused." },
         { "when": "after", "boot_refuses_until_done": false, "text": "Read the boot output and fix each stderr WARN: line it prints for a row policy naming a column its table no longer has (it now denies every statement reading that table under its role), a stored mask outside the allowed forms, and a stored row predicate or mask the parser read only in part (a predicate so stored now denies its table). Update or delete each policy named." }
       ]
+    },
+    {
+      "version": "0.15.1",
+      "changesets": [],
+      "min_from_version": "0.10.0",
+      "rollback_without_restore": true,
+      "rollback_blocked_by": [],
+      "notes": "https://github.com/starlake-ai/quack-on-demand/blob/v0.15.1/CHANGELOG.md",
+      "steps": []
     }
   ]
 }
