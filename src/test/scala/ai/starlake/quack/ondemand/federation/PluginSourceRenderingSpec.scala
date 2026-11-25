@@ -33,7 +33,10 @@ class PluginSourceRenderingSpec extends AnyFlatSpec with Matchers with OptionVal
 
   it should "refuse a source whose provider is not loaded" in {
     val orphan = src().copy(sourceType = FederatedSourceType.Plugin("unloaded_plugin"))
-    FederatedSourceRules.errors(orphan, Set.empty).mkString should include("not loaded")
+    val msg    = FederatedSourceRules.errors(orphan, Set.empty).mkString
+    msg should include("unknown sourceType 'unloaded_plugin' (expected one of: sql, ")
+    msg should include("test_connector")
+    msg should include("or its module is not loaded")
   }
 
   it should "reserve the provider's secret prefixes from sql sources" in {

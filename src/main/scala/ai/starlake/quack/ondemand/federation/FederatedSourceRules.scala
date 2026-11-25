@@ -139,6 +139,10 @@ object FederatedSourceRules:
         }
       case FederatedSourceType.Plugin(w) =>
         FederatedSourceProviders.of(w) match
-          case None    => List(s"sourceType '$w' is provided by a module that is not loaded")
+          case None =>
+            List(
+              s"unknown sourceType '$w' (expected one of: ${FederatedSourceType.wireList}), " +
+                "or its module is not loaded"
+            )
           case Some(p) => p.errors(source, reserved)
     (setupOnTyped.toList ++ source.validate ++ typed).distinct

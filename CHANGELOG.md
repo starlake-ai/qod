@@ -333,6 +333,12 @@
   - The iceberg extension now needs avro loaded first. Nodes install avro before any Iceberg
     source's setup SQL runs, and autoloading loads it, so Iceberg sources are unaffected; an
     initSql that loads iceberg on a node without avro installed fails.
+- **Unknown federated `sourceType` values.** A stored or imported federated source whose
+  `sourceType` names no built-in type is now treated as a plugin source: it is refused at write
+  time and skipped at render (its siblings still attach) unless a loaded module provides that
+  type, instead of being read as `sql`. A misspelled `sourceType` in a manifest is therefore
+  refused with `unknown sourceType '<value>' (expected one of: ...), or its module is not loaded`.
+  A NULL or blank stored value still reads as `sql`.
 
 ### Fixed
 
