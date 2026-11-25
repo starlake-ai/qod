@@ -26,6 +26,15 @@ final class UnquotedSecretRefused(val alias: String, val name: String)
         "the source is left out of the node's init"
     )
 
+/** A plugin source whose provider module is not loaded on this manager. Refused for that one
+  * source (its siblings still attach); names the alias and the wire only.
+  */
+final class SourceProviderMissing(val alias: String, val wire: String)
+    extends RuntimeException(
+      s"federated source '$alias' has type '$wire', whose module is not loaded; " +
+        "the source is left out of the node's init"
+    )
+
 /** One source's resolved setup SQL, plus the plaintext secret VALUES that were substituted into it.
   *
   * `secretValues` exists so the Iceberg attach verifier does not have to re-derive the credentials
@@ -138,9 +147,13 @@ final class FederationBlobBuilder(
       renderOne(src, redactSecrets, reservedFor(sources, src.id, ownAlias))
         .map(b => Option(b.sql))
         // Only that source's block goes: its siblings still attach.
-        .recover { case e: UnquotedSecretRefused =>
-          logger.warn(e.getMessage)
-          None
+        .recover {
+          case e: UnquotedSecretRefused =>
+            logger.warn(e.getMessage)
+            None
+          case e: SourceProviderMissing =>
+            logger.warn(e.getMessage)
+            None
         }
     }
     blobs = rendered.flatten
@@ -256,8 +269,18 @@ final class FederationBlobBuilder(
                 )
       case FederatedSourceType.Postgres => rdbmsTemplate(src, RdbmsKind.Postgres, reservedAliases)
       case FederatedSourceType.Mysql    => rdbmsTemplate(src, RdbmsKind.Mysql, reservedAliases)
-      case FederatedSourceType.Plugin(_) =>
-        throw new IllegalStateException("plugin source types are not rendered yet")
+      case FederatedSourceType.Plugin(w) =>
+        FederatedSourceProviders.of(w) match
+          case None    => IO.raiseError(new SourceProviderMissing(src.alias, w))
+          case Some(p) =>
+            p.renderTemplate(src, reservedAliases) match
+              case Left(errs) =>
+                IO.raiseError(
+                  new RuntimeException(
+                    s"invalid $w config for source '${src.alias}': ${errs.mkString("; ")}"
+                  )
+                )
+              case Right(sql) => IO.pure(sql)
 
   /** The Postgres / MySQL arm of [[bodyTemplate]], same contract as the Iceberg one: parse, run
     * `RdbmsConfig.validated` (the only way to obtain what `render` accepts), raise on anything

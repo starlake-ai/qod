@@ -1430,6 +1430,16 @@ class ManifestRoundTripSpec extends AnyFlatSpec with Matchers:
       "socket path is not accepted"
     )
 
+  it should "refuse a manifest source whose plugin sourceType is not loaded, without throwing" in
+    importRefuses(
+      ManifestFederatedSource(
+        alias = "plug",
+        sourceType = "unloaded_plugin",
+        config = Some("""{"endpoint":"x"}""")
+      ),
+      "not loaded"
+    )
+
   it should "refuse a manifest postgres source carrying setupSql" in
     importRefuses(
       ManifestFederatedSource(

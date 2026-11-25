@@ -67,8 +67,8 @@ object FederatedSourceRules:
         case FederatedSourceType.Postgres | FederatedSourceType.Mysql =>
           RdbmsConfig.fromJson(raw).map(_.normalized(RdbmsKind.of(t).get).toJson)
         case FederatedSourceType.Sql => Right(raw)
-        case FederatedSourceType.Plugin(_) =>
-          throw new IllegalStateException("plugin source types are not rendered yet")
+        case FederatedSourceType.Plugin(w) =>
+          FederatedSourceProviders.of(w).toRight("not loaded").flatMap(_.normalizedConfig(raw))
       typed.toOption.flatMap(io.circe.parser.parse(_).toOption).fold(Json.fromString(raw))(settled)
     }
 
@@ -118,7 +118,7 @@ object FederatedSourceRules:
         // Judged on the setupSql text with `{{alias}}` expanded, so `qod_{{alias}}` under alias
         // `pg_x` is `qod_pg_x`. Secret values are not spliced in here (see ReservedSecretPrefixes).
         val lower = source.setupSql.replace("{{alias}}", source.alias).toLowerCase(Locale.ROOT)
-        ReservedSecretPrefixes.filter(lower.contains).map { p =>
+        (ReservedSecretPrefixes ++ FederatedSourceProviders.reservedSecretPrefixes).filter(lower.contains).map { p =>
           s"setupSql mentions '$p', a secret-name prefix reserved for QoD's typed sources"
         } ++ unquotedSecretError(source.setupSql).toList
       case FederatedSourceType.IcebergRest =>
@@ -136,6 +136,8 @@ object FederatedSourceRules:
             case Right(cfg) =>
               RdbmsConfig.validated(kind, cfg, source.alias, reserved).left.getOrElse(Nil)
         }
-      case FederatedSourceType.Plugin(_) =>
-        throw new IllegalStateException("plugin source types are not rendered yet")
+      case FederatedSourceType.Plugin(w) =>
+        FederatedSourceProviders.of(w) match
+          case None    => List(s"sourceType '$w' is provided by a module that is not loaded")
+          case Some(p) => p.errors(source, reserved)
     (setupOnTyped.toList ++ source.validate ++ typed).distinct

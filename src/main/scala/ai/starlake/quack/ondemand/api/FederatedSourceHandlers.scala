@@ -199,8 +199,11 @@ final class FederatedSourceHandlers(
 
             val fieldErrors =
               List(
-                Option.when(req.config.isDefined && sourceType != FederatedSourceType.IcebergRest)(
-                  s"config is for sourceType 'iceberg_rest', not '${sourceType.wire}'" +
+                Option.when(
+                  req.config.isDefined && sourceType != FederatedSourceType.IcebergRest &&
+                    !sourceType.isInstanceOf[FederatedSourceType.Plugin]
+                )(
+                  s"config is for sourceType 'iceberg_rest' or a module-provided type, not '${sourceType.wire}'" +
                     (if sourceType.rdbms then "; use connection" else "")
                 ),
                 Option.when(req.connection.isDefined && !sourceType.rdbms)(
