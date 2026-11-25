@@ -256,6 +256,8 @@ final class FederationBlobBuilder(
                 )
       case FederatedSourceType.Postgres => rdbmsTemplate(src, RdbmsKind.Postgres, reservedAliases)
       case FederatedSourceType.Mysql    => rdbmsTemplate(src, RdbmsKind.Mysql, reservedAliases)
+      case FederatedSourceType.Plugin(_) =>
+        throw new IllegalStateException("plugin source types are not rendered yet")
 
   /** The Postgres / MySQL arm of [[bodyTemplate]], same contract as the Iceberg one: parse, run
     * `RdbmsConfig.validated` (the only way to obtain what `render` accepts), raise on anything

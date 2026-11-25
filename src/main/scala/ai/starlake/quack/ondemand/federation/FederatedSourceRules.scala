@@ -67,6 +67,8 @@ object FederatedSourceRules:
         case FederatedSourceType.Postgres | FederatedSourceType.Mysql =>
           RdbmsConfig.fromJson(raw).map(_.normalized(RdbmsKind.of(t).get).toJson)
         case FederatedSourceType.Sql => Right(raw)
+        case FederatedSourceType.Plugin(_) =>
+          throw new IllegalStateException("plugin source types are not rendered yet")
       typed.toOption.flatMap(io.circe.parser.parse(_).toOption).fold(Json.fromString(raw))(settled)
     }
 
@@ -134,4 +136,6 @@ object FederatedSourceRules:
             case Right(cfg) =>
               RdbmsConfig.validated(kind, cfg, source.alias, reserved).left.getOrElse(Nil)
         }
+      case FederatedSourceType.Plugin(_) =>
+        throw new IllegalStateException("plugin source types are not rendered yet")
     (setupOnTyped.toList ++ source.validate ++ typed).distinct
