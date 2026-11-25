@@ -285,6 +285,7 @@ public:
 	void Load(ExtensionLoader &loader) override {
 		loader.RegisterFunction(FixtureFunction("qod_test_bounded_scan", FixtureBind, true));
 		loader.RegisterFunction(FixtureFunction("qod_test_unprotected_bounded", FixtureUnprotectedBind));
+		qod::RegisterBoundedFunction("qod_test_bounded_scan");
 		qod::RegisterBoundedFunction("qod_test_unprotected_bounded");
 	}
 	std::string Name() override {

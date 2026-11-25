@@ -50,10 +50,13 @@ inexact result is refused. An unbounded scan may return `exact = false`: core ke
 row filter above the scan.
 
 Connectors MUST register every table function that applies a remote candidate limit with
-`RegisterBoundedFunction(lower_name)`, whether or not its bind data is a `ProtectedScan`.
-This is what makes core refuse a later `post_bind` that swaps in bind data that is not a
-`ProtectedScan`: a `LogicalGet` of a registered bounded function without a `ProtectedScan`
-is refused. Register before the database serves statements.
+`RegisterBoundedFunction(name)` (the name is lowercased), whether or not its bind data is a
+`ProtectedScan`. This is what makes core refuse a later `post_bind` that swaps in bind data
+that is not a `ProtectedScan`: a `LogicalGet` of a registered bounded function without a
+`ProtectedScan` is refused. Register before the database serves statements. Core also
+registers the function of every bounded `ProtectedScan` it handles, so a swap in the same
+or a later statement is refused even for a function the connector did not register, but a
+function first planned through a swapped bind data is only covered by registration.
 
 ### Sealing
 

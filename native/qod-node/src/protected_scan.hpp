@@ -75,9 +75,11 @@ private:
 
 ProtectedScan *AsProtectedScan(duckdb::LogicalGet &get);
 
-//! A table function (lowercase name) that applies a remote candidate limit. A LogicalGet of one whose
-//! bind data is not a ProtectedScan is refused. Call before the database serves statements.
-void RegisterBoundedFunction(const std::string &lower_name);
+//! A table function that applies a remote candidate limit (the name is lowercased). A LogicalGet of
+//! one whose bind data is not a ProtectedScan is refused. Call before the database serves
+//! statements. ApplyProtectedScans also registers the function of every bounded ProtectedScan it
+//! handles, so a later swap of that scan's bind data is refused even if the connector forgot.
+void RegisterBoundedFunction(const std::string &name);
 bool IsBoundedFunction(const std::string &lower_name);
 
 //! Lowercase hex SHA-256 over the policies' ids and SQL, in order.

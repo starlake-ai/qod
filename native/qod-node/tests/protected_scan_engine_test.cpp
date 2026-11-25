@@ -48,14 +48,20 @@ void Refused(const std::string &what, const std::string &got, const std::string 
 	}
 }
 
-bool unseal = false;
+//! What a post_bind registered after the node's own does to a sealed fixture scan.
+enum class Tamper { None, Unseal, Unprotect };
+Tamper tamper = Tamper::None;
 void Unseal(PlannerExtensionInput &input, BoundStatement &statement) {
-	if (!unseal || !statement.plan) return;
+	if (tamper == Tamper::None || !statement.plan) return;
 	std::function<void(LogicalOperator &)> walk = [&](LogicalOperator &op) {
 		if (op.type == LogicalOperatorType::LOGICAL_GET) {
 			auto &get = op.Cast<LogicalGet>();
 			if (auto data = dynamic_cast<qod_test::FixtureBindData *>(get.bind_data.get())) {
-				get.bind_data = make_uniq<qod_test::FixtureBindData>(data->table, data->k);
+				if (tamper == Tamper::Unseal) {
+					get.bind_data = make_uniq<qod_test::FixtureBindData>(data->table, data->k);
+				} else {
+					get.bind_data = make_uniq<qod_test::FixtureUnprotectedBindData>(data->table, data->k);
+				}
 			}
 		}
 		for (auto &child : op.children) walk(*child);
@@ -113,10 +119,17 @@ int main() {
 	handle.row_policies = {{"p1", "memory", "main", "docs", "owner = 'alice'"}};
 	++handle.policy_version;
 	install();
-	unseal = true;
+	tamper = Tamper::Unseal;
 	Refused("scan replaced after sealing", Run(user, "SELECT id FROM qod_test_bounded_scan('memory.main.docs', 1)"),
 	        "could not be verified");
-	unseal = false;
+	tamper = Tamper::Unprotect;
+	Refused("bounded scan swapped for unprotected bind data after sealing",
+	        Run(user, "SELECT id FROM qod_test_bounded_scan('memory.main.docs', 1)"),
+	        "a bounded connector scan without a policy obligation is not supported");
+	tamper = Tamper::None;
+	qod::RegisterBoundedFunction("QOD_Test_Mixed_Case");
+	Expect("registered bounded names are lowercased", qod::IsBoundedFunction("qod_test_mixed_case") ? "yes" : "no",
+	       "yes");
 	Refused("internal connection never sealed", Run(setup, "SELECT id FROM qod_test_bounded_scan('memory.main.docs', 1)"),
 	        "without a sealed policy obligation");
 	Expect("prepare", Run(user, "PREPARE top AS SELECT id FROM qod_test_bounded_scan('memory.main.docs', 1)"), "");

@@ -69,6 +69,11 @@ void Handle(ClientContext &context, LogicalGet &get, const std::vector<RowPolicy
 			}
 		}
 	}
+	if (scan->IsBounded()) {
+		// A function seen bounded once stays bounded: a later post_bind that swaps its bind data for
+		// one that is not a ProtectedScan, in this statement or a later one, is refused at verify.
+		RegisterBoundedFunction(FunctionName(get));
+	}
 	auto result = scan->AcceptRowPolicies(context, get, policies, predicates);
 	if (scan->IsBounded() && !result.exact) {
 		throw PermissionException("QoD: " + SafeCode(result.refusal_code) +
@@ -134,9 +139,10 @@ ProtectedScan *AsProtectedScan(LogicalGet &get) {
 	return dynamic_cast<ProtectedScan *>(get.bind_data.get());
 }
 
-void RegisterBoundedFunction(const std::string &lower_name) {
+void RegisterBoundedFunction(const std::string &name) {
+	auto lower = StringUtil::Lower(name);
 	std::lock_guard<std::mutex> lock(RegistryMutex());
-	Registry().insert(lower_name);
+	Registry().insert(std::move(lower));
 }
 
 bool IsBoundedFunction(const std::string &lower_name) {
