@@ -43,7 +43,8 @@ object FlightEdgeHarness:
   private def stubAdapter(
       tracker: NodeLoadTracker,
       nodeQuery: String => QuackResponse,
-      onAuthorize: String => Unit
+      onAuthorize: String => Unit,
+      keys: ai.starlake.quack.edge.authz.NodeKeys
   ): QuackHttpAdapter =
     val client = new QuackHttpClient(
       // Use the test-shared allocator (never closed) so we don't fight
@@ -58,7 +59,7 @@ object FlightEdgeHarness:
           authorize: () => String
       ): IO[QuackResponse] =
         IO { onAuthorize(authorize()); nodeQuery(sql) }
-    new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
+    new QuackHttpAdapter(client, tracker, keys)
 
   // ------------------------------------------------------------------
   // Public API
@@ -124,7 +125,12 @@ object FlightEdgeHarness:
       /** Required, like the router's: a default would let a spec forget it and narrow nothing. */
       metadataFilterRewriter: ai.starlake.quack.edge.meta.MetadataFilterRewriter,
       /** Required, like the router's: a default would let a spec forget it and screen nothing. */
-      protectedWriteGuard: ProtectedWriteGuard
+      protectedWriteGuard: ProtectedWriteGuard,
+      /** The keys the stub adapter mints handles with; a spec passes its own to read the policy
+        * bundles those handles name.
+        */
+      keys: ai.starlake.quack.edge.authz.NodeKeys =
+        ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
   )
 
   /** Boot a [[FlightEdgeServer]] on an ephemeral loopback port: the edge binds port 0 and the
@@ -188,7 +194,7 @@ object FlightEdgeHarness:
     wiring.opa.foreach(sup.wireOpa)
     if wiring.spawnNodes then sup.reconcile().unsafeRunSync()
 
-    val adapter  = stubAdapter(tracker, wiring.nodeQuery, wiring.onAuthorize)
+    val adapter  = stubAdapter(tracker, wiring.nodeQuery, wiring.onAuthorize, wiring.keys)
     val sessions = new SessionRegistry
     val history  = new StatementHistoryStore()
     val si       = StatementInstruments.noop
