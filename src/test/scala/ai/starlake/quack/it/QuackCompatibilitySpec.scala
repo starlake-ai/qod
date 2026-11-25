@@ -37,16 +37,19 @@ import scala.sys.process.{Process, ProcessLogger}
   * older, or without a qod-node build, like the other real-node specs.
   *
   * The node decides alice's plans through a stand-in decision endpoint that applies her narrow
-  * grants (RW on `customer`, RO on `ids`, nothing on `secret`), and the front door runs the
-  * metadata filter, a column mask on `customer.c_name` and a row policy on `secret`, so the CLS and
-  * RLS rewriters run on every statement too. A stand-in that admitted everything used to hide that
-  * the client's attach-time catalog sync (`duckdb_tables() UNION ALL duckdb_views()`) was denied
-  * for every ordinary principal (issue #114), and a policy-free principal then hid that the CLS
-  * rewriter denied the same sync for anyone holding a column policy (the issue's second report).
+  * grants (RW on `customer` and `orders`, RO on `ids`, nothing on `secret`), and the front door
+  * runs the metadata filter, a column mask on `customer.c_name` and a row policy on `secret`, so
+  * the CLS and RLS rewriters run on every statement too. A stand-in that admitted everything used
+  * to hide that the client's attach-time catalog sync (`duckdb_tables() UNION ALL duckdb_views()`)
+  * was denied for every ordinary principal (issue #114), and a policy-free principal then hid that
+  * the CLS rewriter denied the same sync for anyone holding a column policy (the issue's second
+  * report).
   *
   * A 2.0 client sends `BEGIN TRANSACTION` when it first touches the attached catalog, and ships an
   * INSERT as `INSERT ... SELECT * FROM scan_data_from_quack_client(...)` followed by SEND_DATA
-  * messages, so every attach case also runs those through the node's decision.
+  * messages, so every attach case also runs those through the node's decision. Native CLS refuses a
+  * write to a table its principal's column policy covers, so the client-fed INSERT targets
+  * `orders`, which no policy names, and a write to `customer` is refused.
   *
   * The Python cases provision their DuckDB through `uv`: a 2.0 pre-release wheel whose bundled
   * quack extension is the nodes' own commit ([[Python20]]), and a 1.5 release that the front door
@@ -110,6 +113,7 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
            |CREATE TABLE acme_db.tpch1.secret AS SELECT 1 AS x;
            |CREATE TABLE acme_db.tpch1."Clés" AS SELECT 1 AS id, 'raw-secret' AS secret;
            |CREATE TABLE acme_db.tpch1.ids AS SELECT range AS id FROM range(60000);
+           |CREATE TABLE acme_db.tpch1.orders AS SELECT range AS c_custkey, 'order' || range AS c_name FROM range(10);
            |CREATE SCHEMA acme_db.other;
            |CREATE TABLE acme_db.other.ids AS SELECT range AS id FROM range(7);
            |USE acme_db.tpch1;
@@ -179,6 +183,7 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
     val user   = RbacUser("u-1", Some("t-1"), "alice", kind = "user")
     val grants = List(
       RolePermission("rp-1", "r-1", "acme_db", "tpch1", "customer", "RW"),
+      RolePermission("rp-4", "r-1", "acme_db", "tpch1", "orders", "RW"),
       RolePermission("rp-2", "r-1", "acme_db", "tpch1", "ids", "RO"),
       RolePermission("rp-3", "r-1", "acme_db", "tpch1", "Clés", "RO")
     )
@@ -259,9 +264,9 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
   private def endpoint = s"quack:127.0.0.1:$doorPort"
   private def attach   = s"ATTACH '$endpoint' AS q (TYPE quack, TOKEN '$Token');"
 
-  /** The refusal the node pipeline gives alice for description `d` (QoD grants: RW on customer, RO
-    * on ids, nothing else in acme_db; objects of other catalogs, system and temp, need no grant
-    * here), or None.
+  /** The refusal the node pipeline gives alice for description `d` (QoD grants: RW on customer and
+    * orders, RO on ids, nothing else in acme_db; objects of other catalogs, system and temp, need
+    * no grant here), or None.
     */
   private def aliceRefusal(d: io.circe.Json): Option[String] =
     d.hcursor
@@ -279,7 +284,7 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
           case "insert" | "update" | "delete" => "Write"
           case _                              => "Ddl"
         val granted = catalog != "acme_db" ||
-          (schema == "tpch1" && (name == "customer" ||
+          (schema == "tpch1" && (name == "customer" || name == "orders" ||
             ((name == "ids" || name == "Clés") && verb == "Read")))
         Option.unless(granted)(s"user:alice lacks grants on acme_db.$schema.$name:$verb")
       }
@@ -464,17 +469,25 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
     assume(liveReady, "DuckDB 2.0 CLI or a qod-node build not available")
     val (rc, out, err) = cli(
       s"$attach CREATE TABLE local_x AS SELECT 100000 + range AS c_custkey, 'n' || range AS c_name FROM range(3); " +
-        "INSERT INTO q.tpch1.customer SELECT * FROM local_x; SELECT count(*) FROM q.tpch1.customer;"
+        "INSERT INTO q.tpch1.orders SELECT * FROM local_x; SELECT count(*) FROM q.tpch1.orders;"
     )
     withClue(err)(rc shouldBe 0)
-    out shouldBe "2003"
+    out shouldBe "13"
     // the 2.0 client ships the INSERT as a scan of the rows it then sends on the same connection
     router.history
       .snapshot(50)
       .exists(r =>
         r.status == "ok" && r.sql.contains("scan_data_from_quack_client") &&
-          r.sql.contains("customer")
+          r.sql.contains("orders")
       ) shouldBe true
+    // `customer` is writable by grant, but alice's mask on `c_name` covers it, and native CLS
+    // refuses every write to a covered table.
+    val (rc1, _, err1) = cli(
+      s"$attach CREATE TABLE local_y AS SELECT 200000 AS c_custkey, 'n' AS c_name; " +
+        "INSERT INTO q.tpch1.customer SELECT * FROM local_y;"
+    )
+    rc1 should not be 0
+    err1 should include("writes to a column-policy table are not supported in native CLS")
     // `ids` is visible (RO) but not writable: the INSERT reaches the manager and is denied there.
     // `secret` would fail earlier, on the client, since it was never synced (see the case above).
     val (rc2, _, err2) = cli(s"$attach INSERT INTO q.tpch1.ids SELECT 1;")
@@ -547,7 +560,7 @@ class QuackCompatibilitySpec extends AnyFlatSpec with Matchers with BeforeAndAft
          |""".stripMargin
     )
     withClue(err)(rc shouldBe 0)
-    out.split("\n").toList shouldBe List("2003", "60000")
+    out.split("\n").toList shouldBe List("2000", "60000")
 
   it should "refuse a DuckDB 1.5 client by its protocol version" in:
     assume(liveReady, "DuckDB 2.0 CLI or a qod-node build not available")

@@ -32,6 +32,20 @@ class OpaGuardsSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
 
   private val authorized = scala.collection.mutable.ListBuffer.empty[io.circe.Json]
 
+  /** The keys the stub adapter mints with, so the spec can read the policy bundles they name. */
+  private val keys = ai.starlake.quack.edge.authz.NodeKeys.ephemeral()
+
+  /** Every policy of the bundle `id`, read page by page as the node reads it from `PolicyRoute`. */
+  private def bundlePolicies(id: String, offset: Int = 0): List[io.circe.Json] =
+    keys.policyBundles.page(id, offset).toList.flatMap { page =>
+      val c    = page.hcursor
+      val here = c.get[List[io.circe.Json]]("policies").getOrElse(Nil)
+      c.get[Int]("next")
+        .toOption
+        .filter(_ >= 0)
+        .fold(here)(next => here ++ bundlePolicies(id, next))
+    }
+
   private def withBoot[A](body: FlightEdgeHarness.Harness => A): A =
     val fix = seed(s"http://localhost:${wm.port()}")
     val s   = fix.store
@@ -68,7 +82,8 @@ class OpaGuardsSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
         protectedWriteGuard =
           new ProtectedWriteGuard(catalog, clsEnabled = true, rlsEnabled = true),
         spawnNodes = true,
-        metadataFilterRewriter = new MetadataFilterRewriter(enabled = true)
+        metadataFilterRewriter = new MetadataFilterRewriter(enabled = true),
+        keys = keys
       )
     )
     try body(h)
@@ -88,9 +103,13 @@ class OpaGuardsSpec extends AnyFlatSpec with Matchers with BeforeAndAfterAll:
       val rows = query(h, bob, "SELECT id, email FROM orders")
       rows.map(_("id")) shouldBe List("1", "2")
       // This stub executes SQL without native hooks. Real masking is tested by the node suites.
+      // A handle carries its policies as the digest of a signed bundle the node pages through.
       val policies = authorized
         .synchronized(authorized.toList)
-        .flatMap(_.hcursor.get[List[io.circe.Json]]("columnPolicies").toOption.toList.flatten)
+        .flatMap(_.hcursor.get[String]("policyBundle").toOption.filter(_.nonEmpty))
+        .distinct
+        .flatMap(bundlePolicies(_))
+        .filter(_.hcursor.get[String]("kind").contains("column"))
       policies.exists(_.hcursor.get[String]("id").contains("cp-orders-email")) shouldBe true
       policies.exists(_.hcursor.get[String]("sql").contains("'***'")) shouldBe true
       wm.verify(0, statementCalls)
