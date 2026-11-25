@@ -108,6 +108,13 @@ Secrets: the provider's config is echoed back by the REST API, so it must hold s
 as `{{secret.NAME}}` placeholders, and the provider's `errors()` should reject literal
 credentials.
 
+Quoting: core refuses a plugin source whose rendered template has a `{{secret.NAME}}`
+placeholder outside a single-quoted literal. There is no plain-token fallback as for legacy
+`sql` sources; the source is skipped with a `PluginSecretUnquoted` error and the tenant-db's
+other sources still attach. Core quotes only the secret values it substitutes. A provider
+must itself quote and escape (double every `'`) every `pluginConfig` value it renders,
+because tenant admins control that config and the node's init SQL runs with full privileges.
+
 If a stored plugin source has no provider at boot (module absent), that source is skipped
 with a `SourceProviderMissing` error; other sources are unaffected.
 

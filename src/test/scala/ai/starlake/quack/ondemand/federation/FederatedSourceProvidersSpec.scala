@@ -13,9 +13,17 @@ object TestProvider extends FederatedSourceProvider:
     if !source.readOnly then List("test_connector sources are read-only") else Nil
   def normalizedConfig(raw: String): Either[String, String] =
     io.circe.parser.parse(raw).left.map(_.getMessage).map(_.noSpaces)
+  /** The one provider every spec installs (the registry is install-once per JVM). A config with
+    * `"unquotedToken": true` makes it render the token placeholder outside a literal, which is how
+    * specs reach core's refusal of such a template without a second registered provider.
+    */
   def renderTemplate(source: FederatedSource, reserved: Set[String]): Either[List[String], String] =
+    val unquoted = source.config.flatMap(io.circe.parser.parse(_).toOption)
+      .flatMap(_.hcursor.get[Boolean]("unquotedToken").toOption)
+      .getOrElse(false)
+    val token = if unquoted then "{{secret.TC_TOKEN}}" else "'{{secret.TC_TOKEN}}'"
     Right(
-      "CREATE OR REPLACE SECRET qod_tc_{{alias}} (TYPE test_connector, TOKEN '{{secret.TC_TOKEN}}');\n" +
+      s"CREATE OR REPLACE SECRET qod_tc_{{alias}} (TYPE test_connector, TOKEN $token);\n" +
         "ATTACH 'tc:" + source.id + "' AS {{alias}} (TYPE test_connector, SECRET qod_tc_{{alias}}, READ_ONLY);"
     )
 

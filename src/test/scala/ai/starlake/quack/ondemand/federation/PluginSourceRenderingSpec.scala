@@ -69,3 +69,27 @@ class PluginSourceRenderingSpec extends AnyFlatSpec with Matchers with OptionVal
     blob should include("-- BEGIN federation: good")
     blob should not include "-- BEGIN federation: orph"
   }
+
+  it should "refuse a plugin template that puts a secret outside a literal and keep its siblings" in {
+    val bad  = src(config = """{"endpoint":"x","unquotedToken":true}""")
+    val sql  = FederatedSource("src-sql", "td-1", "good", "ATTACH 'x' AS {{alias}};")
+    // A plain token value: a sql template would fall back and substitute it; a plugin one never does.
+    val secs = Map(bad.id -> List(FederatedSecret("sec-1", bad.id, "TC_TOKEN", Some("plain"), None)))
+    val b    = builder(List(bad, sql), secs)
+    val blob = b.build("td-1").unsafeRunSync().value
+    blob should include("-- BEGIN federation: good")
+    blob should not include "-- BEGIN federation: tc"
+    blob should not include "plain"
+    b.logSafePreview("td-1").unsafeRunSync().value should not include "-- BEGIN federation: tc"
+    val err = b.buildOne(bad).attempt.unsafeRunSync().left.toOption.value
+    err shouldBe a[PluginSecretUnquoted]
+    err.getMessage should include("'tc'")
+    err.getMessage should include("test_connector")
+    err.getMessage should not include "plain"
+  }
+
+  it should "still render the provider's quoted template" in {
+    val s    = src()
+    val secs = Map(s.id -> List(FederatedSecret("sec-1", s.id, "TC_TOKEN", Some("plain"), None)))
+    builder(List(s), secs).build("td-1").unsafeRunSync().value should include("TOKEN 'plain'")
+  }
