@@ -1248,9 +1248,20 @@ class BranchThreeWayE2ESpec
     as("carol", CarolPw, "masked", None)(s"SELECT note FROM $td.main.fact WHERE id = 5") shouldBe
       List("***")
     def on(branch: String) = as("carol", CarolPw, "masked", Some(branch))
+
+    /** A guess written into their own branch: native CLS refuses them every write to a table their
+      * column policy covers, so the guess is placed there by a superuser, and what they are shown
+      * of the proposal is judged as if they had written it.
+      */
+    def guessOn(branch: String, statement: String): Unit =
+      stack.flight(statement, "carol", CarolPw, Acme, "masked", branch = Some(branch)) match
+        case Left(err) =>
+          err should include("writes to a column-policy table are not supported in native CLS")
+        case Right(rows) => fail(s"carol wrote to the masked table on $branch: $rows")
+      sql("masked", statement, Some(branch))
     // On their own branches: an UPDATE of the masked cell, and a row keyed on the masked column.
     List("cell-right" -> "top-secret", "cell-wrong" -> "not-it").foreach { (branch, guess) =>
-      on(branch)(s"UPDATE $td.main.fact SET note = '$guess' WHERE id = 5")
+      guessOn(branch, s"UPDATE $td.main.fact SET note = '$guess' WHERE id = 5")
       on(branch)(s"UPDATE $td.main.beside SET qty = 1 WHERE id = 5")
     }
     // The change feed is no relation a mask applies to: no diff for them, no value by that way.
@@ -1263,7 +1274,7 @@ class BranchThreeWayE2ESpec
       }
     }
     List("key-right" -> "also-secret", "key-wrong" -> "not-it").foreach { (branch, guess) =>
-      on(branch)(s"INSERT INTO $td.main.fact VALUES (60000, '$guess', 1)")
+      guessOn(branch, s"INSERT INTO $td.main.fact VALUES (60000, '$guess', 1)")
       on(branch)(s"UPDATE $td.main.beside SET qty = 1 WHERE id = 5")
     }
 
