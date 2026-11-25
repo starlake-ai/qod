@@ -7,7 +7,8 @@ CLS runs exclusively on DuckDB 2.0.1's bound plan. It is enabled by default;
 guard. Gateway rewriting, `QOD_CLS_ENFORCEMENT`, and `QOD_CLS_UNRESOLVED_TABLE`
 are retired. Metadata filtering and historical-name checks remain.
 
-Node protocol **8** and signed handle version **6** are mandatory.
+Node protocol **10** and signed handle version **8** are mandatory, the same generation as
+[native row security](node-row-security.md).
 Rebuild and vendor every platform's node binary, deploy matching node images and
 fleet launchers, and restart the nodes. Earlier nodes and handles refuse.
 No policy-table or DuckLake metadata migration is needed.

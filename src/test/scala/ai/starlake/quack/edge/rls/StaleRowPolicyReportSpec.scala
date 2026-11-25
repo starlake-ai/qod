@@ -48,7 +48,8 @@ class StaleRowPolicyReportSpec extends AnyFlatSpec with Matchers:
     lines shouldBe List(
       "WARN: tenant 'acme' role 'eu_readers': row policy rp-1 on acme_lake.main.orders names a " +
         "column the table does not have: owner. Every statement reading the table under this " +
-        "role is denied (\"row policy failed to apply\"): update the policy, or delete it."
+        "role is denied (\"row policy could not be bound to its table\"): update the policy, or " +
+        "delete it."
     )
     lines.head should not include "'eu'"
   }

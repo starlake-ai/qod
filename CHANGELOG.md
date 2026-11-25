@@ -40,6 +40,10 @@
   such a mask keeps applying as stored and that an error evaluating it may quote the unmasked
   value. qod-node applies such a mask as a deny (every read of its column under the role is
   refused) and turns an evaluation error into NULL; the line now says so.
+- **The boot report of stale row policies quotes the refusal readers get.** It said every read of
+  the table under the role is denied with `row policy failed to apply`, the gateway's text before
+  row policies moved to qod-node; readers get `QoD: row policy could not be bound to its table`,
+  which the line now quotes.
 
 ## 0.15.0
 

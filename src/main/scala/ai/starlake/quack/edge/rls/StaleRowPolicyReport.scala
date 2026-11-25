@@ -9,11 +9,12 @@ import ai.starlake.sql.IdentifierFold
 import scala.util.Try
 
 /** The boot report of stored row policies that cannot apply: a predicate naming a column its table
-  * does not have (the column was dropped or renamed after the policy was written), or one the
-  * rewriter cannot place at all. Each denies every statement reading its table under its role ("row
-  * policy failed to apply"), so an administrator learns of it here rather than from users. One line
-  * per policy and database, on stderr (the logger's default level is ERROR), naming the tenant, the
-  * role, the policy, the table and the missing columns, never the predicate.
+  * does not have (the column was dropped or renamed after the policy was written), or one the node
+  * cannot bind to its table at all. Each denies every statement reading its table under its role
+  * ("row policy could not be bound to its table"), so an administrator learns of it here rather
+  * than from users. One line per policy and database, on stderr (the logger's default level is
+  * ERROR), naming the tenant, the role, the policy, the table and the missing columns, never the
+  * predicate.
   *
   * Only a policy naming its schema and table is checked, against the tenant's DuckLake databases
   * its catalog covers (a wildcard catalog covers every one of them, as at rewrite time; branches
@@ -56,7 +57,7 @@ object StaleRowPolicyReport:
                     s"${d.catalog}.${p.schemaName}.${p.tableName}"
                 val consequence =
                   " Every statement reading the table under this role is denied (\"row policy " +
-                    "failed to apply\"): update the policy, or delete it."
+                    "could not be bound to its table\"): update the policy, or delete it."
                 RowPredicateAnalysis.predicateColumns(
                   p.predicateSql,
                   d.catalog,
