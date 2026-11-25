@@ -118,7 +118,8 @@ characters), `extensionName`, `reservedSecretPrefixes`, `errors`, `normalizedCon
 check it. Its rendered SQL may contain `{{alias}}` and `{{secret.NAME}}`
 placeholders; core substitutes them, the provider never does. A source of a plugin type
 stores its config as raw JSON in the REST field `pluginConfig`; `config` stays for
-`iceberg_rest` sources only.
+`iceberg_rest` sources only. From the CLI: `qod federation create <tenant> <db> --alias <alias>
+--type <wire> --plugin-config '<json object>'`.
 
 Secrets: the provider's config is echoed back by the REST API, so it must hold secrets only
 as `{{secret.NAME}}` placeholders, and the provider's `errors()` should reject literal
