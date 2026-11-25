@@ -237,6 +237,15 @@ final class PoolSupervisor(
     * whoever each counts against, which `Main` wires (`LiveLocationRules.dataFolders`: data paths,
     * those it still remembers, managed prefixes within retention); Left when they cannot be read.
     */
+  /** Why a column mask a role of the tenant writes would make its column unreadable on qod-node
+    * (its result has another type than the column's), or None, which `Main` wires to
+    * `MaskTypeReport.refusalOf` over the tenant's DuckLake catalogs. None too when it cannot tell
+    * (no such table yet, a wildcard, a nested type, a catalog that cannot be read): the boot report
+    * catches those later.
+    */
+  @volatile var maskTypeRefusal: (String, state.RoleColumnPolicy) => Option[String] =
+    (_, _) => None
+
   @volatile var dataFolderDenySet: () => Either[String, List[String]] =
     () =>
       Try(dataPaths() ++ store.unpurgedManagedPrefixes().map(_.prefix)).toEither.left
@@ -4998,8 +5007,8 @@ final class PoolSupervisor(
           .left
           .map(SupervisorError.InvalidArgument.apply)
       }
-      definition.map { canonical =>
-        val persisted = store.insertColumnPolicy(
+      definition
+        .map(canonical =>
           state.RoleColumnPolicy(
             id = newId("cp"),
             roleId = roleId,
@@ -5011,9 +5020,12 @@ final class PoolSupervisor(
             transformSql = canonical
           )
         )
-        invalidateEffectiveCache()
-        persisted
-      }
+        .flatMap(policy => maskTypeError(policy).toLeft(policy))
+        .map { policy =>
+          val persisted = store.insertColumnPolicy(policy)
+          invalidateEffectiveCache()
+          persisted
+        }
     }
   }
 
@@ -5039,6 +5051,10 @@ final class PoolSupervisor(
               )
               .left
               .map(SupervisorError.InvalidArgument.apply)
+              .flatMap(canonical =>
+                maskTypeError(existing.copy(action = action, transformSql = canonical))
+                  .toLeft(canonical)
+              )
           }
         }
         .flatMap { canonical =>
@@ -5049,6 +5065,12 @@ final class PoolSupervisor(
         }
     }
   }
+
+  /** [[maskTypeRefusal]] for `policy`, as the write's error. */
+  private def maskTypeError(policy: state.RoleColumnPolicy): Option[SupervisorError] =
+    tenantForRole(policy.roleId)
+      .flatMap(tenant => maskTypeRefusal(tenant, policy))
+      .map(SupervisorError.InvalidArgument.apply)
 
   def deleteColumnPolicy(id: String): IO[Either[SupervisorError, Unit]] = IO.blocking {
     withCacheRecovery("deleteColumnPolicy") {

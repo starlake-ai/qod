@@ -843,6 +843,11 @@ object Main extends IOApp with LazyLogging:
     val locationRules = BootFactories.locationRules(mgrCfg, sup, store)
     denySet.set(locationRules.foldersAgainstUser)
     sup.dataFolderDenySet = () => locationRules.dataFolders()
+    // A column mask whose result has another type than its column's makes the column unreadable
+    // on qod-node: refused when it is written, where the tenant's catalogs show the column.
+    sup.maskTypeRefusal = (tenant, policy) =>
+      ai.starlake.quack.edge.cls.MaskTypeReport
+        .refusalOf(tenant, policy, store, sup, catalogReaders.get)
     // Fleet mode: the pool listing shows each node's server and its liveness.
     fleetBackend.foreach { fb =>
       sup.serverLivenessAll =
@@ -2421,6 +2426,12 @@ object Main extends IOApp with LazyLogging:
           ai.starlake.quack.edge.rls.StaleRowPolicyReport
             .report(store, sup, catalogReaders.get)
         ).handleError(e => logger.warn(s"stale row policy report: ${e.getClass.getSimpleName}"))
+          .start *>
+        // Column masks whose result does not have their column's type make the column unreadable
+        // on qod-node: reported per policy, in the background, like the row policies above.
+        IO.blocking(
+          ai.starlake.quack.edge.cls.MaskTypeReport.report(store, sup, catalogReaders.get)
+        ).handleError(e => logger.warn(s"mask type report: ${e.getClass.getSimpleName}"))
           .start *>
         // Managed object store reachability probe. Advisory only: an unreachable or
         // mis-credentialed bucket must never stop the manager from booting. It does

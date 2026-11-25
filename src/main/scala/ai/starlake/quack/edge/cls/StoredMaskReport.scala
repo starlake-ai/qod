@@ -4,10 +4,11 @@ import ai.starlake.quack.ondemand.state.{ControlPlaneStore, RbacRole, RoleColumn
 
 /** The boot report of stored column masks that a create or an update would now refuse
   * ([[TransformSqlValidator]]), most of all a mask using a form outside the allowlist
-  * ([[MaskForms]]), whose error on a row may quote the unmasked value. Such a mask keeps applying
-  * as stored; an administrator learns of it here. One line per policy, on stderr (the logger's
-  * default level is ERROR), naming the tenant, the role, the policy, the table and the column, and
-  * the kinds of the refused parts, never the mask's text.
+  * ([[MaskForms]]): one stored before the allowlist, or imported from a manifest. Such a mask is
+  * signed to qod-node as a deny (`NodeColumnPolicy.ofEffective`), so every read of its column under
+  * the role is refused until it is rewritten; an administrator learns of it here. One line per
+  * policy, on stderr (the logger's default level is ERROR), naming the tenant, the role, the
+  * policy, the table and the column, and the kinds of the refused parts, never the mask's text.
   */
 object StoredMaskReport:
 
@@ -26,14 +27,16 @@ object StoredMaskReport:
         yield
           val what =
             if parts.nonEmpty then
-              s"uses ${parts.mkString("; ")}, which is not an allowed mask form (an error " +
-                "evaluating it may quote the unmasked value)"
+              s"uses ${parts.mkString("; ")}, which is not an allowed mask form"
             else "no longer passes the checks a new mask meets"
           s"WARN: tenant ${quoted(r.tenantId)} role ${quoted(r.name)}: column policy ${p.id} on " +
             s"${p.catalogName}.${p.schemaName}.${p.tableName}.${p.columnName}: its mask $what. " +
-            "It keeps applying as stored; update it with the allowed forms (md5, sha1, sha256 " +
+            "It applies as a deny: every read of the column under this role is refused " +
+            "(\"access to a column is denied by a column policy\"). Rewrite it with the allowed " +
+            "forms (md5, sha1, sha256 " +
             "and length over CAST(<column> AS VARCHAR), numbers over TRY_CAST(<column> AS " +
-            "DOUBLE), constant subscripts)."
+            "DOUBLE), constant subscripts, and TRY_CAST(<a DOUBLE, text or constant form> AS " +
+            "<the column's type>) for a column that is not text)."
       }
       .sorted
 

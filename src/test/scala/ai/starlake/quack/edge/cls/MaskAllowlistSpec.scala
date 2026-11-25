@@ -12,7 +12,8 @@ import org.scalatest.matchers.should.Matchers
 /** A new mask may use only the allowed forms ([[MaskForms]]): those DuckDB 2.0.1 answers, over a
   * value of any type the column may have, without an error quoting the value. Anything else is
   * refused at create and at update, the refusal naming the part that is not allowed (never the
-  * mask) and the allowed forms. A stored mask keeps applying and is reported at boot.
+  * mask) and the allowed forms. A stored mask a create would refuse applies as a deny and is
+  * reported at boot.
   */
 class MaskAllowlistSpec extends AnyFlatSpec with Matchers:
   import TransformSqlValidator._
@@ -56,20 +57,28 @@ class MaskAllowlistSpec extends AnyFlatSpec with Matchers:
     "-c"                                            -> "a minus sign outside DOUBLE arithmetic",
     "CAST(c AS INTEGER)"                            -> "a cast other than",
     "c::INTEGER"                                    -> "a cast other than",
-    "TRY_CAST(c AS INTEGER)"                        -> "a cast other than",
     // TRY_CAST of a BIGNUM (or a VARIANT, LIST, STRUCT or MAP holding one) to an integer, HUGEINT
-    // or MAP type raises an INTERNAL error on DuckDB 2.0.0 and invalidates the database.
-    "TRY_CAST(c AS BIGINT)"                -> "a cast other than",
-    "TRY_CAST(c AS HUGEINT)"               -> "a cast other than",
-    "TRY_CAST(c AS UBIGINT)"               -> "a cast other than",
-    "TRY_CAST(c AS TINYINT)"               -> "a cast other than",
-    "TRY_CAST(c AS MAP(VARCHAR, INTEGER))" -> "a cast other than",
-    "TRY_CAST(c AS INTEGER[])"             -> "a cast other than",
-    "TRY_CAST(c AS STRUCT(k INTEGER))"     -> "a cast other than",
-    "TRY(TRY_CAST(c AS HUGEINT))"          -> "function 'try'",
-    // Other spellings of an integer target, and DOUBLE PRECISION, which the allowlist does not
-    // know: refused too, though DuckDB 2.0.0 answers them over a BIGNUM (NULL, or the value).
-    "TRY_CAST(TRY_CAST(c AS DOUBLE) AS BIGINT)"      -> "a cast other than",
+    // or MAP type raises an INTERNAL error on DuckDB 2.0.0 and invalidates the database: a
+    // TRY_CAST to a scalar type takes only an operand whose type the allowlist knows.
+    "TRY_CAST(c AS INTEGER)"                 -> "of a value whose type is not known",
+    "TRY_CAST(c AS BIGINT)"                  -> "of a value whose type is not known",
+    "TRY_CAST(c AS HUGEINT)"                 -> "of a value whose type is not known",
+    "TRY_CAST(c AS UBIGINT)"                 -> "of a value whose type is not known",
+    "TRY_CAST(c AS TINYINT)"                 -> "of a value whose type is not known",
+    "TRY_CAST(c AS DECIMAL(10, 2))"          -> "of a value whose type is not known",
+    "TRY_CAST(c AS DATE)"                    -> "of a value whose type is not known",
+    "TRY_CAST(c[1] AS INTEGER)"              -> "of a value whose type is not known",
+    "TRY_CAST(nullif(c, NULL) AS INTEGER)"   -> "of a value whose type is not known",
+    "TRY_CAST(coalesce(c, '0') AS INTEGER)"  -> "of a value whose type is not known",
+    "CAST(TRY_CAST(c AS DOUBLE) AS INTEGER)" -> "a cast other than",
+    "TRY_CAST(c AS mood)"                    -> "a cast other than",
+    "TRY_CAST(c AS INTEGER (3))"             -> "a cast other than",
+    "TRY_CAST(c AS MAP(VARCHAR, INTEGER))"   -> "a cast other than",
+    "TRY_CAST(c AS INTEGER[])"               -> "a cast other than",
+    "TRY_CAST(c AS STRUCT(k INTEGER))"       -> "a cast other than",
+    "TRY(TRY_CAST(c AS HUGEINT))"            -> "function 'try'",
+    // DOUBLE PRECISION, which the allowlist does not know: refused, though DuckDB 2.0.0 answers
+    // it over a BIGNUM.
     "TRY_CAST(c AS DOUBLE PRECISION)"                -> "a cast other than",
     "TRY(CAST(c AS BIGINT))"                         -> "function 'try'",
     "CAST(c AS DOUBLE)"                              -> "a cast other than",
@@ -315,6 +324,7 @@ class MaskAllowlistSpec extends AnyFlatSpec with Matchers:
       mine.head should include(s"*.main.${p.tableName}.c")
       mine.head should include(refused._2)
       mine.head should include("which is not an allowed mask form")
+      mine.head should include("It applies as a deny")
       mine.head should not include p.transformSql.get
     }
     lines.exists(_.contains("cp-safe")) shouldBe false
