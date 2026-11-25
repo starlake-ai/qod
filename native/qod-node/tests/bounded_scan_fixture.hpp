@@ -49,6 +49,10 @@ struct FixtureBindData : public FunctionData, public qod::ProtectedScan {
 	TableCatalogEntry &table;
 	idx_t k;
 	std::vector<std::string> uses;
+	//! `bounded := false` stands in for a connector with no remote candidate limit.
+	bool bounded = true;
+	//! `refusal := '<code>'` makes AcceptRowPolicies refuse with that code, as given.
+	std::string refusal;
 	//! Set by an exact lowering (Task 2): only rows whose owner equals one of these pass, before k.
 	bool lowered = false;
 	std::vector<std::string> owners;
@@ -56,6 +60,8 @@ struct FixtureBindData : public FunctionData, public qod::ProtectedScan {
 	unique_ptr<FunctionData> Copy() const override {
 		auto copy = make_uniq<FixtureBindData>(table, k);
 		copy->uses = uses;
+		copy->bounded = bounded;
+		copy->refusal = refusal;
 		copy->lowered = lowered;
 		copy->owners = owners;
 		copy->CopySealFrom(*this);
@@ -63,12 +69,13 @@ struct FixtureBindData : public FunctionData, public qod::ProtectedScan {
 	}
 	bool Equals(const FunctionData &other_p) const override {
 		auto &other = other_p.Cast<FixtureBindData>();
-		return &table == &other.table && k == other.k && uses == other.uses && lowered == other.lowered &&
-		       owners == other.owners && SealedDigest() == other.SealedDigest();
+		return &table == &other.table && k == other.k && uses == other.uses && bounded == other.bounded &&
+		       refusal == other.refusal && lowered == other.lowered && owners == other.owners &&
+		       SealedDigest() == other.SealedDigest();
 	}
 
 	bool IsBounded() const override {
-		return true;
+		return bounded;
 	}
 
 	std::vector<qod::FieldUse> FieldUses() const override {
@@ -85,6 +92,9 @@ struct FixtureBindData : public FunctionData, public qod::ProtectedScan {
 	                                      const std::vector<unique_ptr<Expression>> &predicates) override {
 		owners.clear();
 		lowered = false;
+		if (!refusal.empty()) {
+			return {false, refusal};
+		}
 		if (predicates.empty()) {
 			return {true, ""};
 		}
@@ -179,6 +189,10 @@ inline unique_ptr<FunctionData> FixtureBind(ClientContext &context, TableFunctio
 			for (auto &value : ListValue::GetChildren(entry.second)) {
 				data->uses.push_back(value.ToString());
 			}
+		} else if (entry.first.GetIdentifierName() == "bounded") {
+			data->bounded = entry.second.GetValue<bool>();
+		} else if (entry.first.GetIdentifierName() == "refusal") {
+			data->refusal = entry.second.ToString();
 		}
 	}
 	return std::move(data);
@@ -264,14 +278,17 @@ inline void FixtureScan(ClientContext &, TableFunctionInput &input, DataChunk &o
 	output.SetCardinality(out);
 }
 
-inline TableFunction FixtureFunction(const char *name, table_function_bind_t bind, bool with_uses = false) {
+inline TableFunction FixtureFunction(const char *name, table_function_bind_t bind, bool with_knobs = false) {
 	// DuckDB 2.0.1: named parameters are declared on a FunctionSignature (no named_parameters member).
 	FunctionSignature signature;
 	signature.AddParameter(LogicalType::VARCHAR);
 	signature.AddParameter(LogicalType::INTEGER);
-	if (with_uses) {
+	if (with_knobs) {
+		// Each keyword-only parameter needs a default, or a call that omits it fails to bind.
 		signature.AddKeywordOnly(Identifier("uses"), LogicalType::LIST(LogicalType::VARCHAR),
 		                         Value::LIST(LogicalType::VARCHAR, vector<Value>()));
+		signature.AddKeywordOnly(Identifier("bounded"), LogicalType::BOOLEAN, Value::BOOLEAN(true));
+		signature.AddKeywordOnly(Identifier("refusal"), LogicalType::VARCHAR, Value(""));
 	}
 	TableFunction function(Identifier(name), std::move(signature), FixtureScan, bind, FixtureInit);
 	function.get_table_entry = FixtureTableEntry;

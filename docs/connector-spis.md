@@ -128,6 +128,7 @@ text.
 
 - `QoD: <refusal_code>: a row policy cannot be enforced before the connector's candidate limit`
 - `QoD: a bounded connector scan without a policy obligation is not supported`
+- `QoD: a connector scan without a table entry is not supported`
 - `QoD: connector scan ran without a sealed policy obligation`
 - `QoD: connector scan policy obligation could not be verified`
 - `QoD: field_denied: a connector scan uses a column that has a column policy`

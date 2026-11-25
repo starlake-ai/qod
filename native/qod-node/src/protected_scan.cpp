@@ -13,6 +13,7 @@ using namespace duckdb;
 
 namespace {
 constexpr const char *kUnprotected = "QoD: a bounded connector scan without a policy obligation is not supported";
+constexpr const char *kNoTableEntry = "QoD: a connector scan without a table entry is not supported";
 constexpr const char *kUnsealed = "QoD: connector scan ran without a sealed policy obligation";
 constexpr const char *kMismatch = "QoD: connector scan policy obligation could not be verified";
 constexpr const char *kFieldDenied = "QoD: field_denied: a connector scan uses a column that has a column policy";
@@ -54,7 +55,7 @@ void Handle(ClientContext &context, LogicalGet &get, const std::vector<RowPolicy
 	}
 	auto table = get.GetTable();
 	if (!table) {
-		throw PermissionException(kUnprotected);
+		throw PermissionException(scan->IsBounded() ? kUnprotected : kNoTableEntry);
 	}
 	auto catalog = table->ParentCatalog().GetName().GetIdentifierName();
 	auto schema = table->ParentSchema().name.GetIdentifierName();

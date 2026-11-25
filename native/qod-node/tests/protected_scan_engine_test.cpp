@@ -40,10 +40,13 @@ void Expect(const std::string &what, const std::string &got, const std::string &
 	}
 }
 
-void Refused(const std::string &what, const std::string &got, const std::string &needle) {
+void Refused(const std::string &what, const std::string &got, const std::string &needle,
+             const std::string &absent = "") {
 	++checks;
-	if (got.rfind("ERROR: ", 0) != 0 || got.find(needle) == std::string::npos) {
-		std::cerr << "FAIL " << what << ": expected refusal " << needle << ", got " << got << std::endl;
+	if (got.rfind("ERROR: ", 0) != 0 || got.find(needle) == std::string::npos ||
+	    (!absent.empty() && got.find(absent) != std::string::npos)) {
+		std::cerr << "FAIL " << what << ": expected refusal " << needle << (absent.empty() ? "" : " without " + absent)
+		          << ", got " << got << std::endl;
 		++failures;
 	}
 }
@@ -114,8 +117,13 @@ int main() {
 	install();
 	Refused("inexact lowering refuses before any fetch",
 	        Run(user, "SELECT id FROM qod_test_bounded_scan('memory.main.docs', 1)"), "policy_unsupported");
+	Expect("unbounded scan keeps the local row filter for an inexact lowering",
+	       Run(user, "SELECT id FROM qod_test_bounded_scan('memory.main.docs', 3, bounded := false) ORDER BY id"), "2");
+	Refused("a connector refusal code outside [a-z_]+ is reported as policy_unsupported",
+	        Run(user, "SELECT id FROM qod_test_bounded_scan('memory.main.docs', 3, refusal := 'Bad Code!')"),
+	        "QoD: policy_unsupported:", "Bad Code");
 	Refused("bounded function without the obligation",
-	        Run(user, "SELECT id FROM qod_test_unprotected_bounded('memory.main.docs', 1)"), "policy obligation");
+	        Run(user, "SELECT id FROM qod_test_unprotected_bounded('memory.main.docs', 1)"), "is not supported");
 	handle.row_policies = {{"p1", "memory", "main", "docs", "owner = 'alice'"}};
 	++handle.policy_version;
 	install();
