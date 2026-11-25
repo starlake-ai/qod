@@ -27,6 +27,15 @@
   does not have its column's type is now refused (`400`, naming the column, both types and the
   `TRY_CAST` form) where the tenant's DuckLake catalogs show the column; a manifest import is not
   checked, so a backup always restores, and the boot report lists what it stores.
+- **A replica that cannot serve a session's policy snapshot no longer takes healthy nodes out of
+  routing.** A node refuses the session handle's prelude with `QoD: policy snapshot unavailable;
+  retry` when it cannot fetch the principal's column and row policies from the replica that minted
+  the handle (the snapshot evicted from the replica's cache, or the replica slow or unreachable).
+  The statement is retried on another node, as before, but each node it reached was marked
+  unhealthy (`handle_refused` in the pool's `statusDetail`) until the next health probe, so one
+  outage on the replica's side could leave a pool with no routable node. The node's health is now
+  left as it is, and the refusal's retry marker, `(qod-retry ...)`, is left out of the text a client,
+  the log and the history read. Every other refused session handle still marks its node.
 - **The boot report of stored masks outside the allowed forms says what happens to them.** It said
   such a mask keeps applying as stored and that an error evaluating it may quote the unmasked
   value. qod-node applies such a mask as a deny (every read of its column under the role is

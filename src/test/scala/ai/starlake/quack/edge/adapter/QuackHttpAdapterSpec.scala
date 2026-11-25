@@ -158,6 +158,52 @@ class QuackHttpAdapterSpec extends AnyFlatSpec with Matchers:
     ) shouldBe Some("handle_refused")
     causeAfter(QuackError.Transient("HTTP 503 from Quack node")) shouldBe Some("statement_failed")
 
+  it should "leave a node healthy when its replica could not serve the policy snapshot" in:
+    // qod-node refuses the prelude when it cannot fetch the session's policies from the replica
+    // that minted the handle (evicted, the replica slow or unreachable): the node is fine, and
+    // marking it would take every node a retry reaches out of routing until the next probe.
+    val marker  = s" (qod-retry ${"a" * 32}.${"b" * 64})"
+    val refusal = "Permission Error: QoD: policy snapshot unavailable; retry" + marker
+    val refused = QuackHttpClient.HandleRefused(refusal)
+    refused.getMessage should not include "qod-retry"
+    refused.getMessage should include("policy snapshot unavailable; retry")
+    val client = new FakeClient(
+      Map(
+        "quack:127.0.0.1:0" ->
+          (() => QuackResponse.Failed(QuackError.Transient(refused.getMessage, notSent = true), 1))
+      )
+    )
+    val tracker = new NodeLoadTracker
+    val adapter =
+      new QuackHttpAdapter(client, tracker, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
+    adapter.send(node("ns"), "SELECT 1", NodePrincipal.System, None).unsafeRunSync() match
+      case QuackResponse.Failed(QuackError.Transient(_, true), _) => ()
+      case other => fail(s"expected a transient failure, nothing sent: $other")
+    tracker.snapshot("ns").healthy shouldBe true
+    tracker.snapshot("ns").unhealthy shouldBe None
+    // Any other refused handle still marks the node: its key, clock or protocol is wrong.
+    val other = new FakeClient(
+      Map(
+        "quack:127.0.0.1:0" ->
+          (() =>
+            QuackResponse.Failed(
+              QuackError.Transient(
+                QuackHttpClient
+                  .HandleRefused("qod-node: session handle refused: handle MAC does not verify")
+                  .getMessage,
+                notSent = true
+              ),
+              1
+            )
+          )
+      )
+    )
+    val tracked = new NodeLoadTracker
+    new QuackHttpAdapter(other, tracked, ai.starlake.quack.edge.authz.NodeKeys.ephemeral())
+      .send(node("nk"), "SELECT 1", NodePrincipal.System, None)
+      .unsafeRunSync()
+    tracked.snapshot("nk").healthy shouldBe false
+
   it should "NOT mark unhealthy on permanent failure" in:
     val client = new FakeClient(
       Map(

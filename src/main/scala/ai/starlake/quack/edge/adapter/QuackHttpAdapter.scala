@@ -169,11 +169,23 @@ final class QuackHttpAdapter(
         case (true, _) => IO.delay(tracker.onAbort(node.nodeId))
       }
 
+  /** Whether a transient failure is the node's refusal of a prelude for want of the session's
+    * policy snapshot ([[NodeHandles.PolicySnapshotUnavailable]]), a replica-side outage.
+    */
+  private def replicaOutage(message: String, notSent: Boolean): Boolean =
+    QuackError.Transient(message, notSent) match
+      case QuackHttpClient.HandleRefused(nodeText) =>
+        NodeHandles.policySnapshotUnavailable(nodeText)
+      case _ => false
+
   private def bookkeep(node: RunningNode, out: NodeOutcome[?]): Unit =
     tracker.onFinish(node.nodeId, out.latency)
     out match
-      case NodeOutcome.Ok(_, _, _)              => tracker.setHealthy(node.nodeId, true)
-      case NodeOutcome.Transient(m, _, notSent) =>
+      case NodeOutcome.Ok(_, _, _) => tracker.setHealthy(node.nodeId, true)
+      // The replica could not serve the session's policy snapshot: nothing is wrong with the node,
+      // and marking it would take every node a retry reaches out of routing until the next probe.
+      case NodeOutcome.Transient(m, _, notSent) if replicaOutage(m, notSent) => ()
+      case NodeOutcome.Transient(m, _, notSent)                              =>
         tracker.setUnhealthy(
           node.nodeId,
           ProbeVerdict.sendCause(node, m, notSent),
