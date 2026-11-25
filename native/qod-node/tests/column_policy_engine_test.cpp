@@ -251,6 +251,24 @@ int main() {
 	handle.column_policies = {number_null};
 	install();
 	Expect("typed numeric NULL", Run(user, "SELECT id FROM docs"), "NULL,NULL");
+	// A mask over a column that is not text applies once cast back to the column's own type, and is
+	// refused while its result has another one (DOUBLE here).
+	auto numeric_mask = number_null;
+	numeric_mask.sql = "TRY_CAST(TRY_CAST(id AS DOUBLE) * 10 AS INTEGER)";
+	handle.column_policies = {numeric_mask};
+	install();
+	Expect("numeric mask cast back to the column type", Run(user, "SELECT id FROM docs ORDER BY id"),
+	       "10,20");
+	auto constant_mask = number_null;
+	constant_mask.sql = "0";
+	handle.column_policies = {constant_mask};
+	install();
+	Expect("integer constant mask on an INTEGER column", Run(user, "SELECT id FROM docs"), "0,0");
+	auto double_mask = number_null;
+	double_mask.sql = "TRY_CAST(id AS DOUBLE) * 10";
+	handle.column_policies = {double_mask};
+	install();
+	Refused("numeric mask of another type", Run(user, "SELECT id FROM docs"), "original column type");
 	auto missing = mask;
 	missing.sql = "owner";
 	handle.column_policies = {missing};

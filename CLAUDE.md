@@ -1088,8 +1088,19 @@ constants), `upper`, `lower`, `trim`, `ltrim`, `rtrim`, `left`, `right`, `substr
 included: owner ruling, text or a binder error on every type), `md5`, `sha1`, `sha256` and `length`
 over text only,
 `coalesce` / `CASE WHEN .. IS [NOT] NULL` with string constants beside text forms or one other form,
-`nullif` with a string constant, and DOUBLE arithmetic over `TRY_CAST(.. AS DOUBLE)`, `length` or
-`hash` (`/` by a nonzero constant, `%` by a positive integer, `round`, `floor`, `ceil`, `+ - *`).
+`nullif` with a string constant, DOUBLE arithmetic over `TRY_CAST(.. AS DOUBLE)`, `length` or
+`hash` (`/` by a nonzero constant, `%` by a positive integer, `round`, `floor`, `ceil`, `+ - *`),
+and `TRY_CAST(<x> AS <scalar type>)` (`MaskForms.TypedTargets`: the integers, `FLOAT`,
+`DECIMAL(p, s)`, `BOOLEAN`, the dates and times, `INTERVAL`, `UUID`, `BLOB`) whose `<x>` is a form of
+known type (a DOUBLE result, text, `length` / `hash`, a constant), never the bare column or a form of
+unknown type, as a TRY_CAST of a `BIGNUM` to an integer type raised an internal error that
+invalidates the database. qod-node applies a mask only when its result has exactly its column's
+type (a bare `NULL` is cast), refusing every read of the column otherwise, so that cast is how a
+mask over a column that is neither text nor DOUBLE is written; boot prints one stderr `WARN:` line
+per stored mask whose type differs from its column's (`MaskTypeReport`: the column's DuckLake type
+read from the catalog, mapped to DuckDB's, the mask bound as `TRY(<mask>)` over a NULL of it in a
+private in-memory DuckDB with external access off; only masks the validator admits, policies naming
+schema, table and column, scalar types).
 Function names must be plain (no quotes, no qualifier, nothing but `name(args)`). Anything else is
 refused naming the part (a fixed phrase or the function name), never the mask; the stored text and
 the rewriter's reading of it (`ResidualColumns.parseStoredExpression`) are both checked. `md5`,
@@ -1103,7 +1114,8 @@ at rewrite time or the statement is refused (a row predicate `Failed`, since one
 hold a parenthesis that joins the next policy's predicate; a mask `Denied`, since an imported one is
 stored unchecked and would apply as the part the parser read, the bare column included). Stored
 masks that read whole are not judged; boot prints one stderr `WARN:` line per stored mask a create
-would refuse (`StoredMaskReport`), naming the refused parts, never its text.
+would refuse (`StoredMaskReport`), naming the refused parts, never its text; such a mask is signed
+to the node as a deny (`NodeColumnPolicy.ofEffective`), so its column is unreadable until it is rewritten.
 
 ### OPA authorization (per tenant)
 

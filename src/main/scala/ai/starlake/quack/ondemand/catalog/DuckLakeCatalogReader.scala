@@ -848,6 +848,15 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource)
   def topLevelColumnsOfTableAt(tableId: Long, snapshotId: Long): List[CatalogColumnEntry] =
     columnsAtByTableId(tableId, snapshotId, topLevelOnly = true)
 
+  /** The current columns of `schema.table`, its own only (no field nested in a STRUCT, LIST or MAP,
+    * whose names can repeat a column's), each with the type DuckLake stores (`int32`,
+    * `decimal(10,2)`, ...). Empty when the table does not exist or the catalog has no snapshot.
+    */
+  def topLevelColumns(schema: String, table: String): List[CatalogColumnEntry] =
+    maxSnapshotId()
+      .flatMap(n => tableIdAt(schema, table, n).map(id => topLevelColumnsOfTableAt(id, n)))
+      .getOrElse(Nil)
+
   /** Names of the schemas dropped after `fork` (a schema row end-dated past it). A schema dropped
     * and created again under the same name is listed too: its tables went with the first one.
     */

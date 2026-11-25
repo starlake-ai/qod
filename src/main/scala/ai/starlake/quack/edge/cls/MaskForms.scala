@@ -65,7 +65,15 @@ import scala.jdk.CollectionConverters._
   *   - numbers: `TRY_CAST(<x> AS DOUBLE)`, `/` by a constant other than 0, `%` by a positive
   *     integer constant, `round` (with an integer constant), `floor` and `ceil` of a DOUBLE, and
   *     `+`, `-`, `*` and a minus sign over DOUBLE results and numeric constants, the operands of
-  *     `/` and `%` being DOUBLE results or `length` / `hash`.
+  *     `/` and `%` being DOUBLE results or `length` / `hash`;
+  *   - `TRY_CAST(<x> AS <type>)` to one of [[TypedTargets]] (the integers, `FLOAT`, `DECIMAL`,
+  *     `BOOLEAN`, the dates and times, `INTERVAL`, `UUID`, `BLOB`), `<x>` being a form whose type
+  *     is known here: a DOUBLE result, text, `length` / `hash` or a constant. qod-node applies a
+  *     mask only when its result has exactly its column's type, so this is how a mask over a column
+  *     that is not text or DOUBLE is written (`TRY_CAST(round(TRY_CAST(c AS DOUBLE) / 1000) * 1000
+  *     AS INTEGER)`). Never over the bare column or a form of unknown type: TRY_CAST of a `BIGNUM`
+  *     (or a `VARIANT`, list, struct or map holding one) to an integer type raised an internal
+  *     error on DuckDB 2.0.0, which invalidates the database.
   *
   * Function names are written plain (no quotes, no catalog or schema), so no macro can stand in for
   * the built-in.
@@ -95,6 +103,9 @@ private[quack] object MaskForms:
     /** A DOUBLE (or FLOAT), or a binder error. */
     case Dbl
 
+    /** The type a `TRY_CAST` to one of [[TypedTargets]] names. */
+    case Typed
+
     /** A value of a type not known here: the column's own, at least. */
     case Unknown
 
@@ -103,6 +114,10 @@ private[quack] object MaskForms:
   private def isConstant(k: Kind): Boolean = k == Str || k == Null || k == Num || k == Bool
   private def textLike(k: Kind): Boolean   = k == Text || k == Str || k == Null
   private def numeric(k: Kind): Boolean    = k == Dbl || k == Int
+
+  /** A kind whose DuckDB type the allowlist knows, so a TRY_CAST of it cannot meet a `BIGNUM`. */
+  private def knownType(k: Kind): Boolean =
+    k == Dbl || k == Int || k == Text || k == Str || k == Num || k == Null
 
   /** The parts of `expr` that are not allowed mask forms, each named once, in the order met: a
     * fixed phrase, or a function name the writer wrote, never the mask's text. Empty when every
@@ -123,7 +138,9 @@ private[quack] object MaskForms:
       "arguments, md5 / sha1 / sha256 / length over text (CAST(<column> AS VARCHAR) first), " +
       "coalesce, nullif with a text constant, CASE WHEN " +
       "<x> IS [NOT] NULL THEN ... END, and DOUBLE arithmetic: TRY_CAST(<column> AS DOUBLE), / by " +
-      "a nonzero constant, % by a positive integer, round / floor / ceil, + - *"
+      "a nonzero constant, % by a positive integer, round / floor / ceil, + - *, and TRY_CAST of a " +
+      "DOUBLE, text or constant form to the column's own type (an integer, FLOAT, DECIMAL, " +
+      "BOOLEAN, DATE, TIME, TIMESTAMP, INTERVAL, UUID or BLOB)"
 
   @scala.annotation.tailrec
   private def unwrap(e: Expression): Expression =
@@ -174,11 +191,21 @@ private[quack] object MaskForms:
   private val TextTarget   = "(?i)(varchar|text|string)( \\(\\d+\\))?".r
   private val DoubleTarget = "(?i)double".r
 
+  /** The other types a `TRY_CAST` may name: the scalar types a column can have, DuckDB's own
+    * spellings, `DECIMAL` / `NUMERIC` with an integer precision and scale.
+    */
+  private val TypedTargets =
+    ("(?i)(boolean|bool|tinyint|smallint|integer|int|bigint|hugeint|utinyint|usmallint|" +
+      "uinteger|ubigint|uhugeint|float|real|date|time|timetz|timestamp|timestamp_s|" +
+      "timestamp_ms|timestamp_ns|timestamptz|interval|uuid|blob|" +
+      "(decimal|numeric)( \\(\\d+(, ?\\d+)?\\))?)").r
+
   /** The cast's keyword (`CAST`, `TRY_CAST`, or None for `::`) and target type text. */
   private def castShape(c: CastExpression): Option[(Option[String], String)] =
     val t      = c.getColDataType
     val noDims = t != null && Option(t.getArrayData).forall(_.isEmpty) &&
-      Option(t.getArgumentsStringList).forall(_.isEmpty) && c.getFormat == null &&
+      Option(t.getArgumentsStringList).forall(_.asScala.forall(_.trim.matches("\\d+"))) &&
+      c.getFormat == null &&
       Option(c.getColumnDefinitions).forall(_.isEmpty)
     val kw = Option(c.keyword).map(_.toUpperCase(Locale.ROOT))
     if !noDims then None
@@ -254,9 +281,16 @@ private[quack] object MaskForms:
           case Some((Some("TRY_CAST"), DoubleTarget())) =>
             kindOf(c.getLeftExpression, found)
             Dbl
+          case Some((Some("TRY_CAST"), TypedTargets(_*))) =>
+            if !knownType(kindOf(c.getLeftExpression, found)) then
+              found += "TRY_CAST to a type other than VARCHAR or DOUBLE of a value whose type is " +
+                "not known (cast a DOUBLE, text or constant form: TRY_CAST(round(TRY_CAST(<column> " +
+                "AS DOUBLE)) AS INTEGER))"
+            Typed
           case _ =>
             refuse(
-              "a cast other than CAST or :: to VARCHAR, or TRY_CAST to VARCHAR or DOUBLE"
+              "a cast other than CAST or :: to VARCHAR, or TRY_CAST to VARCHAR, DOUBLE or one of " +
+                "the scalar types"
             )
       case t: TrimFunction =>
         if t.getTrimSpecification != null || t.isUsingFromKeyword then

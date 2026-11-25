@@ -138,6 +138,11 @@ class MaskFormsEvidenceSpec extends AnyFlatSpec with Matchers:
         error    <- leak(conn, mask, col)
       yield s"$mask over $col: ${error.take(160)}"
       leaks shouldBe Nil
+      // An internal error invalidates the database, and every later statement then fails with a
+      // text holding none of the markers: the database must still answer.
+      Using.resource(conn.createStatement())(st =>
+        Using.resource(st.executeQuery("SELECT count(*) FROM t"))(rs => rs.next() shouldBe true)
+      )
     }
 
   "a refused form" should "leak on at least one type (the check sees a leak)" in

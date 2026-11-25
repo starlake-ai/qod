@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+### Upgrading
+
+- **Check the boot output for column masks that do not return their column's type.** qod-node
+  applies a mask only when its result has exactly its column's type, and refuses every read of
+  the column otherwise (`QoD: column mask cannot be applied safely with its original column
+  type`). At each boot the manager now prints one `WARN:` line on stderr per such mask and DuckLake
+  database, naming the tenant, the role, the policy id, the column, the mask's type and the
+  column's, never the mask. Rewrite each with the `TRY_CAST` form below, or use `NULL` or a deny.
+
+### Fixed
+
+- **A column mask can be written for a column that is neither text nor DOUBLE.** The allowed mask
+  forms produced only text or DOUBLE results, and refused every cast to another type, while
+  qod-node refuses a mask whose result does not have its column's type: on an `INTEGER`, `DATE` or
+  `DECIMAL` column, for instance, every mask but `NULL`, a constant of that type or a deny made the
+  column unreadable to the principals it covered. A mask may now end in `TRY_CAST(<x> AS <type>)`
+  to an integer type, `FLOAT`, `DECIMAL(p, s)`, `BOOLEAN`, `DATE`, `TIME`, `TIMESTAMP` (and its
+  variants), `INTERVAL`, `UUID` or `BLOB`, `<x>` being a DOUBLE result, a text form, `length` /
+  `hash` or a constant: `TRY_CAST(round(TRY_CAST(salary AS DOUBLE) / 1000) * 1000 AS INTEGER)`,
+  `TRY_CAST(left(CAST(born AS VARCHAR), 4) || '-01-01' AS DATE)`. A `TRY_CAST` of the bare column
+  or of a form of unknown type to such a type stays refused, as one over a `BIGNUM` value raised
+  an internal error that invalidates the database. A create or an update of a mask whose result
+  does not have its column's type is now refused (`400`, naming the column, both types and the
+  `TRY_CAST` form) where the tenant's DuckLake catalogs show the column; a manifest import is not
+  checked, so a backup always restores, and the boot report lists what it stores.
+- **The boot report of stored masks outside the allowed forms says what happens to them.** It said
+  such a mask keeps applying as stored and that an error evaluating it may quote the unmasked
+  value. qod-node applies such a mask as a deny (every read of its column under the role is
+  refused) and turns an evaluation error into NULL; the line now says so.
+
 ## 0.15.0
 
 ### Upgrading
