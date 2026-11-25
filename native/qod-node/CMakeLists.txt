@@ -211,13 +211,6 @@ endif()
 add_library(qod_node_core STATIC ${QOD_NODE_CORE_SOURCES})
 target_include_directories(qod_node_core PUBLIC src ${CMAKE_BINARY_DIR}/generated)
 target_link_libraries(qod_node_core PUBLIC qod_node_duckdb)
-if(QOD_EXTRA_LIBS)
-  # The generated loader (in qod_node_core) references each describe symbol, and the extension
-  # libraries reference qod_node_core (RegisterBoundedFunction, RegisterLinkedFunctionClass): a
-  # static-library cycle, so let the linker rescan the group.
-  target_link_libraries(qod_node_core PUBLIC ${QOD_EXTRA_LIBS})
-  set_property(TARGET qod_node_core PROPERTY LINK_INTERFACE_MULTIPLICITY 3)
-endif()
 if(WIN32)
   # CommandLineToArgvW (utf8_args.cpp); Winsock (socket_compat.cpp).
   target_link_libraries(qod_node_core PUBLIC shell32 ws2_32)
@@ -225,11 +218,29 @@ endif()
 target_compile_definitions(qod_node_core PRIVATE
   QOD_NODE_PROTOCOL=${QOD_NODE_PROTOCOL}
   "QOD_NODE_DUCKDB_VERSION=\"${duckdb_version}\""
-  "QOD_NODE_DUCKDB_SOURCE_ID=\"${duckdb_source}\""
-  "QOD_NODE_EXTRA_EXTENSIONS=\"${QOD_EXTRA_NAMES}\"")
+  "QOD_NODE_DUCKDB_SOURCE_ID=\"${duckdb_source}\"")
+if(QOD_EXTRA_NAMES)
+  # Only a linked build defines it: the open build compiles exactly as before (build_info.cpp
+  # falls back to "").
+  target_compile_definitions(qod_node_core PRIVATE "QOD_NODE_EXTRA_EXTENSIONS=\"${QOD_EXTRA_NAMES}\"")
+endif()
 
 add_executable(qod-node src/main.cpp)
-target_link_libraries(qod-node PRIVATE qod_node_core)
+if(QOD_EXTRA_LIBS AND NOT APPLE AND NOT WIN32)
+  # A symbol cycle between static archives: the generated loader in qod_node_core references each
+  # extension's describe symbol, and an extension references qod_node_core (RegisterBoundedFunction,
+  # RegisterLinkedFunctionClass, ...). A single-pass linker (GNU ld) resolves it only when core and
+  # the extensions are rescanned together, so both go in one linker group, on qod-node only (only
+  # main.cpp calls the loader). ld64 and link.exe rescan archives on their own.
+  if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.24)
+    list(JOIN QOD_EXTRA_LIBS "," qod_extra_group)
+    target_link_libraries(qod-node PRIVATE "$<LINK_GROUP:RESCAN,qod_node_core,${qod_extra_group}>")
+  else()
+    target_link_libraries(qod-node PRIVATE -Wl,--start-group qod_node_core ${QOD_EXTRA_LIBS} -Wl,--end-group)
+  endif()
+else()
+  target_link_libraries(qod-node PRIVATE qod_node_core ${QOD_EXTRA_LIBS})
+endif()
 if(NOT QOD_NODE_DUCKDB_STATIC)
   # libduckdb is found in ../lib next to the binary: the manager installs a bundled qod-node as
   # <dir>/bin/qod-node with <dir>/lib linking to the libduckdb it loaded (QodNodeBinary.scala).
@@ -353,8 +364,12 @@ if(QOD_NODE_TESTS)
   endif()
   find_program(BASH bash)
   if(BASH AND NOT WIN32)
-    add_test(NAME extra_extension COMMAND ${BASH} ${CMAKE_CURRENT_SOURCE_DIR}/tests/extra_extension_test.sh
-      ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_BINARY_DIR}/extra-extension-test $<TARGET_FILE:qod-node> ${DUCKDB_HOME})
+    # The test configures two more builds against the same shared DuckDB release.
+    if(NOT QOD_NODE_DUCKDB_STATIC AND DUCKDB_HOME)
+      add_test(NAME extra_extension COMMAND ${BASH} ${CMAKE_CURRENT_SOURCE_DIR}/tests/extra_extension_test.sh
+        ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_BINARY_DIR}/extra-extension-test $<TARGET_FILE:qod-node> ${DUCKDB_HOME}
+        ${CMAKE_COMMAND})
+    endif()
     add_test(NAME process COMMAND ${BASH} ${CMAKE_CURRENT_SOURCE_DIR}/tests/process_test.sh
       $<TARGET_FILE:qod-node> $<TARGET_FILE:handle_tool>)
   endif()
