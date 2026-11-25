@@ -201,6 +201,7 @@ def _read_password(stdin: bool, prompt: bool) -> str | None:
         "config": "--config",
         "readOnly": "--read-only",
         "connection": "--connection",
+        "pluginConfig": "--plugin-config",
     },
 )
 def create(
@@ -217,7 +218,9 @@ def create(
     description: str = typer.Option(None, "--description"),
     disabled: bool = typer.Option(False, "--disabled"),
     source_type: str = typer.Option(
-        "sql", "--type", help="sql | iceberg-rest | postgres | mysql",
+        "sql", "--type",
+        help="sql | iceberg-rest | postgres | mysql, or a source type a manager module provides "
+        "(with --plugin-config).",
     ),
     config: str = typer.Option(None, "--config", help="Whole typed config as JSON."),
     read_only: bool = typer.Option(
@@ -293,6 +296,11 @@ def create(
         help="postgres: disable | allow | prefer | require | verify-ca | verify-full; "
         "mysql: disabled | preferred | required | verify_ca | verify_identity.",
     ),
+    plugin_config: str = typer.Option(
+        None, "--plugin-config",
+        help="A module-provided --type: its config as a JSON object. Credentials in it are "
+        "{{secret.NAME}} placeholders, never values.",
+    ),
 ):
     """Create a federated source, or change it: every field left out is reset.
 
@@ -300,9 +308,26 @@ def create(
     writable; anyone else deletes the source and creates it again with its secrets.
     """
     wire = _TYPE_WIRE.get(source_type)
-    if wire is None:
+    plugin = wire is None
+    if plugin:
+        # Any other name is a source type a manager module provides; the manager refuses one no
+        # loaded module declares, naming the accepted types.
+        wire = source_type.strip().lower()
+        if not wire:
+            raise typer.BadParameter("--type must not be blank")
+        if plugin_config is None:
+            raise typer.BadParameter(
+                f"--plugin-config is required for --type {source_type} (a module-provided source "
+                "type); the built-in types are sql, iceberg-rest, postgres and mysql"
+            )
+        if setup_sql is not None or config is not None:
+            raise typer.BadParameter(
+                f"--setup-sql / --config are not for --type {source_type}; use --plugin-config"
+            )
+    elif plugin_config is not None:
         raise typer.BadParameter(
-            f"--type must be sql, iceberg-rest, postgres or mysql, got '{source_type}'"
+            "--plugin-config is for a module-provided --type, not sql, iceberg-rest, postgres or "
+            "mysql"
         )
 
     body: dict = {"alias": alias, "disabled": disabled}
@@ -364,6 +389,15 @@ def create(
             aws_credentials, aws_region, aws_key_id, aws_secret_access_key,
             aws_session_token, aws_scope,
         )
+    elif plugin:
+        try:
+            parsed = json.loads(plugin_config)
+        except ValueError as exc:
+            raise typer.BadParameter(f"--plugin-config is not valid JSON: {exc}") from exc
+        if not isinstance(parsed, dict):
+            raise typer.BadParameter("--plugin-config must be a JSON object")
+        body["sourceType"] = wire
+        body["pluginConfig"] = parsed
     else:
         if setup_sql is None:
             raise typer.BadParameter("--setup-sql is required for --type sql")

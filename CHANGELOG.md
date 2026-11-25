@@ -398,7 +398,7 @@
 
 ### Added
 
-- Connector extension points: `ProtectedScan` makes a linked connector lower row policies before its candidate limit and seals the result; `QOD_EXTRA_EXTENSIONS` links extra static extensions into qod-node; modules can contribute federated source types (`FederatedSourceProvider`) and classify their nodes' linked functions. See docs/connector-spis.md.
+- Connector extension points: `ProtectedScan` makes a linked connector lower row policies before its candidate limit and seals the result; `QOD_EXTRA_EXTENSIONS` links extra static extensions into qod-node; modules can contribute federated source types (`FederatedSourceProvider`) and classify their nodes' linked functions; `qod federation create --type <wire> --plugin-config <json>` creates a source of a module-provided type. See docs/connector-spis.md.
 
 ## 0.14.2
 
