@@ -527,21 +527,26 @@ export default function CatalogTableDetail() {
                 label: 'Compare',
                 body: (
                   <>
-                    <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
-                      <button
-                        type="button"
-                        disabled={compareMode === 'schema'}
-                        onClick={() => setCompareMode('schema')}
-                      >
-                        Schema
-                      </button>
-                      <button
-                        type="button"
-                        disabled={compareMode === 'data'}
-                        onClick={() => setCompareMode('data')}
-                      >
-                        Data
-                      </button>
+                    {/* Mutually exclusive: checking one unchecks the other, and the checked one
+                        stays checked when clicked again, so one mode is always selected. */}
+                    <div
+                      role="group"
+                      aria-label="Compare mode"
+                      style={{ display: 'flex', gap: 16, marginBottom: 12 }}
+                    >
+                      {(['schema', 'data'] as const).map(mode => (
+                        <label
+                          key={mode}
+                          style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={compareMode === mode}
+                            onChange={() => setCompareMode(mode)}
+                          />
+                          {mode === 'schema' ? 'Schema' : 'Data'}
+                        </label>
+                      ))}
                     </div>
                     <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'center', marginBottom: 12 }}>
                       <SnapshotPicker
