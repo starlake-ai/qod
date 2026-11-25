@@ -84,6 +84,22 @@ object NodeHandles:
     */
   val ClockRefusals: List[String] = List("handle expired", "valid too long")
 
+  /** qod-node's refusal of a session handle's prelude when it cannot fetch the principal's policy
+    * snapshot from the replica that minted the handle (`SessionBind` in node_hooks.cpp: the
+    * snapshot was evicted from the replica's bundles, or the replica was slow or unreachable). A
+    * replica-side outage, not the node's: the statement is retried elsewhere, and the node keeps
+    * its health. Only qod-node writes a prelude's answer (the prelude is the manager's own CALL,
+    * with no text of a user's), so the words alone tell it.
+    */
+  val PolicySnapshotUnavailable: String = "QoD: policy snapshot unavailable; retry"
+
+  /** Whether `nodeText`, a node's answer to a prelude ([[refusalText]]), is
+    * [[PolicySnapshotUnavailable]], with or without DuckDB's error type before it.
+    */
+  def policySnapshotUnavailable(nodeText: String): Boolean =
+    nodeText.startsWith(PolicySnapshotUnavailable) ||
+      nodeText.startsWith("Permission Error: " + PolicySnapshotUnavailable)
+
   /** `nodeError`, a node's answer to a session handle, as the manager may answer, fence, log or
     * record it: without the excerpt of the statement DuckDB appends to an error raised at parse or
     * bind (`LINE <n>: ...` and the caret line after it), which for a refused prelude would carry

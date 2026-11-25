@@ -399,17 +399,21 @@ object QuackHttpClient:
     * statement itself was never sent.
     */
   final class HandleRefused(nodeError: String)
-      extends RuntimeException(HandleRefused.Prefix + NodeHandles.refusalText(nodeError)):
+      extends RuntimeException(HandleRefused.Prefix + HandleRefused.shown(nodeError)):
 
-    /** The node's answer, without DuckDB's excerpt of the statement, which would carry the handle:
-      * this is what is answered, logged or recorded, never `nodeError` itself.
+    /** The node's answer, without DuckDB's excerpt of the statement, which would carry the handle,
+      * nor the retry marker qod-node appends to an outage (`NodeHandles.unavailableMarker`): this
+      * is what is answered, logged or recorded, never `nodeError` itself.
       */
-    val nodeText: String = NodeHandles.refusalText(nodeError)
+    val nodeText: String = HandleRefused.shown(nodeError)
 
   object HandleRefused:
 
     /** How the message of a refused handle starts, in the [[QuackError.Transient]] it fails as. */
     val Prefix: String = "the node refused the statement's session handle: "
+
+    private def shown(nodeError: String): String =
+      NodeHandles.withoutUnavailableMarkers(NodeHandles.refusalText(nodeError))
 
     /** The node's answer when `err` is a refused session handle, which [[QuackHttpClient.query]]
       * fails as Transient (another node may take the statement): the health probe tells it apart
