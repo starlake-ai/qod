@@ -118,7 +118,8 @@ object FederatedSourceRules:
         // Judged on the setupSql text with `{{alias}}` expanded, so `qod_{{alias}}` under alias
         // `pg_x` is `qod_pg_x`. Secret values are not spliced in here (see ReservedSecretPrefixes).
         val lower = source.setupSql.replace("{{alias}}", source.alias).toLowerCase(Locale.ROOT)
-        (ReservedSecretPrefixes ++ FederatedSourceProviders.reservedSecretPrefixes).filter(lower.contains).map { p =>
+        val prefixes = ReservedSecretPrefixes ++ FederatedSourceProviders.reservedSecretPrefixes
+        prefixes.filter(lower.contains).map { p =>
           s"setupSql mentions '$p', a secret-name prefix reserved for QoD's typed sources"
         } ++ unquotedSecretError(source.setupSql).toList
       case FederatedSourceType.IcebergRest =>

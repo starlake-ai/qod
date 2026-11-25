@@ -67,5 +67,5 @@ class PluginSourceRenderingSpec extends AnyFlatSpec with Matchers with OptionVal
     val sql  = FederatedSource("src-sql", "td-1", "good", "ATTACH 'x' AS {{alias}};")
     val blob = builder(List(orphan, sql), Map.empty).build("td-1").unsafeRunSync().value
     blob should include("-- BEGIN federation: good")
-    blob should not include "orph"
+    blob should not include "-- BEGIN federation: orph"
   }

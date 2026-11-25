@@ -102,6 +102,11 @@ final class FederatedSourceHandlers(
         else None,
       connection =
         if s.sourceType.rdbms then s.config.flatMap(j => RdbmsConfig.fromJson(j).toOption)
+        else None,
+      // A module's config is the provider's own object, echoed as stored (placeholders only).
+      pluginConfig =
+        if s.sourceType.isInstanceOf[FederatedSourceType.Plugin] then
+          s.config.flatMap(j => io.circe.parser.parse(j).toOption)
         else None
     )
 
@@ -175,6 +180,7 @@ final class FederatedSourceHandlers(
               )
             )
           case None =>
+            val isPlugin = sourceType.isInstanceOf[FederatedSourceType.Plugin]
             val source = FederatedSource(
               id = id,
               tenantDbId = tenantDbId,
@@ -187,6 +193,7 @@ final class FederatedSourceHandlers(
               // column; the field a type does not use is refused below, not silently dropped.
               config =
                 if sourceType.rdbms then req.connection.map(_.toJson)
+                else if isPlugin then req.pluginConfig.map(_.noSpaces)
                 else req.config.map(_.toJson),
               // An external catalog is one QoD does not own, so a new typed source is read-only
               // until an operator says otherwise. A sql source keeps today's behaviour, where
@@ -199,12 +206,13 @@ final class FederatedSourceHandlers(
 
             val fieldErrors =
               List(
-                Option.when(
-                  req.config.isDefined && sourceType != FederatedSourceType.IcebergRest &&
-                    !sourceType.isInstanceOf[FederatedSourceType.Plugin]
-                )(
-                  s"config is for sourceType 'iceberg_rest' or a module-provided type, not '${sourceType.wire}'" +
-                    (if sourceType.rdbms then "; use connection" else "")
+                Option.when(req.config.isDefined && sourceType != FederatedSourceType.IcebergRest)(
+                  s"config is for sourceType 'iceberg_rest', not '${sourceType.wire}'" +
+                    (if sourceType.rdbms then "; use connection" else "") +
+                    (if isPlugin then "; use pluginConfig" else "")
+                ),
+                Option.when(req.pluginConfig.isDefined && !isPlugin)(
+                  s"pluginConfig is for module-provided sourceTypes, not '${sourceType.wire}'"
                 ),
                 Option.when(req.connection.isDefined && !sourceType.rdbms)(
                   s"connection is for sourceType 'postgres' / 'mysql', not '${sourceType.wire}'"
