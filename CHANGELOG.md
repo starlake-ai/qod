@@ -390,6 +390,10 @@
   worked). The filtered `duckdb_schemas()` now always keeps the session catalog's `main` row; the
   tables in it stay filtered.
 
+### Added
+
+- Connector extension points: `ProtectedScan` makes a linked connector lower row policies before its candidate limit and seals the result; `QOD_EXTRA_EXTENSIONS` links extra static extensions into qod-node; modules can contribute federated source types (`FederatedSourceProvider`) and classify their nodes' linked functions. See docs/connector-spis.md.
+
 ## 0.14.2
 
 ### Upgrading

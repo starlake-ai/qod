@@ -148,3 +148,6 @@ type and function-resolution checks still run against the actual scan at bind ti
 
 The protocol generation differs from the separately stacked CLS implementation;
 that stack must be rebased and fenced consistently before a combined deployment.
+
+Connectors built outside this repository can honor these policies for their own scans; see
+[connector extension points](connector-spis.md).
