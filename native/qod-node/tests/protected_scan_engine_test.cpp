@@ -138,6 +138,15 @@ int main() {
 	        Run(user, "SELECT id FROM qod_test_bounded_scan('memory.main.docs', 1)"),
 	        "a bounded connector scan without a policy obligation is not supported");
 	tamper = Tamper::None;
+	Expect("an unregistered bounded function starts unregistered",
+	       qod::IsBoundedFunction("qod_test_late_bounded_scan") ? "registered" : "unregistered", "unregistered");
+	Expect("an unregistered bounded scan is sealed and served",
+	       Run(user, "SELECT id FROM qod_test_late_bounded_scan('memory.main.docs', 1)"), "1");
+	tamper = Tamper::Unprotect;
+	Refused("core registers a bounded scan it sealed, so a later swap is refused",
+	        Run(user, "SELECT id FROM qod_test_late_bounded_scan('memory.main.docs', 1)"),
+	        "a bounded connector scan without a policy obligation is not supported");
+	tamper = Tamper::None;
 	qod::RegisterBoundedFunction("QOD_Test_Mixed_Case");
 	Expect("registered bounded names are lowercased", qod::IsBoundedFunction("qod_test_mixed_case") ? "yes" : "no",
 	       "yes");
