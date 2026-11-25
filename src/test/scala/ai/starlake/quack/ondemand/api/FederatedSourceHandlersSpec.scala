@@ -336,6 +336,54 @@ class FederatedSourceHandlersSpec
     list.secrets shouldBe empty
   }
 
+  // --- Module-provided (plugin) source types on the REST surface -------------
+
+  ai.starlake.quack.ondemand.federation.FederatedSourceProviders
+    .install(List(ai.starlake.quack.ondemand.federation.TestProvider)) shouldBe Right(())
+
+  private val pluginJson =
+    io.circe.parser.parse("""{"endpoint":"x","nested":{"k":1}}""").toOption.value
+
+  private def pluginReq(alias: String = "tc") = FederatedSourceCreateRequest(
+    alias = alias,
+    sourceType = Some("test_connector"),
+    pluginConfig = Some(pluginJson)
+  )
+
+  "createSource" should "store a plugin source's pluginConfig verbatim and echo it back" in
+    withEnv { (fs, resolver, tdId) =>
+      val h = new FederatedSourceHandlers(
+        fs,
+        resolver,
+        scopeOf = _ => SessionScope.Superuser,
+        invalidateSources = _ => (),
+        publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
+        catalogAliasOf = _ => None
+      )
+      val out = h.createSource("acme", "acme_prod", pluginReq(), None).unsafeRunSync().toOption.value
+      out.sourceType shouldBe "test_connector"
+      out.readOnly shouldBe true
+      out.pluginConfig shouldBe Some(pluginJson)
+      out.config shouldBe None
+      val stored = fs.listSources(tdId).find(_.alias == "tc").value
+      io.circe.parser.parse(stored.config.value).toOption.value shouldBe pluginJson
+    }
+
+  it should "400 on pluginConfig for a non-plugin type, and on config or connection for a plugin type" in
+    withHandlers { (h, _) =>
+      val onIce = iceReq().copy(pluginConfig = Some(pluginJson))
+      h.createSource("acme", "acme_prod", onIce, None).unsafeRunSync().left.value._2.message should
+        include("pluginConfig is for module-provided sourceTypes")
+      val withConfig = pluginReq().copy(config = Some(IcebergRestConfig(warehouse = "w")))
+      val (code, err) =
+        h.createSource("acme", "acme_prod", withConfig, None).unsafeRunSync().left.value
+      code shouldBe StatusCode.BadRequest
+      err.message should include("config is for sourceType 'iceberg_rest', not 'test_connector'")
+      val withConn = pluginReq().copy(connection = pgReq().connection)
+      h.createSource("acme", "acme_prod", withConn, None).unsafeRunSync().left.value._2.message should
+        include("connection is for sourceType 'postgres' / 'mysql'")
+    }
+
   // --- Typed iceberg_rest sources on the REST surface ------------------------
 
   private def iceReq(

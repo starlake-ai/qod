@@ -9437,6 +9437,7 @@ components:
           type: boolean
         connection:
           $ref: '#/components/schemas/RdbmsConfig'
+        pluginConfig: {}
     FederatedSourceListResponse:
       title: FederatedSourceListResponse
       type: object
@@ -9478,6 +9479,7 @@ components:
           type: string
         connection:
           $ref: '#/components/schemas/RdbmsConfig'
+        pluginConfig: {}
     FleetAssignmentDto:
       title: FleetAssignmentDto
       type: object

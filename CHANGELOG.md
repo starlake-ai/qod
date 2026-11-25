@@ -333,6 +333,12 @@
   - The iceberg extension now needs avro loaded first. Nodes install avro before any Iceberg
     source's setup SQL runs, and autoloading loads it, so Iceberg sources are unaffected; an
     initSql that loads iceberg on a node without avro installed fails.
+- **Unknown federated `sourceType` values.** A stored or imported federated source whose
+  `sourceType` names no built-in type is now treated as a plugin source: it is refused at write
+  time and skipped at render (its siblings still attach) unless a loaded module provides that
+  type, instead of being read as `sql`. A misspelled `sourceType` in a manifest is therefore
+  refused with `unknown sourceType '<value>' (expected one of: ...), or its module is not loaded`.
+  A NULL or blank stored value still reads as `sql`.
 
 ### Fixed
 
@@ -389,6 +395,10 @@
   the metadata filter hid `main` from a principal holding no grant in it (an admin's attach
   worked). The filtered `duckdb_schemas()` now always keeps the session catalog's `main` row; the
   tables in it stay filtered.
+
+### Added
+
+- Connector extension points: `ProtectedScan` makes a linked connector lower row policies before its candidate limit and seals the result; `QOD_EXTRA_EXTENSIONS` links extra static extensions into qod-node; modules can contribute federated source types (`FederatedSourceProvider`) and classify their nodes' linked functions. See docs/connector-spis.md.
 
 ## 0.14.2
 

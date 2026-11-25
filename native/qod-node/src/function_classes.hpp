@@ -28,4 +28,9 @@ bool IsSuperuserFunction(const std::string &name);
 //! such a call away before the plan reaches the describer.
 bool IsClassifiedFunction(const std::string &name);
 
+//! The compiled table alone: these ignore the classes extensions linked into this binary registered
+//! (linked_function_classes.hpp), which FunctionClassOf and IsClassifiedFunction consult after them.
+std::optional<FunctionClass> CompiledFunctionClassOf(const std::string &name, const std::string &type);
+bool IsCompiledClassifiedFunction(const std::string &name);
+
 } // namespace qod

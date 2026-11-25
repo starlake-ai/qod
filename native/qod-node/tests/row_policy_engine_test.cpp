@@ -189,7 +189,10 @@ int main() {
 	handle.row_policies[0].sql = "owner = 'alice') OR (true";
 	++handle.policy_version;
 	install();
+	auto binding_refusals = authz->Stats().row_policy_refusals.load();
 	Refused("each policy parses independently", Run(user, "SELECT id FROM docs"), "could not be bound");
+	Expect("a binding failure counts once as a row policy refusal",
+	       std::to_string(authz->Stats().row_policy_refusals.load() - binding_refusals), "1");
 	handle.row_policies[0].sql = "docs.owner = 'alice'";
 	++handle.policy_version;
 	install();

@@ -26,6 +26,27 @@ final class UnquotedSecretRefused(val alias: String, val name: String)
         "the source is left out of the node's init"
     )
 
+/** A plugin source whose provider module is not loaded on this manager. Refused for that one
+  * source (its siblings still attach); names the alias and the wire only.
+  */
+final class SourceProviderMissing(val alias: String, val wire: String)
+    extends RuntimeException(
+      s"federated source '$alias' has type '$wire', whose module is not loaded; " +
+        "the source is left out of the node's init"
+    )
+
+/** A plugin source whose provider rendered a `{{secret.NAME}}` outside a single-quoted literal.
+  * Core quotes nothing a provider renders, so a resolved value there could end the statement and
+  * become SQL of the node's trusted init. There is no plain-token fallback for plugin templates:
+  * the source is refused for that one source (its siblings still attach). Names the alias and the
+  * wire only.
+  */
+final class PluginSecretUnquoted(val alias: String, val wire: String)
+    extends RuntimeException(
+      s"federated source '$alias' has type '$wire', whose rendered template holds a secret " +
+        "placeholder outside a single-quoted literal; the source is left out of the node's init"
+    )
+
 /** One source's resolved setup SQL, plus the plaintext secret VALUES that were substituted into it.
   *
   * `secretValues` exists so the Iceberg attach verifier does not have to re-derive the credentials
@@ -138,9 +159,16 @@ final class FederationBlobBuilder(
       renderOne(src, redactSecrets, reservedFor(sources, src.id, ownAlias))
         .map(b => Option(b.sql))
         // Only that source's block goes: its siblings still attach.
-        .recover { case e: UnquotedSecretRefused =>
-          logger.warn(e.getMessage)
-          None
+        .recover {
+          case e: UnquotedSecretRefused =>
+            logger.warn(e.getMessage)
+            None
+          case e: SourceProviderMissing =>
+            logger.warn(e.getMessage)
+            None
+          case e: PluginSecretUnquoted =>
+            logger.warn(e.getMessage)
+            None
         }
     }
     blobs = rendered.flatten
@@ -256,6 +284,18 @@ final class FederationBlobBuilder(
                 )
       case FederatedSourceType.Postgres => rdbmsTemplate(src, RdbmsKind.Postgres, reservedAliases)
       case FederatedSourceType.Mysql    => rdbmsTemplate(src, RdbmsKind.Mysql, reservedAliases)
+      case FederatedSourceType.Plugin(w) =>
+        FederatedSourceProviders.of(w) match
+          case None    => IO.raiseError(new SourceProviderMissing(src.alias, w))
+          case Some(p) =>
+            p.renderTemplate(src, reservedAliases) match
+              case Left(errs) =>
+                IO.raiseError(
+                  new RuntimeException(
+                    s"invalid $w config for source '${src.alias}': ${errs.mkString("; ")}"
+                  )
+                )
+              case Right(sql) => IO.pure(sql)
 
   /** The Postgres / MySQL arm of [[bodyTemplate]], same contract as the Iceberg one: parse, run
     * `RdbmsConfig.validated` (the only way to obtain what `render` accepts), raise on anything
@@ -311,6 +351,15 @@ final class FederationBlobBuilder(
         )
       case None => IO.unit
 
+    // 2b. A plugin template is the provider's, not the operator's: every {{secret.NAME}} it
+    //     renders must sit inside a single-quoted literal, where quote doubling keeps any value a
+    //     value. Unlike a `sql` template there is no plain-token fallback, and the check runs
+    //     before any secret is resolved (and in preview mode too, so the preview shows the skip).
+    val pluginQuoteCheck: IO[Unit] = src.sourceType match
+      case FederatedSourceType.Plugin(w) if SecretPlaceholderScan.unquoted(step1).nonEmpty =>
+        IO.raiseError(new PluginSecretUnquoted(src.alias, w))
+      case _ => IO.unit
+
     // 3. Resolve each distinct {{secret.NAME}} via the resolver (or keep
     //    as placeholder when building the log-safe preview). Resolved
     //    VALUES go through sqlEscapeSingleQuote at SPLICE time so a single-quote
@@ -356,6 +405,7 @@ final class FederationBlobBuilder(
 
     for {
       _     <- strayCheck
+      _     <- pluginQuoteCheck
       pairs <- resolvePairs
       _     <- plainCheck(pairs)
       lookup =

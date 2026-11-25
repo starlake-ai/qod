@@ -1,4 +1,5 @@
 #include "function_classes.hpp"
+#include "linked_function_classes.hpp"
 
 #include <map>
 #include <set>
@@ -71,7 +72,7 @@ const Classes &AllClasses() {
 
 } // namespace
 
-std::optional<FunctionClass> FunctionClassOf(const std::string &name, const std::string &type) {
+std::optional<FunctionClass> CompiledFunctionClassOf(const std::string &name, const std::string &type) {
 	auto &classes = AllClasses().by_name_and_type;
 	auto found = classes.find({name, type});
 	if (found == classes.end()) {
@@ -84,8 +85,17 @@ bool IsSuperuserFunction(const std::string &name) {
 	return AllClasses().superuser.count(name) != 0;
 }
 
-bool IsClassifiedFunction(const std::string &name) {
+bool IsCompiledClassifiedFunction(const std::string &name) {
 	return AllClasses().names.count(name) != 0;
+}
+
+std::optional<FunctionClass> FunctionClassOf(const std::string &name, const std::string &type) {
+	auto compiled = CompiledFunctionClassOf(name, type);
+	return compiled ? compiled : LinkedFunctionClassOf(name, type);
+}
+
+bool IsClassifiedFunction(const std::string &name) {
+	return IsCompiledClassifiedFunction(name) || IsLinkedFunction(name);
 }
 
 } // namespace qod

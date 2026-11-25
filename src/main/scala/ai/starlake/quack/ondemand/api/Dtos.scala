@@ -771,7 +771,11 @@ final case class FederatedSourceCreateRequest(
     // of `config`, whose every field is defaulted, so a connection object would decode there as an
     // empty Iceberg declaration instead of failing. `password` is a {{secret.NAME}} placeholder,
     // never a value, so this object is safe to echo back on the response too.
-    connection: Option[RdbmsConfig] = None
+    connection: Option[RdbmsConfig] = None,
+    // Module-provided source types only: the provider's own config object, stored verbatim. Like
+    // `config`, credentials in it are {{secret.NAME}} placeholders, never values, so it is safe to
+    // echo back on the response.
+    pluginConfig: Option[io.circe.Json] = None
 )
 
 final case class FederatedSourceResponse(
@@ -786,7 +790,8 @@ final case class FederatedSourceResponse(
     readOnly: Boolean = false,
     // Live attach state aggregated across the pool's nodes, typed (rendered) sources only.
     attachStatus: Option[String] = None,
-    connection: Option[RdbmsConfig] = None
+    connection: Option[RdbmsConfig] = None,
+    pluginConfig: Option[io.circe.Json] = None
 )
 
 final case class FederatedSourceListResponse(sources: List[FederatedSourceResponse])

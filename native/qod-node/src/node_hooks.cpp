@@ -1,4 +1,5 @@
 #include "node_hooks.hpp"
+#include "protected_scan.hpp"
 
 #include "authz_stats.hpp"
 #include "credentials.hpp"
@@ -769,6 +770,7 @@ void Enforce(ClientContext &context, Gate &gate, LogicalOperator &plan) {
 			VerifyRowPolicies(plan, installed.row_policies);
 			VerifyColumnPolicies(plan, installed.column_policies);
 		}
+		VerifyProtectedScans(plan);
 		if (!privileged && !installed.row_policies.empty()) {
 			std::function<bool(LogicalOperator &)> protected_scan = [&](LogicalOperator &op) {
 				if (dynamic_cast<RowPolicyBoundary *>(&op))
@@ -867,24 +869,33 @@ void PostBind(PlannerExtensionInput &input, BoundStatement &statement) {
 		return;
 	}
 	Installed installed;
-	if (SessionSnapshot(context, gate.authz->Now(), installed) && !installed.principal.superuser &&
-	    !installed.principal.system && !IsPrelude(*statement.plan)) {
+	if (SessionSnapshot(context, gate.authz->Now(), installed) && !IsPrelude(*statement.plan)) {
+		auto privileged = installed.principal.superuser || installed.principal.system;
 		// Placement errors happen before Enforce's description/verification boundary. Count
 		// them here, and leave later refusals to Enforce so every refusal increments once.
 		try {
-			ApplyColumnPolicies(context, input.binder, statement.plan, installed.column_policies);
-			ApplyRowPolicies(context, statement.plan, installed.row_policies,
-						 [&](const RowPolicy &p, const std::string &cause) {
-							 gate.authz->Stats().row_policy_refusals++;
-							 std::cerr << "QoD row policy refusal "
-									   << CanonicalJson(JsonObject({{"policy", JsonString(p.id)},
-																	{"catalog", JsonString(p.catalog)},
-																	{"schema", JsonString(p.schema)},
-																	{"table", JsonString(p.table)},
-																	{"cause", JsonString(cause)}}))
-									   << std::endl;
-						 });
-		} catch (PermissionException &) {
+			if (!privileged) {
+				ApplyColumnPolicies(context, input.binder, statement.plan, installed.column_policies);
+				ApplyRowPolicies(context, statement.plan, installed.row_policies,
+							 [&](const RowPolicy &p, const std::string &cause) {
+								 gate.authz->Stats().row_policy_refusals++;
+								 std::cerr << "QoD row policy refusal "
+										   << CanonicalJson(JsonObject({{"policy", JsonString(p.id)},
+																		{"catalog", JsonString(p.catalog)},
+																		{"schema", JsonString(p.schema)},
+																		{"table", JsonString(p.table)},
+																		{"cause", JsonString(cause)}}))
+										   << std::endl;
+							 });
+			}
+			// Every principal: a connector's own mandatory scope is sealed even when no policy applies.
+			ApplyProtectedScans(context, *statement.plan,
+			                    privileged ? std::vector<ColumnPolicy> {} : installed.column_policies);
+		} catch (PermissionException &error) {
+			// A connector's inexact lowering (ApplyProtectedScans) is a row policy refusal. ApplyRowPolicies'
+			// own refusals are counted by its observer above, so only that one text is matched here.
+			if (std::string(error.what()).find("connector's candidate limit") != std::string::npos)
+				gate.authz->Stats().row_policy_refusals++;
 			gate.authz->Stats().local_refusals++;
 			throw;
 		}

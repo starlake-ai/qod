@@ -257,6 +257,15 @@ object Main extends IOApp with LazyLogging:
       .validate(source.at("quack-flightsql.opa").loadOrThrow[OpaConfig])
       .fold(err => throw new IllegalArgumentException(err), identity)
     val metricsCfg = source.at("quack-on-demand.metrics").loadOrThrow[MetricsConfig]
+    val discovered = ai.starlake.quack.ondemand.module.ModuleLoader.discover()
+    ai.starlake.quack.ondemand.federation.FederatedSourceProviders
+      .install(discovered.flatMap(_.federatedSourceProviders))
+      .left
+      .foreach(msg => throw new IllegalStateException(s"module source types refused: $msg"))
+    ai.starlake.quack.edge.authz.FunctionClasses
+      .installExtra(discovered.flatMap(_.functionClasses))
+      .left
+      .foreach(msg => throw new IllegalStateException(s"module function classes refused: $msg"))
     withEmbeddedControlPlane(mgrCfg, authCfg) { (resolved, resolvedAuth) =>
       bootManager(
         resolved,
@@ -265,7 +274,7 @@ object Main extends IOApp with LazyLogging:
         metricsCfg,
         opaCfg,
         demoControlPlane = false,
-        modules = ai.starlake.quack.ondemand.module.ModuleLoader.discover(),
+        modules = discovered,
         quackCfg = Some(quackCfg),
         restCfg = Some(restCfg)
       )

@@ -82,6 +82,34 @@ class IcebergAttachVerifierSpec extends AnyFlatSpec with Matchers with OptionVal
     registry
   )
 
+  "verify" should "record an orphan plugin source as a failure, send nothing and not latch" in {
+    val orphan = FederatedSource(
+      id = "fs-orphan",
+      tenantDbId = "td-1",
+      alias = "orph",
+      sourceType = FederatedSourceType.Plugin("unloaded_plugin"),
+      config = Some("{}")
+    )
+    val rec = new Recorder
+    val reg = new AttachStatusRegistry()
+    val v = new IcebergAttachVerifier(
+      sourcesOf = _ => IO.pure(List(orphan)),
+      ownCatalogAliasOf = _ => IO.pure(Some("acme_db")),
+      renderOne = s =>
+        IO.raiseError(
+          new ai.starlake.quack.ondemand.federation.SourceProviderMissing(s.alias, "unloaded_plugin")
+        ),
+      runOnNode = rec.run(Right(())),
+      listCatalogs = _ => IO.pure(Right(Set("acme_db"))),
+      liveNodes = () => List(node),
+      registry = reg
+    )
+    v.verify(node).unsafeRunSync()
+    rec.sent.get() shouldBe empty
+    reg.failuresFor(node.nodeId, startedAtMs).map(_.alias) shouldBe List("orph")
+    reg.latched(node.nodeId, startedAtMs) shouldBe false
+  }
+
   "verify" should "do nothing and latch when every alias is attached" in {
     val rec      = new Recorder
     val (v, reg) =

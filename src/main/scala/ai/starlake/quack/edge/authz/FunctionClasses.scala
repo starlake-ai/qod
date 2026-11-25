@@ -65,7 +65,47 @@ object FunctionClasses:
     val (cat, sch) =
       if catalog.isEmpty && schema.isEmpty then ("system", "main") else (catalog, schema)
     if lower(cat) != "system" then None
-    else all.get(Key(lower(sch), lower(name), lower(tpe)))
+    else
+      val key = Key(lower(sch), lower(name), lower(tpe))
+      all.get(key).orElse(extra.get(key))
+
+  @volatile private var extra: Map[Key, FunctionClass] = Map.empty
+
+  private val ExtraTypes: Set[String] = Set("scalar", "aggregate", "table")
+
+  /** Checks the classes a module gives the functions its nodes link: type scalar, aggregate or
+    * table, class allowed or listing, and a name no built-in carries under any type.
+    */
+  def validateExtra(
+      rows: List[(String, String, String)]
+  ): Either[String, Map[Key, FunctionClass]] =
+    rows.foldLeft[Either[String, Map[Key, FunctionClass]]](Right(Map.empty)) {
+      case (Left(e), _)                   => Left(e)
+      case (Right(acc), (name, tpe, cls)) =>
+        val key = Key("main", lower(name), lower(tpe))
+        FunctionClass.parse(cls) match
+          case None                            => Left(s"$name: unknown class $cls")
+          case Some(_) if !ExtraTypes(key.tpe) => Left(s"$name: unsupported type $tpe")
+          case Some(FunctionClass.Superuser) | Some(FunctionClass.File) =>
+            Left(s"$name: a module function cannot be classed $cls")
+          case Some(_) if all.keys.exists(_.name == key.name) || acc.contains(key) =>
+            Left(s"$name is already classified")
+          case Some(c) => Right(acc + (key -> c))
+    }
+
+  /** Installs the module classes for this JVM. Installing the same rows again is a no-op; a
+    * different set after a non-empty install is refused so two callers cannot overwrite each other.
+    */
+  def installExtra(rows: List[(String, String, String)]): Either[String, Unit] =
+    validateExtra(rows).flatMap { m =>
+      synchronized {
+        if m.isEmpty || m == extra then Right(())
+        else if extra.nonEmpty then Left("module function classes are already installed")
+        else
+          extra = m
+          Right(())
+      }
+    }
 
   // As DuckDB folds a name it looks up (ASCII letters only): the Kelvin sign is no `k` here.
   private def lower(s: String): String = ai.starlake.sql.IdentifierFold.fold(s)

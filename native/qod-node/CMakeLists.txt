@@ -145,8 +145,32 @@ qod_node_name_array(init-settings.txt QOD_NODE_INIT_SETTINGS)
 qod_node_name_array(init-extensions.txt QOD_NODE_INIT_EXTENSIONS)
 configure_file(cmake/init_policy_lists.hpp.in ${CMAKE_BINARY_DIR}/generated/init_policy_lists.hpp @ONLY)
 
+# ---- extra extensions ---------------------------------------------------------------------------
+# Extensions linked into this qod-node, loaded into its database at open: name=/path/lib<name>.a, ';'-separated.
+set(QOD_EXTRA_EXTENSIONS "" CACHE STRING "Extra static extensions linked into qod-node (name=path;...)")
+set(QOD_EXTRA_DECLARATIONS "")
+set(QOD_EXTRA_LOADS "")
+set(QOD_EXTRA_NAMES "")
+set(QOD_EXTRA_LIBS "")
+foreach(entry IN LISTS QOD_EXTRA_EXTENSIONS)
+  string(REGEX MATCH "^([a-z0-9_]+)=(.+)$" matched "${entry}")
+  if(NOT matched)
+    message(FATAL_ERROR "QOD_EXTRA_EXTENSIONS entry '${entry}' is not name=path")
+  endif()
+  set(name "${CMAKE_MATCH_1}")
+  list(APPEND QOD_EXTRA_LIBS "${CMAKE_MATCH_2}")
+  string(APPEND QOD_EXTRA_DECLARATIONS "int32_t duckdb_extension_${name}_describe(duckdb_extension_descriptor *);\n")
+  string(APPEND QOD_EXTRA_LOADS "\tdb.LoadStaticExtension(&duckdb_extension_${name}_describe);\n")
+  if(QOD_EXTRA_NAMES)
+    string(APPEND QOD_EXTRA_NAMES ",")
+  endif()
+  string(APPEND QOD_EXTRA_NAMES "${name}")
+endforeach()
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/cmake/extra_extensions.cpp.in ${CMAKE_BINARY_DIR}/generated/extra_extensions.cpp @ONLY)
+
 # ---- qod-node -----------------------------------------------------------------------------------
 set(QOD_NODE_CORE_SOURCES
+  ${CMAKE_BINARY_DIR}/generated/extra_extensions.cpp
   src/authz.cpp
   src/authz_stats.cpp
   src/build_info.cpp
@@ -155,6 +179,7 @@ set(QOD_NODE_CORE_SOURCES
   src/decide_client.cpp
   src/describer.cpp
   src/function_classes.cpp
+  src/linked_function_classes.cpp
   src/functions_list.cpp
   src/handle.cpp
   src/http_post.cpp
@@ -169,6 +194,7 @@ set(QOD_NODE_CORE_SOURCES
   src/row_policies.cpp
   src/column_policies.cpp
   src/policy_client.cpp
+  src/protected_scan.cpp
   src/options.cpp
   src/screen_rules.cpp
   src/secrets.cpp
@@ -193,9 +219,28 @@ target_compile_definitions(qod_node_core PRIVATE
   QOD_NODE_PROTOCOL=${QOD_NODE_PROTOCOL}
   "QOD_NODE_DUCKDB_VERSION=\"${duckdb_version}\""
   "QOD_NODE_DUCKDB_SOURCE_ID=\"${duckdb_source}\"")
+if(QOD_EXTRA_NAMES)
+  # Only a linked build defines it: the open build compiles exactly as before (build_info.cpp
+  # falls back to "").
+  target_compile_definitions(qod_node_core PRIVATE "QOD_NODE_EXTRA_EXTENSIONS=\"${QOD_EXTRA_NAMES}\"")
+endif()
 
 add_executable(qod-node src/main.cpp)
-target_link_libraries(qod-node PRIVATE qod_node_core)
+if(QOD_EXTRA_LIBS AND NOT APPLE AND NOT WIN32)
+  # A symbol cycle between static archives: the generated loader in qod_node_core references each
+  # extension's describe symbol, and an extension references qod_node_core (RegisterBoundedFunction,
+  # RegisterLinkedFunctionClass, ...). A single-pass linker (GNU ld) resolves it only when core and
+  # the extensions are rescanned together, so both go in one linker group, on qod-node only (only
+  # main.cpp calls the loader). ld64 and link.exe rescan archives on their own.
+  if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.24)
+    list(JOIN QOD_EXTRA_LIBS "," qod_extra_group)
+    target_link_libraries(qod-node PRIVATE "$<LINK_GROUP:RESCAN,qod_node_core,${qod_extra_group}>")
+  else()
+    target_link_libraries(qod-node PRIVATE -Wl,--start-group qod_node_core ${QOD_EXTRA_LIBS} -Wl,--end-group)
+  endif()
+else()
+  target_link_libraries(qod-node PRIVATE qod_node_core ${QOD_EXTRA_LIBS})
+endif()
 if(NOT QOD_NODE_DUCKDB_STATIC)
   # libduckdb is found in ../lib next to the binary: the manager installs a bundled qod-node as
   # <dir>/bin/qod-node with <dir>/lib linking to the libduckdb it loaded (QodNodeBinary.scala).
@@ -236,6 +281,8 @@ if(QOD_NODE_TESTS)
       set_target_properties(${name} PROPERTIES BUILD_RPATH ${DUCKDB_LIB_DIR})
     endif()
   endfunction()
+  qod_node_test(linked_function_classes_test)
+  add_test(NAME linked_function_classes COMMAND linked_function_classes_test)
   qod_node_test(sql_script_test)
   add_test(NAME sql_script COMMAND sql_script_test)
   qod_node_test(crypto_test)
@@ -250,6 +297,8 @@ if(QOD_NODE_TESTS)
   add_test(NAME column_policy_engine COMMAND column_policy_engine_test)
   qod_node_test(row_policy_engine_test)
   add_test(NAME row_policy_engine COMMAND row_policy_engine_test)
+  qod_node_test(protected_scan_engine_test)
+  add_test(NAME protected_scan_engine COMMAND protected_scan_engine_test)
   qod_node_test(describer_test)
   add_test(NAME describer COMMAND describer_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/golden/descriptions)
   qod_node_test(describer_extension_test)
@@ -315,6 +364,12 @@ if(QOD_NODE_TESTS)
   endif()
   find_program(BASH bash)
   if(BASH AND NOT WIN32)
+    # The test configures two more builds against the same shared DuckDB release.
+    if(NOT QOD_NODE_DUCKDB_STATIC AND DUCKDB_HOME)
+      add_test(NAME extra_extension COMMAND ${BASH} ${CMAKE_CURRENT_SOURCE_DIR}/tests/extra_extension_test.sh
+        ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_BINARY_DIR}/extra-extension-test $<TARGET_FILE:qod-node> ${DUCKDB_HOME}
+        ${CMAKE_COMMAND})
+    endif()
     add_test(NAME process COMMAND ${BASH} ${CMAKE_CURRENT_SOURCE_DIR}/tests/process_test.sh
       $<TARGET_FILE:qod-node> $<TARGET_FILE:handle_tool>)
   endif()

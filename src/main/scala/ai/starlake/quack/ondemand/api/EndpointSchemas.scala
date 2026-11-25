@@ -43,6 +43,7 @@ object EndpointSchemas:
   given Schema[ai.starlake.quack.ondemand.federation.iceberg.AwsCredentials]      = Schema.string
   given Schema[ai.starlake.quack.ondemand.federation.iceberg.IcebergRestConfig]   = Schema.derived
   given Schema[ai.starlake.quack.ondemand.federation.rdbms.RdbmsConfig]           = Schema.derived
+  given Schema[io.circe.Json]                                                     = Schema.any
   given Schema[FederatedSourceCreateRequest]                                      = Schema.derived
   given Schema[FederatedSourceResponse]                                           = Schema.derived
   given Schema[FederatedSourceListResponse]                                       = Schema.derived

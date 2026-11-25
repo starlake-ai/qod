@@ -57,5 +57,15 @@ trait ManagerModule:
 
   /** Pages this module adds to the admin console's Platform section. Read after start(). */
   def consolePages: List[ConsolePage] = Nil
+
+  /** Federated source types this module contributes. Read right after construction, before
+    * `start()`: pool restore renders sources before modules start.
+    */
+  def federatedSourceProviders: List[FederatedSourceProvider] = Nil
+
+  /** Classes for functions of extensions this module's nodes link: (name, type, class) with type in
+    * scalar/aggregate/table and class allowed or listing. Read right after construction.
+    */
+  def functionClasses: List[(String, String, String)] = Nil
   def onEvent(event: ManagerEvent): IO[Unit]
   def stop: IO[Unit]
