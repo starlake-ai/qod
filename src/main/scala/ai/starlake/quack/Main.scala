@@ -262,6 +262,10 @@ object Main extends IOApp with LazyLogging:
       .install(discovered.flatMap(_.federatedSourceProviders))
       .left
       .foreach(msg => throw new IllegalStateException(s"module source types refused: $msg"))
+    ai.starlake.quack.edge.authz.FunctionClasses
+      .installExtra(discovered.flatMap(_.functionClasses))
+      .left
+      .foreach(msg => throw new IllegalStateException(s"module function classes refused: $msg"))
     withEmbeddedControlPlane(mgrCfg, authCfg) { (resolved, resolvedAuth) =>
       bootManager(
         resolved,
