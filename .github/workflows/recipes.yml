@@ -1,0 +1,57 @@
+name: recipes
+
+# Runs the six qod-recipe-* sample repos (linked from starlake.ai/qod) against
+# the released qod, once a week. The schedule lives here rather than in each
+# recipe repo: GitHub disables scheduled workflows in a repository with no
+# commit for 60 days, and the recipes rarely change while this repository does.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  recipe:
+    name: ${{ matrix.recipe }} (${{ matrix.os }})
+    # Forks get the file too; only this repository runs it on a schedule.
+    if: github.event_name != 'schedule' || github.repository == 'starlake-ai/qod'
+    strategy:
+      fail-fast: false
+      matrix:
+        recipe: [sql, dbt, dagster, dlt, sqlmesh, spark]
+        os: [ubuntu-latest]
+        include:
+          # The plain SQL recipe also proves the isolated install on macOS.
+          - recipe: sql
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          repository: starlake-ai/qod-recipe-${{ matrix.recipe }}
+      - uses: astral-sh/setup-uv@v10
+      - if: matrix.recipe == 'spark'
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Unit tests
+        run: uv run pytest -q
+      - name: Run the recipe
+        run: ./run.sh
+      - name: Run it again while the gateway is still up
+        run: ./run.sh
+      - name: Stop the gateway
+        if: always()
+        run: ./run.sh stop
+      - name: Keep the logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: recipe-${{ matrix.recipe }}-${{ matrix.os }}-logs
+          path: out/*.log
+          if-no-files-found: ignore
