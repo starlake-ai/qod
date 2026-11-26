@@ -1126,11 +1126,14 @@ export default function FederationSection({
     * success, and the editor gets the manager's errors otherwise. */
   async function savePlugin(pluginConfig: unknown, secrets: SourceEditorSecret[]) {
     setError(null);
+    const run = editRun.current;
     const result = await savePluginSource(api, {
       tenant, tenantDb, alias, description, sourceType, pluginConfig, secrets,
     });
     if (result.ok) {
-      closeForm();
+      // The form may have been cancelled or switched while the save ran: only close the one it
+      // was started from.
+      if (editRun.current === run) closeForm();
       await reload();
     }
     return result;

@@ -256,3 +256,25 @@ describe('a failing editor is contained', () => {
     expect(seen.ctx?.contract).toBe(1);
   });
 });
+
+describe('startSourceEditor after a stop', () => {
+  it('answers save with an error without calling core, and ignores cancel', async () => {
+    const { mod, seen } = fakeEditor();
+    let saves = 0;
+    let cancels = 0;
+    const ctx = ctxWith({
+      save: async () => { saves += 1; return { ok: true }; },
+      cancel: () => { cancels += 1; },
+    });
+    const { stop } = start(async () => mod, ctx);
+    await settle();
+    await seen.ctx!.save({}, []);
+    seen.ctx!.cancel();
+    expect([saves, cancels]).toEqual([1, 1]);
+    stop();
+    const r = await seen.ctx!.save({}, []);
+    seen.ctx!.cancel();
+    expect(r).toEqual({ ok: false, errors: ['the editor was closed'] });
+    expect([saves, cancels]).toEqual([1, 1]);
+  });
+});

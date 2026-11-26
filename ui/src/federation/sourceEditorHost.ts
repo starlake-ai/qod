@@ -16,10 +16,19 @@ export interface StartEditorOptions {
  *  it. A bundle that fails to load, speaks another contract, throws in mount or returns no unmount
  *  function reports one error naming its module and leaves `el` empty; nothing it does throws out
  *  of here, so the rest of the form works on. A stop before the mount settles unmounts the editor
- *  as soon as it does, and silences its errors. */
+ *  as soon as it does, and silences its errors; the editor's save and cancel then do nothing. */
 export function startSourceEditor(o: StartEditorOptions): () => void {
   let stopped = false;
   let unmount: Unmount | null = null;
+  // After a stop the editor may still call its context (a save in flight, a late click): a save
+  // then reports an error without reaching core's, a cancel does nothing.
+  const ctx: SourceEditorContext = {
+    ...o.ctx,
+    save: (pluginConfig, secrets) => stopped
+      ? Promise.resolve({ ok: false, errors: ['the editor was closed'] })
+      : o.ctx.save(pluginConfig, secrets),
+    cancel: () => { if (!stopped) o.ctx.cancel(); },
+  };
   const fail = (message: string) => {
     o.el.replaceChildren();
     if (!stopped) o.onError(message);
@@ -30,7 +39,7 @@ export function startSourceEditor(o: StartEditorOptions): () => void {
     if (!checked.ok) { fail(checked.error); return; }
     let returned: unknown;
     try {
-      returned = await checked.mount(o.el, o.ctx);
+      returned = await checked.mount(o.el, ctx);
     } catch (e) {
       fail(`module ${o.module}: the source editor failed to mount (${messageOf(e)})`);
       return;
