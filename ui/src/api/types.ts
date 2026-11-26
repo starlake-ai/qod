@@ -131,6 +131,7 @@ export interface FleetServer {
   nodeState: string;
   nodeError?: string | null;
   nodeAction?: string | null;
+  labels: Record<string, string>;
   qodVersion?: string | null;
   duckdbVersion?: string | null;
   cpus?: number | null;

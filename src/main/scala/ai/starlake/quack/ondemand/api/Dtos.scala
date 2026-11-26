@@ -349,7 +349,8 @@ final case class FleetHeartbeatRequest(
     duckdbVersion: Option[String],
     cpus: Option[Int],
     memoryBytes: Option[Long],
-    node: FleetNodeReportDto
+    node: FleetNodeReportDto,
+    labels: Option[Map[String, String]] = None
 )
 final case class FleetPoolKeyDto(tenant: String, tenantDb: String, pool: String)
 
@@ -431,9 +432,10 @@ final case class FleetServerDto(
     approval: String,           // approved | pending
     approvedBy: Option[String], // auto | upgrade | the approving admin
     approvedAt: Option[String],
-    sourceAddr: Option[String],       // resolved address of the latest heartbeat
-    approvedSource: Option[String],   // the source an approved server is bound to
-    nodeAction: Option[String] = None // suggested fix for nodeError, from qod fleet join
+    sourceAddr: Option[String],        // resolved address of the latest heartbeat
+    approvedSource: Option[String],    // the source an approved server is bound to
+    nodeAction: Option[String] = None, // suggested fix for nodeError, from qod fleet join
+    labels: Map[String, String] = Map.empty
 )
 final case class FleetServerListResponse(servers: List[FleetServerDto])
 final case class FleetServerOpRequest(name: String)

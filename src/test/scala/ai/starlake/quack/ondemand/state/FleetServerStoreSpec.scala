@@ -77,6 +77,50 @@ trait FleetServerStoreBehaviour { this: AnyFlatSpec & Matchers =>
         s.get("a").get.silentSeconds should be >= 120L
     }
 
+    it should "store the labels of the first heartbeat" in withStore { h =>
+      val s = h.store
+      s.recordHeartbeat(hb("a").copy(labels = Some(Map("disktype" -> "ssd"))))
+      s.get("a").get.labels shouldBe Map("disktype" -> "ssd")
+    }
+
+    it should "replace labels when a heartbeat sends a new set, and clear them with an empty one" in withStore {
+      h =>
+        val s = h.store
+        s.recordHeartbeat(hb("a").copy(labels = Some(Map("disktype" -> "ssd"))))
+        s.recordHeartbeat(hb("a").copy(labels = Some(Map("zone" -> "eu", "gpu" -> "a100"))))
+        s.get("a").get.labels shouldBe Map("zone" -> "eu", "gpu" -> "a100")
+        s.recordHeartbeat(hb("a").copy(labels = Some(Map.empty)))
+        s.get("a").get.labels shouldBe Map.empty
+    }
+
+    it should "leave stored labels untouched when a heartbeat sends none" in withStore { h =>
+      val s = h.store
+      s.recordHeartbeat(hb("a").copy(labels = Some(Map("disktype" -> "ssd"))))
+      s.recordHeartbeat(hb("a").copy(labels = None)) shouldBe HeartbeatOutcome.Updated
+      s.get("a").get.labels shouldBe Map("disktype" -> "ssd")
+    }
+
+    it should "write no labels on a refused heartbeat" in withStore { h =>
+      val s = h.store
+      s.recordHeartbeat(hb("a").copy(labels = Some(Map("disktype" -> "ssd"))))
+      s.recordHeartbeat(
+        hb("a", host = "10.0.0.9").copy(labels = Some(Map("disktype" -> "hdd")))
+      ) shouldBe HeartbeatOutcome.AddressChangeRefused
+      s.get("a").get.labels shouldBe Map("disktype" -> "ssd")
+    }
+
+    it should "keep the assignment and epoch when a busy server is relabeled" in withStore { h =>
+      val s = h.store
+      s.recordHeartbeat(hb("a").copy(labels = Some(Map("disktype" -> "ssd"))))
+      s.claim(assignment("n1"), 30, None).map(_.name) shouldBe Right("a")
+      val before = s.get("a").get
+      s.recordHeartbeat(hb("a").copy(labels = Some(Map("disktype" -> "hdd"))))
+      val after = s.get("a").get
+      after.labels shouldBe Map("disktype" -> "hdd")
+      (after.assignedNodeId, after.assignmentEpoch) shouldBe
+        (before.assignedNodeId, before.assignmentEpoch)
+    }
+
     it should "claim the oldest reachable schedulable free server exactly once under contention" in withStore {
       h =>
         val s = h.store
@@ -718,6 +762,38 @@ class PostgresFleetServerStoreSpec extends AnyFlatSpec with Matchers with FleetS
       finally other.close()
       pg.claim(assignment("n1"), 30, Some(64L << 30)).map(_.name) shouldBe Right("big")
       pg.claim(assignment("n2"), 30, Some(64L << 30)) shouldBe Left(ClaimMiss.NoneFits)
+  }
+
+  // A plain heartbeat must take no lock on the server row (claims rely on that), so only a label
+  // change may wait behind a holder of the row lock. Deterministic: the holder keeps the lock for
+  // the whole test, and each heartbeat runs on its own thread against a bounded wait.
+  it should "take no row lock for unchanged labels, and wait for it only to change them" in withDb {
+    (pg, url, _) =>
+      val ssd = Map("disktype" -> "ssd")
+      pg.recordHeartbeat(hb("a").copy(labels = Some(ssd)))
+      val pool  = Executors.newFixedThreadPool(2)
+      val other =
+        java.sql.DriverManager.getConnection(url, TestPostgres.pgUser, TestPostgres.pgPass)
+      try
+        other.setAutoCommit(false)
+        val lock = other.prepareStatement(
+          "SELECT name FROM qodstate_fleet_server WHERE name = 'a' FOR UPDATE"
+        )
+        lock.executeQuery().next() shouldBe true
+        val unchanged = pool.submit(() => pg.recordHeartbeat(hb("a").copy(labels = Some(ssd))))
+        unchanged.get(10, java.util.concurrent.TimeUnit.SECONDS) shouldBe HeartbeatOutcome.Updated
+        val changed =
+          pool.submit(() => pg.recordHeartbeat(hb("a").copy(labels = Some(Map("zone" -> "eu")))))
+        Try(changed.get(2, java.util.concurrent.TimeUnit.SECONDS)).failed.get shouldBe a[
+          java.util.concurrent.TimeoutException
+        ]
+        other.rollback()
+        lock.close()
+        changed.get(10, java.util.concurrent.TimeUnit.SECONDS) shouldBe HeartbeatOutcome.Updated
+        pg.get("a").get.labels shouldBe Map("zone" -> "eu")
+      finally
+        other.close()
+        pool.shutdownNow()
   }
 
   it should "keep servers that joined before 0041 approved (upgrade backfill)" in {

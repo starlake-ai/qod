@@ -86,6 +86,15 @@ object FleetErrors:
     retryable = true
   )
 
+  def invalidLabels(problem: String): Err = err(
+    StatusCode.BadRequest,
+    "invalid_labels",
+    problem,
+    Map("problem" -> problem),
+    List(upgradeQod),
+    retryable = false
+  )
+
   def invalidNodeState(state: String): Err = err(
     StatusCode.BadRequest,
     "invalid_node_state",

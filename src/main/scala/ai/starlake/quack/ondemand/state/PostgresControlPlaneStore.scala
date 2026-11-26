@@ -2125,14 +2125,15 @@ final class PostgresControlPlaneStore(
   private def heartbeatOnce(c: Connection, hb: Heartbeat): Option[HeartbeatOutcome] =
     // 1. First contact: insert the server row; a no-op for a known name.
     val ins = c.prepareStatement(
-      """INSERT INTO qodstate_fleet_server (name, advertise_host, node_port, approved)
-        |VALUES (?, ?, ?, false) ON CONFLICT (name) DO NOTHING""".stripMargin
+      """INSERT INTO qodstate_fleet_server (name, advertise_host, node_port, approved, labels)
+        |VALUES (?, ?, ?, false, ?::jsonb) ON CONFLICT (name) DO NOTHING""".stripMargin
     )
     val joined =
       try
         ins.setString(1, hb.name)
         ins.setString(2, hb.advertiseHost)
         ins.setInt(3, hb.nodePort)
+        ins.setString(4, hb.labels.getOrElse(Map.empty[String, String]).asJson.noSpaces)
         ins.executeUpdate() == 1
       finally ins.close()
     // 2. Address guard and stale-rule inputs, read from the server row (plain read, no lock).
@@ -2211,6 +2212,21 @@ final class PostgresControlPlaneStore(
             ap.executeUpdate()
             ()
           finally ap.close()
+        // 2d. Labels, on this accept path only (a refusal above writes nothing). The UPDATE takes
+        // the server row lock that claims contend on (FOR UPDATE OF s SKIP LOCKED), so it runs
+        // only when the labels really differ: a plain heartbeat with unchanged labels (the
+        // steady state) stays lock-free. None means the agent does not report labels: keep them.
+        hb.labels.foreach { l =>
+          val json = l.asJson.noSpaces
+          val lu   = c.prepareStatement(
+            """UPDATE qodstate_fleet_server SET labels = ?::jsonb
+              |WHERE name = ? AND labels IS DISTINCT FROM ?::jsonb""".stripMargin
+          )
+          try
+            lu.setString(1, json); lu.setString(2, hb.name); lu.setString(3, json)
+            lu.executeUpdate()
+          finally lu.close()
+        }
         // 3. Heartbeat row: the only row this handler rewrites every interval.
         val up = c.prepareStatement(
           """INSERT INTO qodstate_fleet_heartbeat
@@ -2495,7 +2511,8 @@ final class PostgresControlPlaneStore(
   private val FleetSelect =
     """SELECT s.name, s.advertise_host, s.node_port, s.joined_at, s.unschedulable, s.assigned_node_id,
       |  s.assignment::text AS assignment, s.assignment_epoch, s.claimed_at,
-      |  s.approved, s.approved_at, s.approved_by, s.approved_source, h.source_addr,
+      |  s.approved, s.approved_at, s.approved_by, s.approved_source, s.labels::text AS labels,
+      |  h.source_addr,
       |  EXTRACT(EPOCH FROM now() - s.claimed_at)::bigint AS claim_age_seconds,
       |  h.last_heartbeat_at, EXTRACT(EPOCH FROM now() - h.last_heartbeat_at)::bigint AS silent_seconds,
       |  h.qod_version, h.os, h.duckdb_version, h.cpus, h.memory_bytes,
@@ -2544,7 +2561,10 @@ final class PostgresControlPlaneStore(
       approvedBy = Option(rs.getString("approved_by")),
       sourceAddr = Option(rs.getString("source_addr")),
       approvedSource = Option(rs.getString("approved_source")),
-      nodeAction = Option(rs.getString("node_action"))
+      nodeAction = Option(rs.getString("node_action")),
+      labels = io.circe.parser
+        .decode[Map[String, String]](rs.getString("labels"))
+        .fold(e => throw new IllegalStateException(s"bad labels json: $e"), identity)
     )
 
   // ---------------- helpers ----------------

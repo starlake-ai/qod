@@ -88,7 +88,9 @@ final case class FleetServerRow(
     // for an approval whose source was unknown (bound by the next heartbeat with a known source).
     approvedSource: Option[String],
     // The suggested fix for the node's failure (`node_action`, Liquibase 0046), from the report.
-    nodeAction: Option[String] = None
+    nodeAction: Option[String] = None,
+    // What the server says about itself (Liquibase 0040), matched against a cohort nodeSelector.
+    labels: Map[String, String] = Map.empty
 )
 
 /** Heartbeat upsert input: everything the join process reports. */
@@ -107,7 +109,9 @@ final case class Heartbeat(
     // The manager's decision for this heartbeat's source (in QOD_FLEET_AUTO_APPROVE). Approves a
     // server that is not approved yet; ignored for an approved one. Required: a default would
     // silently decide approval for the caller.
-    autoApprove: Boolean
+    autoApprove: Boolean,
+    // None leaves the stored labels alone (an older agent); Some replaces them, Some(empty) clears.
+    labels: Option[Map[String, String]] = None
 ):
   // An auto-approval must bind to the source it was judged from; an unbound approval is exactly
   // the dangerous state the join-approval fix exists to prevent.

@@ -66,7 +66,28 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       FleetNodeReportDto(0, None, "none", None, None, None)
     )
 
-  "heartbeat" should "401 on a wrong or missing token" in {
+  "heartbeat" should "400 invalid labels and write nothing" in {
+    val (store, h) = fixture()
+    val r          = h
+      .heartbeat(req().copy(labels = Some(Map("-bad" -> "x"))), Some("secret"), loopback, None)
+      .unsafeRunSync()
+    r.left.map(e => (e._1, e._2.error)) shouldBe Left((StatusCode.BadRequest, "invalid_labels"))
+    store.get("srv-1") shouldBe None
+  }
+
+  it should "pass labels through to the store" in {
+    val (store, h) = fixture()
+    h.heartbeat(
+      req().copy(labels = Some(Map("disktype" -> "ssd"))),
+      Some("secret"),
+      loopback,
+      None
+    ).unsafeRunSync()
+      .isRight shouldBe true
+    store.get("srv-1").get.labels shouldBe Map("disktype" -> "ssd")
+  }
+
+  it should "401 on a wrong or missing token" in {
     val (_, h) = fixture()
     h.heartbeat(req(), Some("nope"), loopback, None)
       .unsafeRunSync()
