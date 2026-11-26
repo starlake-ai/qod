@@ -168,7 +168,7 @@ holds secrets and the caller is not a superuser, so the manager would refuse a c
 secret, and resolves to `{ok: true}` or `{ok: false, errors}`. Keep secret values out of
 `pluginConfig`: reference them as `{{secret.NAME}}` placeholders and hand the values to `save`.
 
-The save sequence never leaves an enabled source naming a missing secret. A new source, or an
+The save sequence never leaves an enabled source naming a secret it was handed. A new source, or an
 existing one holding no secrets, is saved disabled, then every secret is written, then the source
 is saved as asked. If a secret fails, the source stays disabled and the error says so and names
 the secret to set; if the final save is refused, the error ends with "the source remains
@@ -180,6 +180,23 @@ through an `externalRef` is never overwritten with a value.
 `invalid_federated_source` message that joins its errors with "; ", and a provider error may itself
 contain "; ", so `save` returns that message as one entry and never splits it. An editor that
 wants per-field errors validates through its own module endpoint before saving.
+
+### Writing an editor
+
+- The editor is mounted inside core's `<form>`. Do not nest a `<form>`, give every button
+  `type="button"`, and know that Enter in a field submits core's form, which is a no-op.
+- Core does not display a failed save's errors; the editor must show the `errors` it gets back.
+- On `{ok: true}` core closes the form and unmounts the editor. After the editor is unmounted, a
+  `save` resolves `{ok: false, errors: ['the editor was closed']}` without saving, and `cancel` does
+  nothing.
+- The bundle runs same-origin with the caller's admin session, so it carries the module's trust:
+  it can call any `/api` route the caller can.
+- `ctx.source.pluginConfig` holds secret placeholders (`{{secret.NAME}}`), never values.
+- Every module source is saved `readOnly: true`: core cannot judge what a plugin's writes do, so it
+  never offers them. The `ctx.readOnly` rule is conservative: it is true for any source holding a
+  secret that the caller, not a superuser, may not change.
+- Saving an existing source that holds no secret, with new secrets, disables it until those
+  secrets are written, then saves it as asked.
 
 Authorization of a module's own routes about a tenant-db's sources (a validation or discovery
 endpoint the editor calls): core's rule for creating a module-provided source is the REST guard
