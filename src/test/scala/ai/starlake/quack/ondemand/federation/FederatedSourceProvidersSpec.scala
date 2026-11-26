@@ -87,3 +87,7 @@ class FederatedSourceProvidersSpec extends AnyFlatSpec with Matchers:
     FederatedSourceProviders.of("test_connector") shouldBe Some(TestProvider)
     FederatedSourceProviders.reservedSecretPrefixes should contain("qod_tc_")
   }
+
+  "A provider" should "name no console editor by default" in {
+    TestProvider.editor shouldBe None
+  }
