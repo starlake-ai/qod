@@ -162,6 +162,15 @@
           "text": "Check the boot output for column masks that do not return their column's type: qod-node refuses every read of such a column. The manager prints one WARN: line on stderr per such mask and DuckLake database, naming the tenant, the role, the policy id, the column, the mask's type and the column's. Rewrite each with the TRY_CAST form, or use NULL or a deny."
         }
       ]
+    },
+    {
+      "version": "0.15.2",
+      "changesets": [],
+      "min_from_version": "0.10.0",
+      "rollback_without_restore": true,
+      "rollback_blocked_by": [],
+      "notes": "https://github.com/starlake-ai/quack-on-demand/blob/v0.15.2/CHANGELOG.md",
+      "steps": []
     }
   ]
 }
