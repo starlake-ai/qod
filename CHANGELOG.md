@@ -11,6 +11,10 @@
   database, naming the tenant, the role, the policy id, the column, the mask's type and the
   column's, never the mask. Rewrite each with the `TRY_CAST` form below, or use `NULL` or a deny.
 
+### Added
+
+- Module source types in the console: the federation form's type picker lists module-provided source types after the built-in four, and mounts a type's console editor (`FederatedSourceProvider.editor`, source editor contract 1) in place of the type's fields; core still saves the source and its secrets, never leaving an enabled source without them. `GET /api/federated-source-types` lists the module types. See docs/connector-spis.md.
+
 ### Fixed
 
 - **A column mask can be written for a column that is neither text nor DOUBLE.** The allowed mask
@@ -449,7 +453,6 @@
 ### Added
 
 - Connector extension points: `ProtectedScan` makes a linked connector lower row policies before its candidate limit and seals the result; `QOD_EXTRA_EXTENSIONS` links extra static extensions into qod-node; modules can contribute federated source types (`FederatedSourceProvider`) and classify their nodes' linked functions; `qod federation create --type <wire> --plugin-config <json>` creates a source of a module-provided type. See docs/connector-spis.md.
-- Module source types in the console: the federation form's type picker lists module-provided source types after the built-in four, and mounts a type's console editor (`FederatedSourceProvider.editor`, source editor contract 1) in place of the type's fields; core still saves the source and its secrets, never leaving an enabled source without them. `GET /api/federated-source-types` lists the module types. See docs/connector-spis.md.
 
 ## 0.14.2
 
