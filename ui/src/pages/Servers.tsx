@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, ApiError, errorMessage } from '../api/client';
 import type { FleetServer } from '../api/types';
+import { sortedLabels } from '../api/fleetLabels';
 import { fmtBytes } from '../format';
 import { poolPath } from '../nav/links';
 
@@ -147,7 +148,7 @@ export default function Servers() {
                     {Object.keys(s.labels ?? {}).length === 0 ? (
                       <span className="subtle">-</span>
                     ) : (
-                      Object.entries(s.labels).map(([k, v], i) => (
+                      sortedLabels(s.labels).map(([k, v], i) => (
                         <code key={k} style={{ marginLeft: i === 0 ? 0 : 6 }}>{k}={v}</code>
                       ))
                     )}

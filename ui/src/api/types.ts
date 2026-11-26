@@ -96,8 +96,9 @@ export interface PoolResponse {
   // and manual scales outside the band are refused.
   minNodes?: number;
   maxNodes?: number;
-  // Fleet backend: slots waiting for a free server, and why the last spawn
-  // attempt left them pending ("none_free" | "none_fits").
+  // Fleet backend: slots waiting for a server, and why the last spawn attempt
+  // left them pending ("none_free" | "none_fits" | "none_match"; the most
+  // pressing when slots miss for different reasons).
   pending?: number;
   pendingReason?: string | null;
   // The sentence behind pendingReason: servers by state and the next command.
@@ -167,8 +168,9 @@ export interface CreatePoolRequest {
   roleDistribution: RoleDistribution;
   maxConcurrentPerNode?: number; // default 0 = unlimited
   // Optional placement plan. Must sum back to roleDistribution / size when
-  // present. The manager ignores cohorts when the runtime backend is not
-  // Kubernetes (see ClientConfigResponse.placementSupported).
+  // present. The manager honors cohorts on Kubernetes (nodeSelector and
+  // tolerations) and on fleet (nodeSelector against server labels), and
+  // ignores them on the local backend (see ClientConfigResponse.placementSupported).
   cohorts?: PoolCohort[];
   // When true the pool is persisted disabled; the FlightSQL edge rejects
   // fresh handshakes until it's enabled. Nodes still spawn.
@@ -257,7 +259,7 @@ export interface ClientConfigResponse {
   // Whether the server has an auth provider configured. The UI does not read it:
   // a manager nobody can sign in to refuses to boot, so there is always a login.
   authEnabled: boolean;
-  // True iff the runtime backend supports node placement (Kubernetes).
+  // True iff the runtime backend supports node placement (Kubernetes or fleet).
   // The UI hides cohort/placement controls when false.
   placementSupported?: boolean;
   // True iff the runtime backend is fleet (QOD_RUNTIME_TYPE=fleet). The sidebar shows

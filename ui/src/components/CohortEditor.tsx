@@ -135,8 +135,9 @@ export default function CohortEditor({ cohorts, onChange }: Props) {
   );
 }
 
-/** Standard "this won't work outside K8s" warning. Render alongside the
-  * cohort toggle when `placementSupported` is false. */
+/** Standard "placement is ignored on this backend" warning (local processes;
+  * Kubernetes and fleet honor placement). Render alongside the cohort toggle
+  * when `placementSupported` is false. */
 export function PlacementUnsupportedWarning() {
   return (
     <p style={{
