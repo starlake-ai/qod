@@ -154,6 +154,83 @@ trait FleetServerStoreBehaviour { this: AnyFlatSpec & Matchers =>
       s.claim(assignment("n2"), 30, Some(8L << 30)).map(_.name) shouldBe Right("small")
     }
 
+    val ssd = Map("disktype" -> "ssd")
+
+    it should "claim only a server whose labels contain the selector" in withStore { h =>
+      val s = h.store
+      s.recordHeartbeat(hb("plain")); h.backdate("plain", 1) // joined first
+      s.recordHeartbeat(hb("ssd").copy(labels = Some(ssd)))
+      s.claim(assignment("n1"), 30, None, ssd).map(_.name) shouldBe Right("ssd")
+      s.get("plain").get.assignedNodeId shouldBe None
+    }
+
+    it should "report NoneMatch when free servers exist but none carries the selector" in withStore {
+      h =>
+        val s = h.store
+        s.recordHeartbeat(hb("plain"))
+        s.recordHeartbeat(hb("hdd").copy(labels = Some(Map("disktype" -> "hdd"))))
+        s.claim(assignment("n1"), 30, None, ssd) shouldBe Left(ClaimMiss.NoneMatch)
+        // The selector is judged before the memory: nothing matching is NoneMatch, not NoneFits.
+        s.claim(assignment("n1"), 30, Some(1L << 50), ssd) shouldBe Left(ClaimMiss.NoneMatch)
+        s.list().flatMap(_.assignedNodeId) shouldBe Nil
+    }
+
+    it should "report NoneFits when servers carry the selector but none has the memory" in withStore {
+      h =>
+        val s = h.store
+        s.recordHeartbeat(hb("small", memoryBytes = Some(8L << 30)).copy(labels = Some(ssd)))
+        s.recordHeartbeat(hb("big", memoryBytes = Some(128L << 30))) // fits, but no label
+        s.claim(assignment("n1"), 30, Some(64L << 30), ssd) shouldBe Left(ClaimMiss.NoneFits)
+        s.claim(assignment("n1"), 30, None, ssd).map(_.name) shouldBe Right("small")
+        s.claim(assignment("n2"), 30, None).map(_.name) shouldBe Right("big")
+        // Nothing free at all: NoneFree, whatever the selector.
+        s.claim(assignment("n3"), 30, None, ssd) shouldBe Left(ClaimMiss.NoneFree)
+    }
+
+    it should "prefer the plain server for an unconstrained claim even when a labeled one joined first" in withStore {
+      h =>
+        val s = h.store
+        s.recordHeartbeat(hb("big").copy(labels = Some(Map("tier" -> "highmem"))))
+        h.backdate("big", 1) // joined first
+        s.recordHeartbeat(hb("plain"))
+        s.claim(assignment("n1"), 30, None).map(_.name) shouldBe Right("plain")
+        s.claim(assignment("n2"), 30, None).map(_.name) shouldBe Right("big")
+    }
+
+    it should "prefer the server with the fewest extra labels for a constrained claim" in withStore {
+      h =>
+        val s = h.store
+        s.recordHeartbeat(hb("a").copy(labels = Some(ssd + ("tier" -> "highmem"))))
+        h.backdate("a", 1) // joined first
+        s.recordHeartbeat(hb("b").copy(labels = Some(ssd)))
+        s.claim(assignment("n1"), 30, None, ssd).map(_.name) shouldBe Right("b")
+    }
+
+    it should "match labels case-sensitively" in withStore { h =>
+      val s = h.store
+      s.recordHeartbeat(hb("upperKey").copy(labels = Some(Map("DiskType" -> "ssd"))))
+      s.recordHeartbeat(hb("upperValue").copy(labels = Some(Map("disktype" -> "SSD"))))
+      s.claim(assignment("n1"), 30, None, ssd) shouldBe Left(ClaimMiss.NoneMatch)
+    }
+
+    it should "claimReplacing rolls back on NoneMatch" in withStore { h =>
+      val s = h.store
+      s.recordHeartbeat(hb("old").copy(labels = Some(ssd)))
+      s.claim(assignment("n1"), 30, None, ssd).map(_.name) shouldBe Right("old")
+      h.backdate("old", 120)         // unreachable holder
+      s.recordHeartbeat(hb("plain")) // free, but without the label
+      s.claimReplacing(assignment("n1"), 30, None, ssd) shouldBe Left(ClaimMiss.NoneMatch)
+      // Rolled back: the old holder keeps its assignment, epoch and claim; plain stays free.
+      val kept = s.get("old").get
+      (kept.assignedNodeId, kept.assignmentEpoch, kept.assignment.map(_.epoch)) shouldBe (
+        Some("n1"),
+        1L,
+        Some(1L)
+      )
+      kept.claimedAt shouldBe defined
+      s.get("plain").get.assignedNodeId shouldBe None
+    }
+
     it should "report claimAgeSeconds from the store clock, None when free" in withStore { h =>
       val s = h.store
       s.recordHeartbeat(hb("a"))

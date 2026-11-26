@@ -145,8 +145,9 @@ final class FleetQuackBackend(
       ).flatMap {
         case Left(miss) =>
           val reason = miss match
-            case ClaimMiss.NoneFree => "none_free"
-            case ClaimMiss.NoneFits => "none_fits"
+            case ClaimMiss.NoneFree  => "none_free"
+            case ClaimMiss.NoneFits  => "none_fits"
+            case ClaimMiss.NoneMatch => "none_match"
           val holderIO =
             IO.blocking(store.byNodeId(spec.nodeId).filterNot(_.unschedulable).map(_.name))
           // A failed listing must not mask the miss itself: the slot stays pending either way.

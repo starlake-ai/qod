@@ -260,9 +260,11 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
     override def claimReplacing(
         a: FleetAssignment,
         reachableWithinSec: Int,
-        requiredMemoryBytes: Option[Long]
+        requiredMemoryBytes: Option[Long],
+        selector: Map[String, String]
     ): Either[ClaimMiss, FleetServerRow] =
-      beforeClaimReplacing(a.nodeId); u.claimReplacing(a, reachableWithinSec, requiredMemoryBytes)
+      beforeClaimReplacing(a.nodeId)
+      u.claimReplacing(a, reachableWithinSec, requiredMemoryBytes, selector)
 
   /** A fake `qod fleet join` process: reports the assignment it holds as running; once unassigned,
     * reports `stopped` under the epoch and node id it last ran, like the real join process.

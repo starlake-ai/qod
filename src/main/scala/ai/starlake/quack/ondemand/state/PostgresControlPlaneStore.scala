@@ -2321,10 +2321,11 @@ final class PostgresControlPlaneStore(
   override def claim(
       a: FleetAssignment,
       reachableWithinSec: Int,
-      requiredMemoryBytes: Option[Long]
+      requiredMemoryBytes: Option[Long],
+      selector: Map[String, String]
   ): Either[ClaimMiss, FleetServerRow] =
     inFleetTx { c =>
-      val result = claimIn(c, a, reachableWithinSec, requiredMemoryBytes)
+      val result = claimIn(c, a, reachableWithinSec, requiredMemoryBytes, selector)
       c.commit()
       result
     }
@@ -2332,15 +2333,17 @@ final class PostgresControlPlaneStore(
   override def claimReplacing(
       a: FleetAssignment,
       reachableWithinSec: Int,
-      requiredMemoryBytes: Option[Long]
+      requiredMemoryBytes: Option[Long],
+      selector: Map[String, String]
   ): Either[ClaimMiss, FleetServerRow] =
     inFleetTx { c =>
       // Release first, inside the transaction: the released holder's row is locked by this
       // transaction (SKIP LOCKED never skips our own locks) and reads as unassigned, so a
       // reachable, schedulable holder is re-claimed in place under a new epoch.
       releaseIn(c, a.nodeId)
-      val result = claimIn(c, a, reachableWithinSec, requiredMemoryBytes)
-      // No replacement: roll back so the old holder keeps its assignment, epoch and claim.
+      val result = claimIn(c, a, reachableWithinSec, requiredMemoryBytes, selector)
+      // No replacement (NoneFree, NoneMatch or NoneFits): roll back so the old holder keeps its
+      // assignment, epoch and claim.
       if result.isLeft then c.rollback() else c.commit()
       result
     }
@@ -2365,20 +2368,36 @@ final class PostgresControlPlaneStore(
       c: Connection,
       a: FleetAssignment,
       reachableWithinSec: Int,
-      requiredMemoryBytes: Option[Long]
+      requiredMemoryBytes: Option[Long],
+      selector: Map[String, String]
   ): Either[ClaimMiss, FleetServerRow] =
-    val pick = c.prepareStatement(
+    // The selector as a jsonb object: `labels @> selector` holds when every pair is present with
+    // the same value (jsonb compares keys and string values exactly, so matching is case
+    // sensitive), and every object contains `{}`, so an empty selector filters nothing. The
+    // jsonb `?` key operator is never used: JDBC would read it as a placeholder.
+    val selectorJson = selector.asJson.noSpaces
+    // Prefer the server with the fewest labels outside the selector's keys, then the oldest join:
+    // an unconstrained claim takes a plain server before a labeled one, which stays free for the
+    // cohort that asks for those labels. `k <> ALL('{}')` is true, so with an empty selector
+    // every label counts.
+    val selectorKeys = c.createArrayOf("text", selector.keys.toArray[AnyRef])
+    val pick         = c.prepareStatement(
       """SELECT s.name, s.assignment_epoch, s.node_port FROM qodstate_fleet_server s
         |JOIN qodstate_fleet_heartbeat h USING (name)
         |WHERE s.approved AND s.assigned_node_id IS NULL AND NOT s.unschedulable
         |  AND h.last_heartbeat_at > now() - make_interval(secs => ?)
         |  AND (? IS NULL OR h.memory_bytes IS NULL OR h.memory_bytes >= ?)
-        |ORDER BY s.joined_at LIMIT 1 FOR UPDATE OF s SKIP LOCKED""".stripMargin
+        |  AND s.labels @> ?::jsonb
+        |ORDER BY (SELECT count(*) FROM jsonb_object_keys(s.labels) k WHERE k <> ALL(?::text[])),
+        |  s.joined_at
+        |LIMIT 1 FOR UPDATE OF s SKIP LOCKED""".stripMargin
     )
     pick.setInt(1, reachableWithinSec)
     requiredMemoryBytes match
       case Some(b) => pick.setLong(2, b); pick.setLong(3, b)
       case None    => pick.setNull(2, Types.BIGINT); pick.setNull(3, Types.BIGINT)
+    pick.setString(4, selectorJson)
+    pick.setArray(5, selectorKeys)
     val rs     = pick.executeQuery()
     val chosen =
       if rs.next() then Some((rs.getString(1), rs.getLong(2), rs.getInt(3))) else None
@@ -2397,27 +2416,38 @@ final class PostgresControlPlaneStore(
         upd.executeUpdate(); upd.close()
         Right(readFleetRow(c, name).get)
       case None =>
-        // Distinguish "nothing free" from "nothing fits". Plain read, no SKIP LOCKED, so rows
-        // a concurrent claim holds locked are counted: if one of them fits it was merely
-        // taken, and the honest answer is NoneFree. NoneFits only when free servers exist and
-        // none of them, locked or not, has the memory.
+        // Distinguish "nothing free" from "nothing matches" from "nothing fits". Plain read, no
+        // SKIP LOCKED, so rows a concurrent claim holds locked are counted: if one of them
+        // matches and fits it was merely taken, and the honest answer is NoneFree. NoneMatch only
+        // when free servers exist and none of them, locked or not, carries the selector; NoneFits
+        // only when some carry it and none of those, locked or not, has the memory. The selector
+        // is judged first: a server without the labels is no candidate whatever its memory.
         val any = c.prepareStatement(
           """SELECT count(*) AS free,
-            |  count(*) FILTER (WHERE ? IS NULL OR h.memory_bytes IS NULL OR h.memory_bytes >= ?)
-            |    AS fitting
+            |  count(*) FILTER (WHERE s.labels @> ?::jsonb) AS matching,
+            |  count(*) FILTER (WHERE s.labels @> ?::jsonb
+            |    AND (? IS NULL OR h.memory_bytes IS NULL OR h.memory_bytes >= ?)) AS fitting
             |FROM qodstate_fleet_server s JOIN qodstate_fleet_heartbeat h USING (name)
             |WHERE s.approved AND s.assigned_node_id IS NULL AND NOT s.unschedulable
             |  AND h.last_heartbeat_at > now() - make_interval(secs => ?)""".stripMargin
         )
+        any.setString(1, selectorJson)
+        any.setString(2, selectorJson)
         requiredMemoryBytes match
-          case Some(b) => any.setLong(1, b); any.setLong(2, b)
-          case None    => any.setNull(1, Types.BIGINT); any.setNull(2, Types.BIGINT)
-        any.setInt(3, reachableWithinSec)
+          case Some(b) => any.setLong(3, b); any.setLong(4, b)
+          case None    => any.setNull(3, Types.BIGINT); any.setNull(4, Types.BIGINT)
+        any.setInt(5, reachableWithinSec)
         val r2 = any.executeQuery()
         r2.next()
-        val (free, fitting) = (r2.getLong("free"), r2.getLong("fitting"))
+        val (free, matching, fitting) =
+          (r2.getLong("free"), r2.getLong("matching"), r2.getLong("fitting"))
         r2.close(); any.close()
-        Left(if free > 0 && fitting == 0 then ClaimMiss.NoneFits else ClaimMiss.NoneFree)
+        Left(
+          if free == 0 then ClaimMiss.NoneFree
+          else if matching == 0 then ClaimMiss.NoneMatch
+          else if fitting == 0 then ClaimMiss.NoneFits
+          else ClaimMiss.NoneFree // a matching, fitting server exists: taken concurrently
+        )
 
   override def setAssignment(name: String, a: FleetAssignment): Unit = withConn { c =>
     val ps =
