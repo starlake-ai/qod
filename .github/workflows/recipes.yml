@@ -33,7 +33,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           repository: starlake-ai/qod-recipe-${{ matrix.recipe }}
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.3.3
       - if: matrix.recipe == 'spark'
         uses: actions/setup-java@v5
         with:
