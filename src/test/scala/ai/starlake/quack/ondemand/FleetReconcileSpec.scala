@@ -485,14 +485,53 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
       fx.sup.pendingCount(fx.key) shouldBe 2
       fx.sup.pendingReason(fx.key) shouldBe Some("none_match")
       fx.sup.pendingDetail(fx.key).get should startWith("needs labels disktype=ssd;")
-      // A plain server joins: the next pass fills one slot and misses the other on a free
-      // server only. The earlier pass's none_match must not outrank this pass's fresh reason.
-      fx.join("plain-2")
+      // An ssd server joins: the next pass refills the ssd slot (as -4, home 1) on it, and the
+      // plain slot -3 then misses on a free server only. The earlier pass's none_match must not
+      // outrank this pass's fresh reason.
+      fx.join("fast", labels = Map("disktype" -> "ssd"))
       fx.sup.reconcile().unsafeRunSync()
-      fx.rowIds.size shouldBe 2
-      fx.inner.get("plain-2").get.assignedNodeId.isDefined shouldBe true
+      fx.rowIds shouldBe List(id(2), id(4))
+      fx.holder(id(4)) shouldBe List("fast")
       fx.sup.pendingCount(fx.key) shouldBe 1
       fx.sup.pendingReason(fx.key) shouldBe Some("none_free")
+    }
+  }
+
+  it should "refill a pending cohort slot only on a server carrying its labels" in {
+    import ai.starlake.quack.model.{NodePlacement, PoolCohort}
+    val fx = new Fx
+    fx.join("plain-1")
+    fx.run {
+      fx.sup
+        .createPool(
+          fx.key,
+          RoleDistribution(0, 0, 3),
+          cohorts = List(
+            PoolCohort(NodePlacement(Map("disktype" -> "ssd")), RoleDistribution(0, 0, 2)),
+            PoolCohort(NodePlacement.empty, RoleDistribution(0, 0, 1))
+          )
+        )
+        .unsafeRunSync()
+      fx.rowIds shouldBe List(id(3))
+      fx.sup.pendingCount(fx.key) shouldBe 2
+      // A plain server frees up: the refilled ids (above -3) must still be ssd slots, so it
+      // stays free and the slots stay pending on labels.
+      fx.join("plain-2")
+      fx.sup.reconcile().unsafeRunSync()
+      fx.inner.get("plain-2").get.assignedNodeId shouldBe None
+      fx.rowIds shouldBe List(id(3))
+      fx.sup.pendingReason(fx.key) shouldBe Some("none_match")
+      // ssd servers join, one per pass: each takes one ssd slot, plain-2 never does.
+      fx.join("ssd-1", labels = Map("disktype" -> "ssd"))
+      fx.sup.reconcile().unsafeRunSync()
+      fx.holder(id(4)) shouldBe List("ssd-1")
+      fx.sup.pendingCount(fx.key) shouldBe 1
+      fx.join("ssd-2", labels = Map("disktype" -> "ssd"))
+      fx.sup.reconcile().unsafeRunSync()
+      fx.holder(id(5)) shouldBe List("ssd-2")
+      fx.rowIds shouldBe List(id(3), id(4), id(5))
+      fx.sup.pendingCount(fx.key) shouldBe 0
+      fx.inner.get("plain-2").get.assignedNodeId shouldBe None
     }
   }
 

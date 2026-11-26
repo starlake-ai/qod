@@ -1971,7 +1971,7 @@ final class PoolSupervisor(
               // pending by a NoFreeServer, or a row genuinely missing on any backend. Skipped when
               // a respawn already found no free server this pass (a second claim would fail too).
               val afterHeal = spawnState.copy(nodes = newNodes)
-              val missing   = MissingSlots.compute(afterHeal.distribution, newNodes)
+              val missing   = missingSlots(key, afterHeal.distribution, newNodes)
               val fillIO: IO[List[RunningNode]] =
                 if missing.isEmpty || afterHeal.suspended || noFree then IO.pure(Nil)
                 else
@@ -2058,27 +2058,41 @@ final class PoolSupervisor(
         }
     }
 
-  /** Cohort placement owning the node at 1-based `index` in the pool's spawn order.
-    * [[NodePlacement.empty]] when there are no explicit cohorts or the index is out of range. Used
-    * to respawn a dead node onto the same K8s nodeSelector as the original.
+  /** The pool's creation layout ([[MissingSlots.layoutOf]]) when it has explicit cohorts, else
+    * None. Read from the poolRows cache, as every cohort plan is.
+    */
+  private def cohortLayout(key: PoolKey): Option[List[(Role, NodePlacement)]] =
+    poolIdByKey
+      .get(key)
+      .flatMap(poolRows.get)
+      .filter(_.cohorts.nonEmpty)
+      .map(p => MissingSlots.layoutOf(p.cohorts))
+
+  /** Slots reconcile fills for `present` to reach `dist`. A pool with cohorts refills by layout
+    * position ([[MissingSlots.computeInLayout]]): a refilled id runs above the high-water mark, and
+    * counting by role alone would number it past the layout, where it has no cohort and so no
+    * placement (a pending ssd slot landing on any fleet server). A layout whose size disagrees with
+    * `dist` (a lagging cache, as in [[spawnFromDistribution]]) falls back to the flat count, which
+    * a pool without cohorts always uses.
+    */
+  private def missingSlots(
+      key: PoolKey,
+      dist: RoleDistribution,
+      present: List[RunningNode]
+  ): List[(Int, Role)] =
+    cohortLayout(key).filter(_.size == dist.total) match
+      case Some(layout) => MissingSlots.computeInLayout(layout, present)
+      case None         => MissingSlots.compute(dist, present)
+
+  /** Cohort placement owning the node at 1-based `index`: its home position's in the pool's
+    * creation layout ([[MissingSlots.placementAt]]), so a refilled id above the layout keeps its
+    * cohort. [[NodePlacement.empty]] when there are no explicit cohorts or the id has no index.
+    * Used to respawn a dead node onto the same nodeSelector as the original, and by the refill.
     */
   private def placementForNodeId(key: PoolKey, nodeId: String): NodePlacement =
-    val maybeIdx        = nodeId.split('-').lastOption.flatMap(_.toIntOption)
-    val maybePoolEntity = poolIdByKey.get(key).flatMap(poolRows.get)
-    (maybeIdx, maybePoolEntity) match
-      case (Some(i), Some(p)) if p.cohorts.nonEmpty =>
-        var remaining            = i
-        var found: NodePlacement = NodePlacement.empty
-        val it                   = p.cohorts.iterator
-        while remaining > 0 && it.hasNext do
-          val c    = it.next()
-          val size = c.distribution.total
-          if remaining <= size then
-            found = c.placement
-            remaining = 0
-          else remaining -= size
-        found
-      case _ => NodePlacement.empty
+    (nodeId.split('-').lastOption.flatMap(_.toIntOption), cohortLayout(key)) match
+      case (Some(i), Some(layout)) => MissingSlots.placementAt(layout, i)
+      case _                       => NodePlacement.empty
 
   /** True while `n` is inside its startup window ([[nodeStartupGrace]] from `startedAt`): its
     * verified process may not listen yet, and reconcile must not respawn it. Judged without a
