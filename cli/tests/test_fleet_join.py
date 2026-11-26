@@ -129,6 +129,40 @@ def test_heartbeat_carries_identity_capacity_and_no_node_initially(tmp_path):
     assert body["node"] == {"assignmentEpoch": 0, "nodeId": None, "state": "none", "pid": None, "error": None, "startedAt": None, "action": None}
 
 
+def test_heartbeat_carries_labels(tmp_path):
+    http = FakeHttp([FakeResponse(200, {"heartbeatSec": 5, "assignment": None})])
+    make_member(http, lambda *a, **k: FakeProc(), tmp_path, labels={"disktype": "ssd"}).run_once()
+    assert http.requests[0][1]["labels"] == {"disktype": "ssd"}
+
+
+def test_heartbeat_labels_default_to_empty(tmp_path):
+    http = FakeHttp([FakeResponse(200, {"heartbeatSec": 5, "assignment": None})])
+    make_member(http, lambda *a, **k: FakeProc(), tmp_path).run_once()
+    assert http.requests[0][1]["labels"] == {}
+
+
+def test_join_rejects_a_bad_label_before_provisioning(monkeypatch):
+    from typer.testing import CliRunner
+    from qod_cli.main import app
+    from qod_cli import launcher
+    def boom(*a, **k):
+        raise AssertionError("provisioning started")
+    monkeypatch.setattr(launcher, "materialize_spawn_scripts", boom)
+    monkeypatch.delenv("QOD_FLEET_LABELS", raising=False)
+    out = CliRunner().invoke(app, ["fleet", "join", "--manager", "https://m", "--join-token", "t", "--label", "-bad=x"])
+    assert out.exit_code == 2
+    assert "invalid --label" in out.output
+
+
+def test_join_rejects_a_bad_env_label(monkeypatch):
+    from typer.testing import CliRunner
+    from qod_cli.main import app
+    monkeypatch.setenv("QOD_FLEET_LABELS", "nokey")
+    out = CliRunner().invoke(app, ["fleet", "join", "--manager", "https://m", "--join-token", "t"])
+    assert out.exit_code == 2
+    assert "invalid --label/QOD_FLEET_LABELS" in out.output
+
+
 def test_assignment_starts_node_with_spawn_contract_and_reports_running(tmp_path):
     procs = []
     def popen(cmd, env=None, **kw):
