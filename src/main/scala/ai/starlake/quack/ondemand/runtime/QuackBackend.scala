@@ -15,10 +15,11 @@ trait QuackBackend:
   def cleanup(): IO[Unit]
 
   /** True when this backend can honor
-    * [[ai.starlake.quack.model.NodeSpec.placement NodeSpec.placement]] (K8s pod scheduling hints).
-    * The local backend has nowhere to put a node label and ignores placement entirely; the
-    * supervisor drops cohort data on create when this is false so the persisted pool row matches
-    * what was actually scheduled.
+    * [[ai.starlake.quack.model.NodeSpec.placement NodeSpec.placement]]: Kubernetes schedules pods
+    * by it, the fleet claims a server whose labels carry the nodeSelector. The local backend has
+    * nowhere to put a node label and ignores placement entirely. Either way the supervisor persists
+    * cohorts as authored (so a pool exported from here replays with its placement intact); when
+    * this is false it only logs, on create, that they will be ignored at runtime.
     */
   def supportsPlacement: Boolean = false
 

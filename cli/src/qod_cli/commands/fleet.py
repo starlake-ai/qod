@@ -1,3 +1,4 @@
+import os
 import signal
 import socket
 import sys
@@ -6,6 +7,7 @@ from pathlib import Path
 import typer
 
 from .. import launcher, qod_node
+from ..fleet_labels import labels_from
 from ..fleet_join import FleetMember, default_advertise_host
 from ..registry import covers
 from ._run import call
@@ -27,6 +29,7 @@ def join(
     spill_dir: Path = typer.Option(None, "--spill-dir", envvar="QOD_FLEET_SPILL_DIR", help="This server's own spill directory (/duckdb-tmp in the image): spill folders a previous node left there are removed at start. Only for a directory no other server shares."),
     state_dir: Path = typer.Option(None, "--state-dir", help="Where the node pidfile and the last heartbeat live; default: the qod cache."),
     insecure: bool = typer.Option(False, "--insecure", help="Allow a plain http:// manager URL (it does not relax TLS checks on https://)."),
+    label: list[str] = typer.Option(None, "--label", help="Server label key=value, repeatable (--label disktype=ssd); a cohort nodeSelector places nodes on matching servers. QOD_FLEET_LABELS (comma-separated) is used when no --label is given."),
 ):
     """Join this machine to a quack-on-demand fleet and keep running (Linux, macOS).
 
@@ -34,6 +37,11 @@ def join(
     (run it under systemd or launchd)."""
     if sys.platform == "win32":
         typer.echo("qod fleet join is not available on Windows yet", err=True)
+        raise typer.Exit(2)
+    try:
+        labels = labels_from(label, os.environ.get("QOD_FLEET_LABELS"))
+    except ValueError as e:
+        typer.echo(f"invalid --label/QOD_FLEET_LABELS: {e}", err=True)
         raise typer.Exit(2)
     cache = launcher.default_cache_dir()
     # A pre-installed script and qod-node (the image's QOD_SPAWN_SCRIPT and QOD_NODE_BIN) leave the
@@ -57,7 +65,7 @@ def join(
     runner = FleetMember(manager, join_token, name=name, advertise_host=adv, bind_host=bind_host or adv,
                          node_port=node_port, spawn_script=spawn_sh, node_bin=exe,
                          state_dir=state_dir or cache / "agent", insecure=insecure, duckdb_version=version,
-                         spill_dir=spill_dir)
+                         spill_dir=spill_dir, labels=labels)
 
     # SIGTERM (systemd stop, kill) must unwind through run_forever's finally so the node, which
     # lives in its own session, is stopped with this process rather than left behind.

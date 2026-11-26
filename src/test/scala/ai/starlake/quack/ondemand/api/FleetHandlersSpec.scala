@@ -66,7 +66,33 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       FleetNodeReportDto(0, None, "none", None, None, None)
     )
 
-  "heartbeat" should "401 on a wrong or missing token" in {
+  "heartbeat" should "400 invalid labels and write nothing" in {
+    val (store, h) = fixture()
+    val r          = h
+      .heartbeat(req().copy(labels = Some(Map("-bad" -> "x"))), Some("secret"), loopback, None)
+      .unsafeRunSync()
+    r.left.map(e => (e._1, e._2.error)) shouldBe Left((StatusCode.BadRequest, "invalid_labels"))
+    // The on-server fix comes first; upgrading qod stays an alternative (a version skew).
+    val actions = r.left.toOption.get._2.actions.get
+    actions.map(_.where) shouldBe List("server", "server")
+    actions.head.command should include("--label / QOD_FLEET_LABELS")
+    actions(1).command should include("upgrade qod")
+    store.get("srv-1") shouldBe None
+  }
+
+  it should "pass labels through to the store" in {
+    val (store, h) = fixture()
+    h.heartbeat(
+      req().copy(labels = Some(Map("disktype" -> "ssd"))),
+      Some("secret"),
+      loopback,
+      None
+    ).unsafeRunSync()
+      .isRight shouldBe true
+    store.get("srv-1").get.labels shouldBe Map("disktype" -> "ssd")
+  }
+
+  it should "401 on a wrong or missing token" in {
     val (_, h) = fixture()
     h.heartbeat(req(), Some("nope"), loopback, None)
       .unsafeRunSync()
@@ -314,12 +340,14 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       def claim(
           assignment: FleetAssignment,
           reachableWithinSec: Int,
-          requiredMemoryBytes: Option[Long]
+          requiredMemoryBytes: Option[Long],
+          selector: Map[String, String]
       ): Either[ClaimMiss, FleetServerRow] = Left(ClaimMiss.NoneFree)
       def claimReplacing(
           assignment: FleetAssignment,
           reachableWithinSec: Int,
-          requiredMemoryBytes: Option[Long]
+          requiredMemoryBytes: Option[Long],
+          selector: Map[String, String]
       ): Either[ClaimMiss, FleetServerRow] = Left(ClaimMiss.NoneFree)
       def setAssignment(name: String, a: FleetAssignment): Unit   = ()
       def release(nodeId: String): Option[String]                 = None
@@ -899,15 +927,17 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
     def claim(
         assignment: FleetAssignment,
         reachableWithinSec: Int,
-        requiredMemoryBytes: Option[Long]
+        requiredMemoryBytes: Option[Long],
+        selector: Map[String, String]
     ): Either[ClaimMiss, FleetServerRow] =
-      inner.claim(assignment, reachableWithinSec, requiredMemoryBytes)
+      inner.claim(assignment, reachableWithinSec, requiredMemoryBytes, selector)
     def claimReplacing(
         assignment: FleetAssignment,
         reachableWithinSec: Int,
-        requiredMemoryBytes: Option[Long]
+        requiredMemoryBytes: Option[Long],
+        selector: Map[String, String]
     ): Either[ClaimMiss, FleetServerRow] =
-      inner.claimReplacing(assignment, reachableWithinSec, requiredMemoryBytes)
+      inner.claimReplacing(assignment, reachableWithinSec, requiredMemoryBytes, selector)
     def setAssignment(name: String, a: FleetAssignment): Unit = inner.setAssignment(name, a)
     def release(nodeId: String): Option[String]               =
       released += nodeId

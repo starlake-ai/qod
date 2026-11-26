@@ -92,7 +92,8 @@ final class InMemoryFleetServerStore(clock: () => Instant = () => Instant.now())
             approvedBy = Option.when(hb.autoApprove)("auto"),
             sourceAddr = hb.sourceAddr,
             approvedSource = if hb.autoApprove then hb.sourceAddr else None,
-            nodeAction = hb.node.action
+            nodeAction = hb.node.action,
+            labels = hb.labels.getOrElse(Map.empty)
           )
         )
         HeartbeatOutcome.Joined
@@ -139,6 +140,7 @@ final class InMemoryFleetServerStore(clock: () => Instant = () => Instant.now())
             nodePid = hb.node.pid,
             nodeStartedAt = hb.node.startedAt,
             nodeAction = hb.node.action,
+            labels = hb.labels.getOrElse(r.labels),
             approved = keepsApproval || hb.autoApprove,
             approvedAt = if keepsApproval then r.approvedAt else Option.when(hb.autoApprove)(now),
             approvedBy =
@@ -169,7 +171,8 @@ final class InMemoryFleetServerStore(clock: () => Instant = () => Instant.now())
   def claim(
       a: FleetAssignment,
       reachableWithinSec: Int,
-      requiredMemoryBytes: Option[Long]
+      requiredMemoryBytes: Option[Long],
+      selector: Map[String, String]
   ): Either[ClaimMiss, FleetServerRow] =
     synchronized {
       val now  = clock()
@@ -179,11 +182,15 @@ final class InMemoryFleetServerStore(clock: () => Instant = () => Instant.now())
             Duration.between(r.lastHeartbeatAt, now).getSeconds < reachableWithinSec
         )
         .toList
-      val fit =
-        free.filter(r => requiredMemoryBytes.forall(need => r.memoryBytes.forall(_ >= need)))
-      fit.sortBy(_.joinedAt).headOption match
-        case None if free.isEmpty => Left(ClaimMiss.NoneFree)
-        case None                 => Left(ClaimMiss.NoneFits)
+      // Mirrors Postgres: labels @> selector (exact pairs), then fewest labels outside the
+      // selector's keys, then the oldest join.
+      val matching = free.filter(r => selector.toSet.subsetOf(r.labels.toSet))
+      val fit      =
+        matching.filter(r => requiredMemoryBytes.forall(need => r.memoryBytes.forall(_ >= need)))
+      fit.sortBy(r => ((r.labels.keySet -- selector.keySet).size, r.joinedAt)).headOption match
+        case None if free.isEmpty     => Left(ClaimMiss.NoneFree)
+        case None if matching.isEmpty => Left(ClaimMiss.NoneMatch)
+        case None                     => Left(ClaimMiss.NoneFits)
         case Some(_) if rows.values.exists(_.assignedNodeId.contains(a.nodeId)) =>
           // Mirrors the UNIQUE constraint on qodstate_fleet_server.assigned_node_id.
           throw new java.sql.SQLException(
@@ -204,12 +211,13 @@ final class InMemoryFleetServerStore(clock: () => Instant = () => Instant.now())
   def claimReplacing(
       a: FleetAssignment,
       reachableWithinSec: Int,
-      requiredMemoryBytes: Option[Long]
+      requiredMemoryBytes: Option[Long],
+      selector: Map[String, String]
   ): Either[ClaimMiss, FleetServerRow] =
     synchronized {
       val before = rows.clone()
       release(a.nodeId)
-      val result = claim(a, reachableWithinSec, requiredMemoryBytes)
+      val result = claim(a, reachableWithinSec, requiredMemoryBytes, selector)
       if result.isLeft then
         // Roll back: the old holder keeps its assignment when no replacement exists.
         rows.clear(); rows ++= before

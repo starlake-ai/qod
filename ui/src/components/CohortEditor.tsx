@@ -80,7 +80,7 @@ export default function CohortEditor({ cohorts, onChange }: Props) {
             <label>Dual <input type="number" min={0} value={c.dual} onChange={e => updateCohort(i, { dual: +e.target.value })} style={{ width: 56 }} /></label>
           </div>
           <div style={{ marginTop: 6 }}>
-            <em>nodeSelector (K8s node labels)</em>
+            <em>nodeSelector (Kubernetes node labels or fleet server labels)</em>
             {c.selectors.map((s, j) => {
               const isLast = j === c.selectors.length - 1;
               return (
@@ -135,8 +135,9 @@ export default function CohortEditor({ cohorts, onChange }: Props) {
   );
 }
 
-/** Standard "this won't work outside K8s" warning. Render alongside the
-  * cohort toggle when `placementSupported` is false. */
+/** Standard "placement is ignored on this backend" warning (local processes;
+  * Kubernetes and fleet honor placement). Render alongside the cohort toggle
+  * when `placementSupported` is false. */
 export function PlacementUnsupportedWarning() {
   return (
     <p style={{
@@ -146,10 +147,9 @@ export function PlacementUnsupportedWarning() {
       padding: '6px 10px',
       marginTop: 6,
     }}>
-      This manager is not running on Kubernetes. Placement instructions will be
-      saved with the pool (so they survive a YAML export to a K8s cluster) but
-      ignored at runtime - every node will be spawned by the local backend
-      regardless of nodeSelector.
+      This manager runs nodes as local processes. Placement instructions will be
+      saved with the pool (so they survive a YAML export to a Kubernetes cluster or a fleet) but
+      ignored at runtime.
     </p>
   );
 }

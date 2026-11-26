@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, ApiError, errorMessage } from '../api/client';
 import type { FleetServer } from '../api/types';
+import { sortedLabels } from '../api/fleetLabels';
 import { fmtBytes } from '../format';
 import { poolPath } from '../nav/links';
 
@@ -96,6 +97,7 @@ export default function Servers() {
               <th>Address</th>
               <th>Liveness</th>
               <th>Capacity</th>
+              <th>Labels</th>
               <th>Node</th>
               <th>Pool</th>
               <th>State</th>
@@ -105,10 +107,10 @@ export default function Servers() {
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={9} className="empty">Loading…</td></tr>
+              <tr><td colSpan={10} className="empty">Loading…</td></tr>
             ) : servers.length === 0 ? (
               <tr>
-                <td colSpan={9} className="empty">
+                <td colSpan={10} className="empty">
                   No server has joined yet. Run <code>qod fleet join --manager ...</code> on a server.
                 </td>
               </tr>
@@ -141,6 +143,15 @@ export default function Servers() {
                   </td>
                   <td>
                     {s.cpus != null ? `${s.cpus} cores` : '-'} / {fmtBytes(s.memoryBytes)}
+                  </td>
+                  <td>
+                    {Object.keys(s.labels ?? {}).length === 0 ? (
+                      <span className="subtle">-</span>
+                    ) : (
+                      sortedLabels(s.labels).map(([k, v], i) => (
+                        <code key={k} style={{ marginLeft: i === 0 ? 0 : 6 }}>{k}={v}</code>
+                      ))
+                    )}
                   </td>
                   <td>{s.assignedNodeId ? <code>{s.assignedNodeId}</code> : <span className="subtle">-</span>}</td>
                   <td>

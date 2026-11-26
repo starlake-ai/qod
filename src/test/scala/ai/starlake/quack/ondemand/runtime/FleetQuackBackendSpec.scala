@@ -1,7 +1,7 @@
 package ai.starlake.quack.ondemand.runtime
 
 import ai.starlake.quack.FleetConfig
-import ai.starlake.quack.model.{NodeSpec, PoolKey, Role}
+import ai.starlake.quack.model.{NodePlacement, NodeSpec, NodeToleration, PoolKey, Role}
 import ai.starlake.quack.ondemand.fleet.ServerLiveness
 import ai.starlake.quack.ondemand.runtime.testkit.LogCapture
 import ai.starlake.quack.ondemand.state.{
@@ -46,7 +46,8 @@ class FleetQuackBackendSpec extends AnyFlatSpec with Matchers:
       store: InMemoryFleetServerStore,
       name: String,
       host: String = "10.0.0.1",
-      memoryBytes: Option[Long] = Some(64L << 30)
+      memoryBytes: Option[Long] = Some(64L << 30),
+      labels: Map[String, String] = Map.empty
   ):
     @volatile var reportAs: String = "running"
     // Like the real agent: once unassigned, it keeps reporting `stopped` with the epoch and node
@@ -83,7 +84,8 @@ class FleetQuackBackendSpec extends AnyFlatSpec with Matchers:
           // The handler only auto-approves a known source; an unknown one would leave an
           // unbound approval that the next heartbeat refuses (approval_unbound).
           sourceAddr = Some(host),
-          autoApprove = true
+          autoApprove = true,
+          labels = Some(labels)
         )
       )
 
@@ -261,6 +263,70 @@ class FleetQuackBackendSpec extends AnyFlatSpec with Matchers:
         "needs 8.0 GiB; the largest free server (small) reports 0.5 GiB: add a server with " +
           "more memory or lower the pool's memory request"
       )
+  }
+
+  "supportsPlacement" should "be on: a cohort nodeSelector steers the claim" in {
+    val (_, backend, _, _) = fixture()
+    backend.supportsPlacement shouldBe true
+  }
+
+  "start (placement)" should "claim only a server that carries the cohort's nodeSelector" in {
+    val (store, backend, _, _) = fixture()
+    // The plain server joined first and has fewer labels: without the selector it would win.
+    val plain = new FakeAgent(store, "plain"); plain.beat()
+    val ssd   = new FakeAgent(store, "ssd", labels = Map("disktype" -> "ssd")); ssd.beat()
+    val n     = withAgent(ssd)(
+      backend.start(spec("n1").copy(placement = NodePlacement(Map("disktype" -> "ssd"))))
+    )
+    n.serverName shouldBe Some("ssd")
+    store.get("plain").get.assignedNodeId shouldBe None
+  }
+
+  it should "raise NoFreeServer with none_match when no free server carries the selector" in {
+    val (store, backend, _, _) = fixture()
+    val plain = new FakeAgent(store, "plain", labels = Map("tier" -> "highmem")); plain.beat()
+    // Bounded: a claim that ignored the selector would take `plain` and wait on a clock no
+    // agent moves.
+    val miss = the[NoFreeServer] thrownBy backend
+      .start(spec("n1").copy(placement = NodePlacement(Map("disktype" -> "ssd"))))
+      .timeout(10.seconds)
+      .unsafeRunSync()
+    miss.reason shouldBe "none_match"
+    miss.detail shouldBe Some(
+      "needs labels disktype=ssd; no free server has them (free: plain [tier=highmem]): run " +
+        "qod fleet join --label disktype=ssd on a server, or restart a free one with that label"
+    )
+    store.get("plain").get.assignedNodeId shouldBe None
+  }
+
+  // Review Focus 5: a pool exported from Kubernetes with tolerations and no nodeSelector runs on
+  // any fleet server, with one WARN per pool, never a refusal.
+  it should "ignore tolerations, warning once per pool" in {
+    val (store, backend, _, _) = fixture()
+    val a1                     = new FakeAgent(store, "srv-1"); a1.beat()
+    val a2                     = new FakeAgent(store, "srv-2"); a2.beat()
+    val a3                     = new FakeAgent(store, "srv-3"); a3.beat()
+    val tolerated              = NodePlacement(
+      tolerations = List(
+        NodeToleration("dedicated", "Equal", Some("db"), Some("NoSchedule")),
+        NodeToleration("spot", "Exists")
+      )
+    )
+    val other         = PoolKey("acme", "db", "etl")
+    val (started, ev) = LogCapture.logged(classOf[FleetQuackBackend].getName) {
+      List(
+        withAgent(a1)(backend.start(spec("n1").copy(placement = tolerated))),
+        withAgent(a2)(backend.start(spec("n2").copy(placement = tolerated))),
+        withAgent(a3)(backend.start(spec("n3").copy(poolKey = other, placement = tolerated)))
+      )
+    }
+    started.flatMap(_.serverName) shouldBe List("srv-1", "srv-2", "srv-3")
+    ev.filter(_.getLevel == Level.WARN).map(_.getFormattedMessage) shouldBe List(
+      s"$pk: ignoring 2 toleration(s) of a cohort placement: fleet servers have no taints, " +
+        "only labels a nodeSelector can match",
+      s"$other: ignoring 2 toleration(s) of a cohort placement: fleet servers have no taints, " +
+        "only labels a nodeSelector can match"
+    )
   }
 
   it should "release the claim and raise FleetStartTimeout when the agent never reports running" in {

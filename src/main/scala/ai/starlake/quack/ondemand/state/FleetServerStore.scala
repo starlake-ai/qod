@@ -88,7 +88,9 @@ final case class FleetServerRow(
     // for an approval whose source was unknown (bound by the next heartbeat with a known source).
     approvedSource: Option[String],
     // The suggested fix for the node's failure (`node_action`, Liquibase 0046), from the report.
-    nodeAction: Option[String] = None
+    nodeAction: Option[String] = None,
+    // What the server says about itself (Liquibase 0040), matched against a cohort nodeSelector.
+    labels: Map[String, String] = Map.empty
 )
 
 /** Heartbeat upsert input: everything the join process reports. */
@@ -107,7 +109,9 @@ final case class Heartbeat(
     // The manager's decision for this heartbeat's source (in QOD_FLEET_AUTO_APPROVE). Approves a
     // server that is not approved yet; ignored for an approved one. Required: a default would
     // silently decide approval for the caller.
-    autoApprove: Boolean
+    autoApprove: Boolean,
+    // None leaves the stored labels alone (an older agent); Some replaces them, Some(empty) clears.
+    labels: Option[Map[String, String]] = None
 ):
   // An auto-approval must bind to the source it was judged from; an unbound approval is exactly
   // the dangerous state the join-approval fix exists to prevent.
@@ -136,8 +140,9 @@ enum ApproveResult:
 
 /** Why a claim found nothing. */
 enum ClaimMiss:
-  case NoneFree // no reachable, schedulable, unassigned server
-  case NoneFits // some free, none with memory_bytes >= the requested memory
+  case NoneFree  // no reachable, schedulable, unassigned server
+  case NoneFits  // some free, none with memory_bytes >= the requested memory
+  case NoneMatch // some free, none whose labels contain the selector
 
 trait FleetServerStore:
   /** First contact inserts the server row (joined_at from the DB clock). Every call upserts the
@@ -170,15 +175,23 @@ trait FleetServerStore:
 
   /** Atomically claim one free server: approved, unassigned, schedulable, heartbeat within
     * `reachableWithinSec` of the DB clock, and (when `requiredMemoryBytes` is set) either no
-    * reported capacity or capacity >= the requirement; oldest join first. Writes the assignment
-    * with a bumped epoch, the server's own node_port and claimed_at = now(); `assignment.epoch` and
-    * `assignment.port` in the argument are ignored. Only the server row is locked (FOR UPDATE OF s
-    * SKIP LOCKED); heartbeats never block it.
+    * reported capacity or capacity >= the requirement, and whose labels contain every pair of
+    * `selector` (exact, case-sensitive key and value; an empty selector matches every server).
+    * Among those, the server with the fewest labels outside the selector's keys comes first, then
+    * the oldest join: a plain server goes to an unconstrained claim before a labeled one, which is
+    * kept for the cohort that asks for its labels. Writes the assignment with a bumped epoch, the
+    * server's own node_port and claimed_at = now(); `assignment.epoch` and `assignment.port` in the
+    * argument are ignored. Only the server row is locked (FOR UPDATE OF s SKIP LOCKED); heartbeats
+    * never block it.
+    *
+    * A miss is `NoneFree` when nothing is free, else `NoneMatch` when no free server carries the
+    * selector, else `NoneFits` when none of the matching ones has the memory.
     */
   def claim(
       assignment: FleetAssignment,
       reachableWithinSec: Int,
-      requiredMemoryBytes: Option[Long]
+      requiredMemoryBytes: Option[Long],
+      selector: Map[String, String] = Map.empty
   ): Either[ClaimMiss, FleetServerRow]
 
   /** [[claim]] for a node id a server may still hold, in ONE transaction: release any current
@@ -192,7 +205,8 @@ trait FleetServerStore:
   def claimReplacing(
       assignment: FleetAssignment,
       reachableWithinSec: Int,
-      requiredMemoryBytes: Option[Long]
+      requiredMemoryBytes: Option[Long],
+      selector: Map[String, String] = Map.empty
   ): Either[ClaimMiss, FleetServerRow]
 
   /** Rewrite the assignment JSON in place (no epoch change). */

@@ -2,7 +2,7 @@ package ai.starlake.quack.ondemand.api
 
 import ai.starlake.quack.FleetConfig
 import ai.starlake.quack.ondemand.auth.SessionScope
-import ai.starlake.quack.ondemand.fleet.{Cidr, ClientAddress, ServerLiveness}
+import ai.starlake.quack.ondemand.fleet.{Cidr, ClientAddress, FleetLabels, ServerLiveness}
 import ai.starlake.quack.ondemand.ha.StateChangePublisher
 import ai.starlake.quack.ondemand.runtime.{FleetQuackBackend, NodeSecretFiles}
 import ai.starlake.quack.ondemand.state.{
@@ -93,7 +93,8 @@ final class FleetHandlers(
       peer: Option[InetAddress],
       forwardedFor: Option[String]
   ): Out[FleetHeartbeatResponse] =
-    val startedAt = req.node.startedAt.map(s => Try(Instant.parse(s)).toOption)
+    val startedAt    = req.node.startedAt.map(s => Try(Instant.parse(s)).toOption)
+    val labelProblem = req.labels.flatMap(FleetLabels.validate(_).left.toOption)
     // Not a fleet manager: no server rows may be written, whoever the caller (on a local or K8s
     // manager the route sits behind the API-key guard, so any admitted caller reaches it).
     if backend.isEmpty then IO.pure(Left(disabled))
@@ -102,6 +103,7 @@ final class FleetHandlers(
       IO.pure(Left(FleetErrors.invalidNodeState(req.node.state)))
     else if startedAt.contains(None) then
       IO.pure(Left(FleetErrors.invalidStartedAt(req.node.startedAt.getOrElse(""))))
+    else if labelProblem.isDefined then IO.pure(Left(FleetErrors.invalidLabels(labelProblem.get)))
     else
       val report = NodeReport(
         req.node.assignmentEpoch,
@@ -125,7 +127,8 @@ final class FleetHandlers(
         req.memoryBytes,
         report,
         sourceAddr = source.map(_.getHostAddress),
-        autoApprove = autoOk
+        autoApprove = autoOk,
+        labels = req.labels
       )
       // A refusal writes nothing, so the row read right after it is the one that decided it.
       def refuse(build: Option[FleetServerRow] => FleetErrors.Err): Out[FleetHeartbeatResponse] =
@@ -234,7 +237,8 @@ final class FleetHandlers(
       approvedAt = r.approvedAt.map(_.toString),
       sourceAddr = r.sourceAddr,
       approvedSource = r.approvedSource,
-      nodeAction = r.nodeAction
+      nodeAction = r.nodeAction,
+      labels = r.labels
     )
 
   def listServers(apiKey: Option[String])(

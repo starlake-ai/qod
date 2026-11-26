@@ -23,6 +23,12 @@ class FleetHeartbeatRequestCodecSpec extends AnyFlatSpec with Matchers:
       Right(None)
   }
 
+  it should "decode labels, None when absent" in {
+    decode[FleetHeartbeatRequest](body("")).map(_.labels) shouldBe Right(None)
+    decode[FleetHeartbeatRequest](body(""""labels":{"a":"b"},""")).map(_.labels) shouldBe
+      Right(Some(Map("a" -> "b")))
+  }
+
   "FleetNodeReportDto" should "read action, and default it to None when absent" in {
     decode[FleetNodeReportDto](
       """{"assignmentEpoch":1,"nodeId":"n1","state":"failed","error":"boom","action":"fix it"}"""

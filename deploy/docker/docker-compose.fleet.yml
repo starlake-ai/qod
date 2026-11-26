@@ -103,6 +103,8 @@ services:
       <<: *fleet-worker-env
       QOD_FLEET_NAME: fleet-worker-2
       QOD_FLEET_NODE_PORT: "21902"
+      # A label for cohort placement demos: a cohort with nodeSelector disktype=ssd lands here.
+      QOD_FLEET_LABELS: disktype=ssd
 
 networks:
   fleet-servers: {}

@@ -482,7 +482,8 @@ class FleetMember:
                  http=httpx, popen=subprocess.Popen, sleep: Callable[[float], None] = time.sleep,
                  port_open: Callable[[int], bool] | None = None, clock: Callable[[], float] = time.monotonic,
                  capacity: Callable[[], tuple[int | None, int | None]] = host_capacity,
-                 duckdb_version: str | None = None, spill_dir: Path | None = None):
+                 duckdb_version: str | None = None, spill_dir: Path | None = None,
+                 labels: dict[str, str] | None = None):
         if manager_url.lower().startswith("http://") and not insecure:
             sys.stderr.write("qod fleet join: refusing a plain http:// manager URL (the assignment carries credentials); pass --insecure to override\n")
             raise SystemExit(2)
@@ -496,6 +497,7 @@ class FleetMember:
         self.node: _Node | None = None
         self.last_report: dict = {"assignmentEpoch": 0, "nodeId": None, "state": "none", "pid": None, "error": None, "startedAt": None, "action": None}
         self.duckdb_version = duckdb_version
+        self.labels = dict(labels or {})
         self.failures = 0
         # None until the first successful heartbeat, then False while heartbeats fail: drives the
         # one-line "connected" / "reconnected" status, never repeated on every heartbeat.
@@ -754,7 +756,8 @@ class FleetMember:
         cpus, mem = self.capacity()
         body = {"name": self.name, "advertiseHost": self.advertise_host, "nodePort": self.node_port,
                 "qodVersion": __version__, "os": f"{sys.platform}-{platform.machine()}",
-                "duckdbVersion": self.duckdb_version, "cpus": cpus, "memoryBytes": mem, "node": self._report()}
+                "duckdbVersion": self.duckdb_version, "cpus": cpus, "memoryBytes": mem, "labels": self.labels,
+                "node": self._report()}
         try:
             r = self.http.post(f"{self.manager_url}/api/fleet/heartbeat", json=body,
                                headers={"X-Fleet-Token": self.join_token}, timeout=10.0)

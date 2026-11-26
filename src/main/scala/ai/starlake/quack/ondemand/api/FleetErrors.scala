@@ -86,6 +86,24 @@ object FleetErrors:
     retryable = true
   )
 
+  /** The CLI checks the same rules before its first heartbeat, so this means a client that is not
+    * qod, or a qod whose label rules differ from the manager's (a version skew either way).
+    */
+  def invalidLabels(problem: String): Err = err(
+    StatusCode.BadRequest,
+    "invalid_labels",
+    problem,
+    Map("problem" -> problem),
+    List(
+      onServer(
+        "restart qod fleet join with valid --label / QOD_FLEET_LABELS values",
+        "the message names the label and the rule it breaks"
+      ),
+      upgradeQod
+    ),
+    retryable = false
+  )
+
   def invalidNodeState(state: String): Err = err(
     StatusCode.BadRequest,
     "invalid_node_state",

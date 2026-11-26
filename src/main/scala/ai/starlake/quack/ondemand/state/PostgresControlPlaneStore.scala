@@ -2087,7 +2087,11 @@ final class PostgresControlPlaneStore(
     // NOTHING and a plain SELECT take no lock on an existing server row; step 2b's approval
     // UPDATE does lock the row, but only while it is still pending (AND NOT approved), and a
     // concurrent claim's FOR UPDATE OF s SKIP LOCKED already ignores pending rows, so it never
-    // skips over one for that reason. A row deleted and committed between our statements (READ
+    // skips over one for that reason. Step 2d's labels UPDATE locks the row (an approved one) only
+    // on a real label change: it is guarded by IS DISTINCT FROM, so a steady-state heartbeat takes
+    // no lock. A claim running inside that short window skips the server once, and its miss reads
+    // as NoneFree (locked rows count as taken) until the next attempt. A row deleted and committed
+    // between our statements (READ
     // COMMITTED: each statement takes a fresh snapshot) shows up as an empty SELECT or an FK
     // violation on the heartbeat insert; either rolls back and retries once, and the retry's
     // INSERT re-creates the row (a re-join).
@@ -2125,14 +2129,15 @@ final class PostgresControlPlaneStore(
   private def heartbeatOnce(c: Connection, hb: Heartbeat): Option[HeartbeatOutcome] =
     // 1. First contact: insert the server row; a no-op for a known name.
     val ins = c.prepareStatement(
-      """INSERT INTO qodstate_fleet_server (name, advertise_host, node_port, approved)
-        |VALUES (?, ?, ?, false) ON CONFLICT (name) DO NOTHING""".stripMargin
+      """INSERT INTO qodstate_fleet_server (name, advertise_host, node_port, approved, labels)
+        |VALUES (?, ?, ?, false, ?::jsonb) ON CONFLICT (name) DO NOTHING""".stripMargin
     )
     val joined =
       try
         ins.setString(1, hb.name)
         ins.setString(2, hb.advertiseHost)
         ins.setInt(3, hb.nodePort)
+        ins.setString(4, hb.labels.getOrElse(Map.empty[String, String]).asJson.noSpaces)
         ins.executeUpdate() == 1
       finally ins.close()
     // 2. Address guard and stale-rule inputs, read from the server row (plain read, no lock).
@@ -2211,6 +2216,21 @@ final class PostgresControlPlaneStore(
             ap.executeUpdate()
             ()
           finally ap.close()
+        // 2d. Labels, on this accept path only (a refusal above writes nothing). The UPDATE takes
+        // the server row lock that claims contend on (FOR UPDATE OF s SKIP LOCKED), so it runs
+        // only when the labels really differ: a plain heartbeat with unchanged labels (the
+        // steady state) stays lock-free. None means the agent does not report labels: keep them.
+        hb.labels.foreach { l =>
+          val json = l.asJson.noSpaces
+          val lu   = c.prepareStatement(
+            """UPDATE qodstate_fleet_server SET labels = ?::jsonb
+              |WHERE name = ? AND labels IS DISTINCT FROM ?::jsonb""".stripMargin
+          )
+          try
+            lu.setString(1, json); lu.setString(2, hb.name); lu.setString(3, json)
+            lu.executeUpdate()
+          finally lu.close()
+        }
         // 3. Heartbeat row: the only row this handler rewrites every interval.
         val up = c.prepareStatement(
           """INSERT INTO qodstate_fleet_heartbeat
@@ -2305,10 +2325,11 @@ final class PostgresControlPlaneStore(
   override def claim(
       a: FleetAssignment,
       reachableWithinSec: Int,
-      requiredMemoryBytes: Option[Long]
+      requiredMemoryBytes: Option[Long],
+      selector: Map[String, String]
   ): Either[ClaimMiss, FleetServerRow] =
     inFleetTx { c =>
-      val result = claimIn(c, a, reachableWithinSec, requiredMemoryBytes)
+      val result = claimIn(c, a, reachableWithinSec, requiredMemoryBytes, selector)
       c.commit()
       result
     }
@@ -2316,15 +2337,17 @@ final class PostgresControlPlaneStore(
   override def claimReplacing(
       a: FleetAssignment,
       reachableWithinSec: Int,
-      requiredMemoryBytes: Option[Long]
+      requiredMemoryBytes: Option[Long],
+      selector: Map[String, String]
   ): Either[ClaimMiss, FleetServerRow] =
     inFleetTx { c =>
       // Release first, inside the transaction: the released holder's row is locked by this
       // transaction (SKIP LOCKED never skips our own locks) and reads as unassigned, so a
       // reachable, schedulable holder is re-claimed in place under a new epoch.
       releaseIn(c, a.nodeId)
-      val result = claimIn(c, a, reachableWithinSec, requiredMemoryBytes)
-      // No replacement: roll back so the old holder keeps its assignment, epoch and claim.
+      val result = claimIn(c, a, reachableWithinSec, requiredMemoryBytes, selector)
+      // No replacement (NoneFree, NoneMatch or NoneFits): roll back so the old holder keeps its
+      // assignment, epoch and claim.
       if result.isLeft then c.rollback() else c.commit()
       result
     }
@@ -2349,20 +2372,36 @@ final class PostgresControlPlaneStore(
       c: Connection,
       a: FleetAssignment,
       reachableWithinSec: Int,
-      requiredMemoryBytes: Option[Long]
+      requiredMemoryBytes: Option[Long],
+      selector: Map[String, String]
   ): Either[ClaimMiss, FleetServerRow] =
-    val pick = c.prepareStatement(
+    // The selector as a jsonb object: `labels @> selector` holds when every pair is present with
+    // the same value (jsonb compares keys and string values exactly, so matching is case
+    // sensitive), and every object contains `{}`, so an empty selector filters nothing. The
+    // jsonb `?` key operator is never used: JDBC would read it as a placeholder.
+    val selectorJson = selector.asJson.noSpaces
+    // Prefer the server with the fewest labels outside the selector's keys, then the oldest join:
+    // an unconstrained claim takes a plain server before a labeled one, which stays free for the
+    // cohort that asks for those labels. `k <> ALL('{}')` is true, so with an empty selector
+    // every label counts.
+    val selectorKeys = c.createArrayOf("text", selector.keys.toArray[AnyRef])
+    val pick         = c.prepareStatement(
       """SELECT s.name, s.assignment_epoch, s.node_port FROM qodstate_fleet_server s
         |JOIN qodstate_fleet_heartbeat h USING (name)
         |WHERE s.approved AND s.assigned_node_id IS NULL AND NOT s.unschedulable
         |  AND h.last_heartbeat_at > now() - make_interval(secs => ?)
         |  AND (? IS NULL OR h.memory_bytes IS NULL OR h.memory_bytes >= ?)
-        |ORDER BY s.joined_at LIMIT 1 FOR UPDATE OF s SKIP LOCKED""".stripMargin
+        |  AND s.labels @> ?::jsonb
+        |ORDER BY (SELECT count(*) FROM jsonb_object_keys(s.labels) k WHERE k <> ALL(?::text[])),
+        |  s.joined_at
+        |LIMIT 1 FOR UPDATE OF s SKIP LOCKED""".stripMargin
     )
     pick.setInt(1, reachableWithinSec)
     requiredMemoryBytes match
       case Some(b) => pick.setLong(2, b); pick.setLong(3, b)
       case None    => pick.setNull(2, Types.BIGINT); pick.setNull(3, Types.BIGINT)
+    pick.setString(4, selectorJson)
+    pick.setArray(5, selectorKeys)
     val rs     = pick.executeQuery()
     val chosen =
       if rs.next() then Some((rs.getString(1), rs.getLong(2), rs.getInt(3))) else None
@@ -2381,27 +2420,38 @@ final class PostgresControlPlaneStore(
         upd.executeUpdate(); upd.close()
         Right(readFleetRow(c, name).get)
       case None =>
-        // Distinguish "nothing free" from "nothing fits". Plain read, no SKIP LOCKED, so rows
-        // a concurrent claim holds locked are counted: if one of them fits it was merely
-        // taken, and the honest answer is NoneFree. NoneFits only when free servers exist and
-        // none of them, locked or not, has the memory.
+        // Distinguish "nothing free" from "nothing matches" from "nothing fits". Plain read, no
+        // SKIP LOCKED, so rows a concurrent claim holds locked are counted: if one of them
+        // matches and fits it was merely taken, and the honest answer is NoneFree. NoneMatch only
+        // when free servers exist and none of them, locked or not, carries the selector; NoneFits
+        // only when some carry it and none of those, locked or not, has the memory. The selector
+        // is judged first: a server without the labels is no candidate whatever its memory.
         val any = c.prepareStatement(
           """SELECT count(*) AS free,
-            |  count(*) FILTER (WHERE ? IS NULL OR h.memory_bytes IS NULL OR h.memory_bytes >= ?)
-            |    AS fitting
+            |  count(*) FILTER (WHERE s.labels @> ?::jsonb) AS matching,
+            |  count(*) FILTER (WHERE s.labels @> ?::jsonb
+            |    AND (? IS NULL OR h.memory_bytes IS NULL OR h.memory_bytes >= ?)) AS fitting
             |FROM qodstate_fleet_server s JOIN qodstate_fleet_heartbeat h USING (name)
             |WHERE s.approved AND s.assigned_node_id IS NULL AND NOT s.unschedulable
             |  AND h.last_heartbeat_at > now() - make_interval(secs => ?)""".stripMargin
         )
+        any.setString(1, selectorJson)
+        any.setString(2, selectorJson)
         requiredMemoryBytes match
-          case Some(b) => any.setLong(1, b); any.setLong(2, b)
-          case None    => any.setNull(1, Types.BIGINT); any.setNull(2, Types.BIGINT)
-        any.setInt(3, reachableWithinSec)
+          case Some(b) => any.setLong(3, b); any.setLong(4, b)
+          case None    => any.setNull(3, Types.BIGINT); any.setNull(4, Types.BIGINT)
+        any.setInt(5, reachableWithinSec)
         val r2 = any.executeQuery()
         r2.next()
-        val (free, fitting) = (r2.getLong("free"), r2.getLong("fitting"))
+        val (free, matching, fitting) =
+          (r2.getLong("free"), r2.getLong("matching"), r2.getLong("fitting"))
         r2.close(); any.close()
-        Left(if free > 0 && fitting == 0 then ClaimMiss.NoneFits else ClaimMiss.NoneFree)
+        Left(
+          if free == 0 then ClaimMiss.NoneFree
+          else if matching == 0 then ClaimMiss.NoneMatch
+          else if fitting == 0 then ClaimMiss.NoneFits
+          else ClaimMiss.NoneFree // a matching, fitting server exists: taken concurrently
+        )
 
   override def setAssignment(name: String, a: FleetAssignment): Unit = withConn { c =>
     val ps =
@@ -2495,7 +2545,8 @@ final class PostgresControlPlaneStore(
   private val FleetSelect =
     """SELECT s.name, s.advertise_host, s.node_port, s.joined_at, s.unschedulable, s.assigned_node_id,
       |  s.assignment::text AS assignment, s.assignment_epoch, s.claimed_at,
-      |  s.approved, s.approved_at, s.approved_by, s.approved_source, h.source_addr,
+      |  s.approved, s.approved_at, s.approved_by, s.approved_source, s.labels::text AS labels,
+      |  h.source_addr,
       |  EXTRACT(EPOCH FROM now() - s.claimed_at)::bigint AS claim_age_seconds,
       |  h.last_heartbeat_at, EXTRACT(EPOCH FROM now() - h.last_heartbeat_at)::bigint AS silent_seconds,
       |  h.qod_version, h.os, h.duckdb_version, h.cpus, h.memory_bytes,
@@ -2544,8 +2595,28 @@ final class PostgresControlPlaneStore(
       approvedBy = Option(rs.getString("approved_by")),
       sourceAddr = Option(rs.getString("source_addr")),
       approvedSource = Option(rs.getString("approved_source")),
-      nodeAction = Option(rs.getString("node_action"))
+      nodeAction = Option(rs.getString("node_action")),
+      labels = labelsOf(rs.getString("name"), rs.getString("labels"))
     )
+
+  // Server names already warned about for a labels value this code would not write: one WARN per
+  // name per process, not one per row on every listing.
+  private val warnedLabels = java.util.concurrent.ConcurrentHashMap.newKeySet[String]()
+
+  /** The labels column, read leniently. Only this code writes it (a string-to-string object), but a
+    * hand edit (`{"gpus": 2}`) must not fail every listing and every claim's row read: string
+    * values are kept, anything else is skipped with one WARN per server name.
+    */
+  private def labelsOf(name: String, raw: String): Map[String, String] =
+    val obj  = io.circe.parser.parse(raw).toOption.flatMap(_.asObject)
+    val kept =
+      obj.fold(Map.empty[String, String])(_.toMap.flatMap((k, v) => v.asString.map(k -> _)))
+    if obj.forall(_.size != kept.size) && warnedLabels.add(name) then
+      logger.warn(
+        s"fleet server '$name': labels $raw hold values that are not strings; skipping them " +
+          "(its next heartbeat rewrites them when its qod fleet join reports labels)"
+      )
+    kept
 
   // ---------------- helpers ----------------
 

@@ -254,7 +254,7 @@ export default function PoolSection({ tenant }: { tenant: string }) {
                       style={{ marginLeft: 6 }}
                       title={p.pendingDetail ?? p.pendingReason ?? ''}
                     >
-                      {p.pending} pending{p.pendingReason === 'none_fits' ? ' (no server fits)' : ''}
+                      {p.pending} pending{p.pendingReason === 'none_fits' ? ' (no server fits)' : p.pendingReason === 'none_match' ? ' (no server has the labels)' : ''}
                     </span>
                   )}
                 </td>
@@ -308,7 +308,7 @@ export default function PoolSection({ tenant }: { tenant: string }) {
                     checked={useCohorts}
                     onChange={ev => setUseCohorts(ev.target.checked)}
                   />{' '}
-                  Pin nodes to Kubernetes node labels (cohorts)
+                  Pin nodes to node labels (cohorts)
                 </label>
                 {useCohorts && !placementSupported && <PlacementUnsupportedWarning />}
               </fieldset>

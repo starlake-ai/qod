@@ -18,6 +18,19 @@
 
 ### Upgrading
 
+- **Fleet pools created with cohorts now honour them: label your servers before upgrading.** Until
+  now a fleet pool ignored its cohorts' `nodeSelector`. After this release a cohort's new nodes
+  only go on servers whose labels contain the selector, so a node that restarts or is refilled
+  while no free server carries the labels goes pending with reason `none_match`. Running nodes are
+  not moved. Start each server with `qod fleet join --label key=value` (or `QOD_FLEET_LABELS`)
+  before upgrading the manager. Pools without cohorts, and maintenance and merge nodes, prefer
+  servers with no labels the selector did not ask for, and only use a labeled one when no plainer
+  server is free: a preference, not a reservation.
+- **A cohort node refilled before this release may restart in another cohort.** Such a node got an
+  id numbered by role alone, past the pool's layout. Its cohort now comes from its id (index modulo
+  the layout size), which can differ from the cohort it was refilled for, so when it restarts it
+  may go pending with `none_match` or take a server of that other cohort, for as long as the id
+  lives. Only pools whose cohort slots were refilled before the upgrade have such ids.
 - **Check the boot output for column masks that do not return their column's type.** qod-node
   applies a mask only when its result has exactly its column's type, and refuses every read of
   the column otherwise (`QoD: column mask cannot be applied safely with its original column
@@ -25,8 +38,33 @@
   database, naming the tenant, the role, the policy id, the column, the mask's type and the
   column's, never the mask. Rewrite each with the `TRY_CAST` form below, or use `NULL` or a deny.
 
+### Added
+
+- **Fleet servers carry labels, and a cohort's `nodeSelector` places nodes on them.**
+  `qod fleet join --label key=value` (repeatable) or `QOD_FLEET_LABELS=key=value,key2=value2`
+  (ignored when any `--label` is given) declares a server's labels, under the Kubernetes label
+  rules and at most 64. An invalid set makes `qod fleet join` exit 2 at start, and the manager
+  refuses it with `400 invalid_labels`. Labels ride every heartbeat and are stored in
+  `qodstate_fleet_server.labels` (no migration); a heartbeat with unchanged labels writes nothing
+  and takes no row lock, and an older join that sends none leaves the stored labels alone. A claim
+  for a cohort node picks only servers whose labels contain the whole selector (exact,
+  case-sensitive), preferring the one with the fewest other labels, then the oldest. When no free
+  server carries the labels the pool is pending with the new reason `none_match` (`needs labels
+  ...; no free server has them ...`); per pool the precedence is `none_match`, `none_fits`, then
+  `none_free`. Tolerations mean nothing on a fleet and are ignored, with one WARN per pool.
+  Labels are read when `qod fleet join` starts: changing them means restarting it, which restarts
+  the node the server runs, and the node may come back on another server. Drain the server first
+  (`qod fleet drain <name>`), restart the join with the new labels, then
+  `qod fleet undrain <name>`; the new labels apply to later claims. `qod fleet servers` and
+  `GET /api/fleet/servers` show `labels`, the UI Servers page has a Labels column, and the UI's
+  placement wording now covers Kubernetes and fleet. Labels are declared by whoever holds the join
+  token: they steer placement and are not an isolation boundary.
+
 ### Fixed
 
+- **A refilled cohort slot keeps its cohort on every backend.** A slot's cohort is its position in
+  the creation layout (index modulo the layout size). On Kubernetes a refilled cohort slot lost its
+  placement (node selector and tolerations) and could start on any node.
 - **A column mask can be written for a column that is neither text nor DOUBLE.** The allowed mask
   forms produced only text or DOUBLE results, and refused every cast to another type, while
   qod-node refuses a mask whose result does not have its column's type: on an `INTEGER`, `DATE` or

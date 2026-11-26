@@ -33,10 +33,13 @@ class FleetReconcileSpec extends AnyFlatSpec with Matchers:
     // The explanation a miss carries (NoFreeServer.detail).
     @volatile var missDetail: Option[String] = None
     // When set, `start` raises this instead of claiming (a non-NoFreeServer failure).
-    @volatile var failWith: Option[Throwable]  = None
+    @volatile var failWith: Option[Throwable] = None
+    // Node ids whose start raises a non-NoFreeServer failure, free server or not.
+    @volatile var failIds: Set[String]         = Set.empty
     val liveIds                                = scala.collection.mutable.Set.empty[String]
     def start(spec: NodeSpec): IO[RunningNode] = IO.defer {
       if failWith.isDefined then IO.raiseError(failWith.get)
+      else if failIds(spec.nodeId) then IO.raiseError(new RuntimeException(s"boom ${spec.nodeId}"))
       else if freeServers <= 0 then
         // A node id this double started is still held by its (possibly dead) server.
         IO.raiseError(
@@ -112,6 +115,20 @@ class FleetReconcileSpec extends AnyFlatSpec with Matchers:
     b.freeServers = 1
     sup.reconcile().unsafeRunSync()
     sup.pendingDetail(key) shouldBe None
+  }
+
+  "spawnAll" should "record a batch's miss even when a later slot fails and rolls it back" in {
+    val (b, sup, _, key) = fixture(); b.freeServers = 1
+    b.missDetail = Some("first")
+    sup.createPool(key, RoleDistribution(0, 0, 3)).unsafeRunSync()
+    sup.pendingDetail(key) shouldBe Some("first")
+    // The next fill: -2 misses (nothing free), then -3 fails otherwise, which fails the batch.
+    // The miss before it still lands, as the per-slot write it replaced did.
+    b.missDetail = Some("second")
+    b.failIds = Set(id(3))
+    sup.reconcile().attempt.unsafeRunSync()
+    sup.pendingCount(key) shouldBe 2
+    sup.pendingDetail(key) shouldBe Some("second")
   }
 
   "reconcile" should "fill pending slots as servers join" in {
@@ -260,9 +277,11 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
     override def claimReplacing(
         a: FleetAssignment,
         reachableWithinSec: Int,
-        requiredMemoryBytes: Option[Long]
+        requiredMemoryBytes: Option[Long],
+        selector: Map[String, String]
     ): Either[ClaimMiss, FleetServerRow] =
-      beforeClaimReplacing(a.nodeId); u.claimReplacing(a, reachableWithinSec, requiredMemoryBytes)
+      beforeClaimReplacing(a.nodeId)
+      u.claimReplacing(a, reachableWithinSec, requiredMemoryBytes, selector)
 
   /** A fake `qod fleet join` process: reports the assignment it holds as running; once unassigned,
     * reports `stopped` under the epoch and node id it last ran, like the real join process.
@@ -271,7 +290,8 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
       store: FleetServerStore,
       val name: String,
       host: String,
-      autoApprove: Boolean
+      autoApprove: Boolean,
+      labels: Map[String, String]
   ):
     @volatile var paused: Boolean = false
     // When set, the agent reports its assignment `failed` instead of `running`.
@@ -306,7 +326,8 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
           None,
           node,
           sourceAddr = Some(host),
-          autoApprove = autoApprove
+          autoApprove = autoApprove,
+          labels = Some(labels)
         )
       )
 
@@ -348,8 +369,12 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
       .unsafeRunSync()
 
     /** Joins a server (one immediate beat, one second apart, so join order is deterministic). */
-    def join(name: String, autoApprove: Boolean = true): Agent =
-      val a = new Agent(store, name, s"10.0.0.${agents.size + 1}", autoApprove)
+    def join(
+        name: String,
+        autoApprove: Boolean = true,
+        labels: Map[String, String] = Map.empty
+    ): Agent =
+      val a = new Agent(store, name, s"10.0.0.${agents.size + 1}", autoApprove, labels)
       agents.put(name, a); clockNow = clockNow.plusSeconds(1); a.beat(); a
 
     /** Every 10ms: one simulated second passes and every unpaused agent beats. */
@@ -435,6 +460,168 @@ class FleetReconcileRealBackendSpec extends AnyFlatSpec with Matchers:
       fx.sup.reconcile().unsafeRunSync()
       fx.rowIds shouldBe List(id(1))
       fx.holder(id(1)) shouldBe List("a")
+    }
+  }
+
+  it should "report the most pressing reason of a batch whose slots miss for different reasons" in {
+    import ai.starlake.quack.model.{NodePlacement, PoolCohort}
+    val fx = new Fx
+    fx.join("plain")
+    fx.run {
+      // Spawn order is cohort order: -1 (ssd) misses on labels while `plain` is free, -2 takes
+      // `plain`, -3 then finds no free server. The last miss (none_free) must not hide the one
+      // only an operator can fix.
+      fx.sup
+        .createPool(
+          fx.key,
+          RoleDistribution(0, 0, 3),
+          cohorts = List(
+            PoolCohort(NodePlacement(Map("disktype" -> "ssd")), RoleDistribution(0, 0, 1)),
+            PoolCohort(NodePlacement.empty, RoleDistribution(0, 0, 2))
+          )
+        )
+        .unsafeRunSync()
+      fx.rowIds shouldBe List(id(2))
+      fx.sup.pendingCount(fx.key) shouldBe 2
+      fx.sup.pendingReason(fx.key) shouldBe Some("none_match")
+      fx.sup.pendingDetail(fx.key).get should startWith("needs labels disktype=ssd;")
+      // An ssd server joins: the next pass refills the ssd slot (as -4, home 1) on it, and the
+      // plain slot -3 then misses on a free server only. The earlier pass's none_match must not
+      // outrank this pass's fresh reason.
+      fx.join("fast", labels = Map("disktype" -> "ssd"))
+      fx.sup.reconcile().unsafeRunSync()
+      fx.rowIds shouldBe List(id(2), id(4))
+      fx.holder(id(4)) shouldBe List("fast")
+      fx.sup.pendingCount(fx.key) shouldBe 1
+      fx.sup.pendingReason(fx.key) shouldBe Some("none_free")
+    }
+  }
+
+  it should "refill a pending cohort slot only on a server carrying its labels" in {
+    import ai.starlake.quack.model.{NodePlacement, PoolCohort}
+    val fx = new Fx
+    fx.join("plain-1")
+    fx.run {
+      fx.sup
+        .createPool(
+          fx.key,
+          RoleDistribution(0, 0, 3),
+          cohorts = List(
+            PoolCohort(NodePlacement(Map("disktype" -> "ssd")), RoleDistribution(0, 0, 2)),
+            PoolCohort(NodePlacement.empty, RoleDistribution(0, 0, 1))
+          )
+        )
+        .unsafeRunSync()
+      fx.rowIds shouldBe List(id(3))
+      fx.sup.pendingCount(fx.key) shouldBe 2
+      // A plain server frees up: the refilled ids (above -3) must still be ssd slots, so it
+      // stays free and the slots stay pending on labels.
+      fx.join("plain-2")
+      fx.sup.reconcile().unsafeRunSync()
+      fx.inner.get("plain-2").get.assignedNodeId shouldBe None
+      fx.rowIds shouldBe List(id(3))
+      fx.sup.pendingReason(fx.key) shouldBe Some("none_match")
+      // ssd servers join, one per pass: each takes one ssd slot, plain-2 never does.
+      fx.join("ssd-1", labels = Map("disktype" -> "ssd"))
+      fx.sup.reconcile().unsafeRunSync()
+      fx.holder(id(4)) shouldBe List("ssd-1")
+      fx.sup.pendingCount(fx.key) shouldBe 1
+      fx.join("ssd-2", labels = Map("disktype" -> "ssd"))
+      fx.sup.reconcile().unsafeRunSync()
+      fx.holder(id(5)) shouldBe List("ssd-2")
+      fx.rowIds shouldBe List(id(3), id(4), id(5))
+      fx.sup.pendingCount(fx.key) shouldBe 0
+      fx.inner.get("plain-2").get.assignedNodeId shouldBe None
+    }
+  }
+
+  it should "fill another cohort's pending slot while a stranded node misses on labels" in {
+    import ai.starlake.quack.model.{NodePlacement, PoolCohort}
+    val fx = new Fx
+    fx.join("ssd", labels = Map("disktype" -> "ssd"))
+    fx.join("plain-1")
+    fx.run {
+      fx.sup
+        .createPool(
+          fx.key,
+          RoleDistribution(0, 0, 3),
+          cohorts = List(
+            PoolCohort(NodePlacement(Map("disktype" -> "ssd")), RoleDistribution(0, 0, 1)),
+            PoolCohort(NodePlacement.empty, RoleDistribution(0, 0, 2))
+          )
+        )
+        .unsafeRunSync()
+      fx.holder(id(1)) shouldBe List("ssd")
+      fx.holder(id(2)) shouldBe List("plain-1")
+      fx.sup.pendingCount(fx.key) shouldBe 1
+      // The ssd server dies with no other ssd server free: -1 is kept on it (stranded). A plain
+      // server joins: the respawn of -1 misses on labels, which says nothing about the plain
+      // slot, so the same pass must fill that slot on plain-2.
+      fx.kill("ssd")
+      fx.join("plain-2")
+      fx.sup.reconcile().unsafeRunSync()
+      fx.holder(id(1)) shouldBe List("ssd")
+      fx.inner.get("plain-2").get.assignedNodeId should not be empty
+      fx.rowIds should have size 3
+      fx.sup.pendingCount(fx.key) shouldBe 0
+      fx.sup.pendingReason(fx.key) shouldBe Some("none_match")
+    }
+  }
+
+  it should "keep a respawn's label miss over a later respawn's free-server miss in one pass" in {
+    import ai.starlake.quack.model.{NodePlacement, PoolCohort}
+    val fx = new Fx
+    fx.join("ssd", labels = Map("disktype" -> "ssd"))
+    fx.join("plain-1"); fx.join("plain-2")
+    fx.run {
+      fx.sup
+        .createPool(
+          fx.key,
+          RoleDistribution(0, 0, 3),
+          cohorts = List(
+            PoolCohort(NodePlacement(Map("disktype" -> "ssd")), RoleDistribution(0, 0, 1)),
+            PoolCohort(NodePlacement.empty, RoleDistribution(0, 0, 2))
+          )
+        )
+        .unsafeRunSync()
+      fx.rowIds should have size 3
+      // Every server dies and one plain server joins. Respawn order is -1, -2, -3: -1 misses on
+      // labels while plain-3 is free, -2 takes plain-3, -3 then finds no free server. The last
+      // miss (none_free) must not hide the label miss.
+      fx.kill("ssd"); fx.kill("plain-1"); fx.kill("plain-2")
+      fx.join("plain-3")
+      fx.sup.reconcile().unsafeRunSync()
+      fx.holder(id(2)) shouldBe List("plain-3")
+      fx.sup.pendingReason(fx.key) shouldBe Some("none_match")
+    }
+  }
+
+  it should "keep a respawn's label miss over the fill's free-server miss in one pass" in {
+    import ai.starlake.quack.model.{NodePlacement, PoolCohort}
+    val fx = new Fx
+    fx.join("ssd", labels = Map("disktype" -> "ssd"))
+    fx.join("plain-1")
+    fx.run {
+      fx.sup
+        .createPool(
+          fx.key,
+          RoleDistribution(0, 0, 4),
+          cohorts = List(
+            PoolCohort(NodePlacement(Map("disktype" -> "ssd")), RoleDistribution(0, 0, 1)),
+            PoolCohort(NodePlacement.empty, RoleDistribution(0, 0, 3))
+          )
+        )
+        .unsafeRunSync()
+      fx.sup.pendingCount(fx.key) shouldBe 2
+      // The ssd server dies and one plain server joins: the respawn of -1 misses on labels, the
+      // fill places one plain slot on plain-2 and the other misses on a free server. The fill's
+      // miss must not overwrite the respawn's.
+      fx.kill("ssd")
+      fx.join("plain-2")
+      fx.sup.reconcile().unsafeRunSync()
+      fx.inner.get("plain-2").get.assignedNodeId should not be empty
+      fx.sup.pendingCount(fx.key) shouldBe 1
+      fx.sup.pendingReason(fx.key) shouldBe Some("none_match")
     }
   }
 

@@ -162,11 +162,12 @@ final case class PoolResponse(
     minNodes: Option[Int] = None,
     maxNodes: Option[Int] = None,
     // Fleet: slots the distribution wants that no node fills yet, and why the last spawn attempt
-    // left them pending ("none_free" | "none_fits"); 0 / None on every other backend. A dead node
-    // kept on its unreachable server because no other is free is a node, not a pending slot: it
-    // does not count in `pending`, but `pendingReason` still says why it was not moved. That
-    // kept-dead record is replica-local too: under HA a follower shows `pending = 0` and no
-    // reason for a pool whose only node sits on a dead server.
+    // left them pending ("none_free" | "none_fits" | "none_match", the most pressing of a batch);
+    // 0 / None on every other backend. A dead node kept on its unreachable server because no
+    // other is free is a node, not a pending slot: it does not count in `pending`, but
+    // `pendingReason` still says why it was not moved. That kept-dead record is replica-local
+    // too: under HA a follower shows `pending = 0` and no reason for a pool whose only node sits
+    // on a dead server.
     // `pendingReason` is replica-local (it explains the last spawn attempt of the replica that
     // answers): under HA a follower may report pending > 0 with pendingReason = None.
     pending: Int = 0,
@@ -349,7 +350,8 @@ final case class FleetHeartbeatRequest(
     duckdbVersion: Option[String],
     cpus: Option[Int],
     memoryBytes: Option[Long],
-    node: FleetNodeReportDto
+    node: FleetNodeReportDto,
+    labels: Option[Map[String, String]] = None
 )
 final case class FleetPoolKeyDto(tenant: String, tenantDb: String, pool: String)
 
@@ -431,9 +433,10 @@ final case class FleetServerDto(
     approval: String,           // approved | pending
     approvedBy: Option[String], // auto | upgrade | the approving admin
     approvedAt: Option[String],
-    sourceAddr: Option[String],       // resolved address of the latest heartbeat
-    approvedSource: Option[String],   // the source an approved server is bound to
-    nodeAction: Option[String] = None // suggested fix for nodeError, from qod fleet join
+    sourceAddr: Option[String],        // resolved address of the latest heartbeat
+    approvedSource: Option[String],    // the source an approved server is bound to
+    nodeAction: Option[String] = None, // suggested fix for nodeError, from qod fleet join
+    labels: Map[String, String] = Map.empty
 )
 final case class FleetServerListResponse(servers: List[FleetServerDto])
 final case class FleetServerOpRequest(name: String)

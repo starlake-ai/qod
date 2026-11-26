@@ -652,15 +652,15 @@ export default function PoolDetailBody({
         <p style={{ color: '#888' }}>
           No placement plan: every node is scheduled wherever the cluster's
           default scheduler chooses (or, in local mode, as a child process).
-          To pin nodes to specific Kubernetes node labels, recreate the pool
-          and tick "Pin nodes to Kubernetes node labels" in the New pool form.
+          To pin nodes to specific node labels, recreate the pool
+          and tick "Pin nodes to node labels (cohorts)" in the New pool form.
         </p>
       ) : (
         <>
           <p style={{ color: '#888', marginTop: 0 }}>
             The pool was created with {data.cohorts.length} cohort
             {data.cohorts.length === 1 ? '' : 's'}. Each cohort's nodes are
-            scheduled only on Kubernetes nodes whose labels match every
+            scheduled only on Kubernetes nodes or fleet servers whose labels match every
             entry in its <code>nodeSelector</code>.
           </p>
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
