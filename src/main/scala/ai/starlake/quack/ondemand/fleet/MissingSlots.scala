@@ -29,19 +29,33 @@ object MissingSlots:
   def layoutOf(cohorts: List[PoolCohort]): List[(Role, NodePlacement)] =
     cohorts.flatMap(c => c.distribution.asRoleList.map(r => (r, c.placement)))
 
+  /** True when `layout` holds exactly `distribution`'s count of each role. A layout read from a
+    * lagging cache can have the right size but other roles (a peer replica's constant-size role
+    * swap, which clears cohorts, not seen here yet): refilling by it would spawn the wrong roles.
+    */
+  def layoutFits(layout: List[(Role, NodePlacement)], distribution: RoleDistribution): Boolean =
+    RoleDistribution.spawnOrder.forall(r => layout.count(_._1 == r) == distribution.countFor(r))
+
   /** The layout position (1..size) node index `index` belongs to. Refilled ids run above the
     * high-water mark, so an index past the layout folds back onto it and takes its home's cohort.
     */
   def home(index: Int, size: Int): Int = Math.floorMod(index - 1, size) + 1
 
-  /** The placement of node index `index`: its home position's. Empty for an empty layout. */
+  /** The placement of node index `index`: its home position's. Empty for an empty layout.
+    *
+    * An id minted before cohort-aware refill (numbered by role alone, above the layout size) also
+    * gets its home's placement, which may not be the cohort [[computeInLayout]] counts it against:
+    * such a node respawns with its home's placement for as long as the id lives.
+    */
   def placementAt(layout: List[(Role, NodePlacement)], index: Int): NodePlacement =
     if layout.isEmpty then NodePlacement.empty else layout(home(index, layout.size) - 1)._2
 
   /** [[compute]] for a pool with cohorts: (nodeIndex, role) slots for the layout positions no
     * present node covers, each numbered so it maps home to its position (and so inherits that
     * position's cohort placement through [[placementAt]]). Ids stay fresh: the smallest index above
-    * [[nextIndexBase]] with that home, so a present or dropped id is never reused.
+    * [[nextIndexBase]] with that home, so no present id is reused, nor a dropped id at or below the
+    * present high-water mark. A dropped id above every present index can come back, as with
+    * [[compute]].
     *
     * A present node covers its home when its role is the home's. One that does not (a second node
     * on one home, or a role that does not match, as a node from before this rule may have) covers

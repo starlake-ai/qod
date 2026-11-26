@@ -111,3 +111,33 @@ class MissingSlotsSpec extends AnyFlatSpec with Matchers:
     )
     MissingSlots.computeInLayout(layout, present) shouldBe List((10, Role.WriteOnly))
   }
+
+  "layoutFits" should "accept a layout whose per-role counts are the distribution's" in {
+    MissingSlots.layoutFits(
+      layout,
+      RoleDistribution(writeonly = 3, readonly = 1, dual = 0)
+    ) shouldBe
+      true
+  }
+
+  it should "refuse a layout of the same size with other per-role counts" in {
+    // A lagging cache after a constant-size role swap: same total, different roles.
+    MissingSlots.layoutFits(
+      layout,
+      RoleDistribution(writeonly = 2, readonly = 2, dual = 0)
+    ) shouldBe
+      false
+    MissingSlots.layoutFits(
+      layout,
+      RoleDistribution(writeonly = 4, readonly = 0, dual = 0)
+    ) shouldBe
+      false
+  }
+
+  it should "refuse a layout of another size" in {
+    MissingSlots.layoutFits(
+      layout,
+      RoleDistribution(writeonly = 3, readonly = 2, dual = 0)
+    ) shouldBe
+      false
+  }

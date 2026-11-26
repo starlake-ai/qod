@@ -220,6 +220,16 @@ final class PoolSupervisor(
   // leader's reconcile or the replica that served the scale call. Read via pendingReason.
   private final case class PendingCause(reason: String, detail: Option[String])
   private val pendingReasons = TrieMap.empty[PoolKey, PendingCause]
+
+  /** The cause a pool shows once `next` joins the misses kept so far: `best` when it is strictly
+    * more pressing ([[PendingDetail.precedence]]), else `next` (the later miss wins a tie, its
+    * listing is fresher).
+    */
+  private def morePressing(best: Option[PendingCause], next: PendingCause): Option[PendingCause] =
+    best match
+      case Some(b) if PendingDetail.precedence(b.reason) < PendingDetail.precedence(next.reason) =>
+        best
+      case _ => Some(next)
   // Dead nodes the last reconcile pass KEPT because no other server was free (owner policy: the
   // dead server keeps its assignment and row so it resumes its node if it returns first). They are
   // not pending slots (the row is there) but still explain `pendingReason`. Replica-local, like
@@ -1517,20 +1527,26 @@ final class PoolSupervisor(
     * A [[NoFreeServer]] (fleet backend: no server free, none fits or none carries the cohort's
     * labels) leaves that slot pending instead of failing the operation; reconcile fills it once
     * capacity appears. The pool shows one reason: the most pressing of this call's misses
-    * ([[PendingDetail.precedence]]), written once when the call ends, whatever its outcome. Every
-    * other failure, AND a cancellation of the calling fiber (request timeout, resume hold timeout,
-    * shutdown), first stops (best effort) every node this call already started, then propagates
-    * unchanged: callers persist rows and the new distribution only after the whole call succeeds,
-    * so a node left running here would be capacity no row tracks (a fleet server kept assigned, a
-    * pod or process leaked).
+    * ([[PendingDetail.precedence]]), written once when the call ends, whatever its outcome. `seed`
+    * is a miss the caller already had in the same pass (a reconcile respawn's), ranked with this
+    * call's own so the single write keeps the most pressing of all of them. Every other failure,
+    * AND a cancellation of the calling fiber (request timeout, resume hold timeout, shutdown),
+    * first stops (best effort) every node this call already started, then propagates unchanged:
+    * callers persist rows and the new distribution only after the whole call succeeds, so a node
+    * left running here would be capacity no row tracks (a fleet server kept assigned, a pod or
+    * process leaked).
     *
     * Cancellation safety: each start stays cancelable (the backend releases its own in-flight claim
     * on cancel), but a completed start is recorded in `started` in the same uncancelable step, so
     * the rollback finalizer always sees it. The rollback stops run in parallel (each releases its
     * own claim) so the pool lock is held about one stop timeout at worst.
     */
-  private def spawnAll(key: PoolKey, specs: List[NodeSpec]): IO[List[RunningNode]] =
-    (Ref.of[IO, List[RunningNode]](Nil), Ref.of[IO, Option[PendingCause]](None)).flatMapN {
+  private def spawnAll(
+      key: PoolKey,
+      specs: List[NodeSpec],
+      seed: Option[PendingCause] = None
+  ): IO[List[RunningNode]] =
+    (Ref.of[IO, List[RunningNode]](Nil), Ref.of[IO, Option[PendingCause]](seed)).flatMapN {
       (started, missed) =>
         // Slots of different cohorts can miss for different reasons (one on labels, the next on
         // a free server once an earlier slot took the last one), but a pool shows one. Keep the
@@ -1544,12 +1560,7 @@ final class PoolSupervisor(
               poll(startNodeEmitting(key, spec)).flatMap(n => started.update(_ :+ n))
             }).recoverWith { case NoFreeServer(_, id, reason, _, detail) =>
             IO.delay(logger.info(s"fleet: slot $id of $key pending ($reason)")) *>
-              missed.update {
-                case Some(best)
-                    if PendingDetail.precedence(best.reason) < PendingDetail.precedence(reason) =>
-                  Some(best)
-                case _ => Some(PendingCause(reason, detail))
-              }
+              missed.update(morePressing(_, PendingCause(reason, detail)))
           }
         }
         // Written on every outcome, as the per-slot write it replaces was: a later slot failing on
@@ -1868,12 +1879,23 @@ final class PoolSupervisor(
         val respawnStateIO: IO[PoolState] =
           if blobRefreshed then stateWithFreshBlob(key, state) else IO.pure(state)
 
-        // The fold carries (surviving nodes, whether a respawn hit NoFreeServer this pass, the dead
-        // nodes kept on their server for lack of a free one).
+        // The fold carries (surviving nodes, whether a respawn miss dooms every other claim of the
+        // pool this pass, the dead nodes kept on their server for lack of a free one, the most
+        // pressing respawn miss so far). Respawn misses are ranked like a batch's in spawnAll and
+        // written once after the fill, so a later `none_free` cannot hide an earlier label miss.
         pruneIO *> respawnStateIO.flatMap { spawnState =>
           keep
-            .foldLeft(IO.pure((List.empty[RunningNode], false, Set.empty[String]))) { (acc, n) =>
-              acc.flatMap { case (kept, noFree, stranded) =>
+            .foldLeft(
+              IO.pure(
+                (
+                  List.empty[RunningNode],
+                  false,
+                  Set.empty[String],
+                  Option.empty[PendingCause]
+                )
+              )
+            ) { (acc, n) =>
+              acc.flatMap { case (kept, noFree, stranded, best) =>
                 if podAlive(n) then
                   backend.located(n).flatMap { at =>
                     // Live elsewhere than its row says (a fleet claim whose row write was lost):
@@ -1890,7 +1912,7 @@ final class PoolSupervisor(
                         ) *> poolIdByKey
                           .get(key)
                           .fold(IO.unit)(pid => IO.blocking(store.upsertNode(at, pid)))
-                    rewrite *> backend.adopt(at).as((kept :+ at, noFree, stranded))
+                    rewrite *> backend.adopt(at).as((kept :+ at, noFree, stranded, best))
                   }
                 else
                   // A row another runtime wrote says where it came from, so the log tells a
@@ -1909,24 +1931,40 @@ final class PoolSupervisor(
                   // row goes): a kept node keeps its full state, healthy = false included, so it
                   // stays unroutable and keeps its counters and an operator draining flag.
                   val wasQuarantined = tracker.snapshot(n.nodeId).quarantined
-                  (backend.stopStray(n) *>
-                    startNodeEmitting(key, respawnSpec(key, spawnState, n))).attempt
+                  val spec           = respawnSpec(key, spawnState, n)
+                  // Whether this respawn's miss says a claim for any other slot of the pool would
+                  // miss too: true for `none_free` (nothing is free at all), and for any reason when
+                  // the claim had no selector (every slot then shares its candidates and memory
+                  // request). A label miss, or a memory miss among one cohort's servers, says
+                  // nothing about another cohort's slots: those still get the fill.
+                  def doomsAll(reason: String): Boolean =
+                    reason == "none_free" || spec.placement.nodeSelector.isEmpty
+                  (backend.stopStray(n) *> startNodeEmitting(key, spec)).attempt
                     .flatMap {
                       case Left(NoFreeServer(_, _, reason, None, detail)) =>
                         // Fleet: no server holds the node any more (drained, removed or
                         // released) and no other is free. Drop the row; the missing-slot fill
                         // of a later pass recreates it when capacity appears. The stop is a
                         // no-op release, kept as the row deletion's own guarantee that no
-                        // server is left assigned to an id no row tracks.
+                        // server is left assigned to an id no row tracks. A miss that does not
+                        // doom the pool (a label miss) lets this pass's fill retry the slot at
+                        // once; it misses the same way unless a matching server freed meanwhile.
                         IO.delay {
-                          pendingReasons.put(key, PendingCause(reason, detail))
                           logger.warn(
                             s"fleet: $key/${n.nodeId} has no server and none is free " +
                               s"($reason); slot pending"
                           )
                         } *> stopNodeBestEffort(key, n.nodeId, "reconcile-pending") *>
                           IO.blocking(store.deleteNode(n.nodeId)) *>
-                          IO.delay(tracker.remove(n.nodeId)).as((kept, true, stranded))
+                          IO.delay(tracker.remove(n.nodeId))
+                            .as(
+                              (
+                                kept,
+                                noFree || doomsAll(reason),
+                                stranded,
+                                morePressing(best, PendingCause(reason, detail))
+                              )
+                            )
                       case Left(NoFreeServer(_, _, reason, Some(_), detail)) =>
                         // Fleet, owner policy: the node's server is dead and no other is free.
                         // KEEP the row and the assignment (claimReplacing rolled back, so the
@@ -1938,12 +1976,18 @@ final class PoolSupervisor(
                         // reports no change for it; the row keeps the slot's index, so the fill
                         // never renumbers it; the router skips it (its probe fails).
                         IO.delay {
-                          pendingReasons.put(key, PendingCause(reason, detail))
                           logger.info(
                             s"fleet: $key/${n.nodeId} is dead and no other server is free " +
                               s"($reason); keeping it on its server until one frees or it returns"
                           )
-                        }.as((kept :+ n, true, stranded + n.nodeId))
+                        }.as(
+                          (
+                            kept :+ n,
+                            noFree || doomsAll(reason),
+                            stranded + n.nodeId,
+                            morePressing(best, PendingCause(reason, detail))
+                          )
+                        )
                       case Left(t)      => IO.raiseError(t)
                       case Right(fresh) =>
                         // Reset the replaced node's tracker entry (a reused id must not inherit
@@ -1958,26 +2002,30 @@ final class PoolSupervisor(
                         poolIdByKey.get(key) match
                           case Some(pid) =>
                             IO.blocking(store.upsertNode(fresh, pid)) *>
-                              restore.as((kept :+ fresh, noFree, stranded))
+                              restore.as((kept :+ fresh, noFree, stranded, best))
                           case None =>
-                            restore.as((kept :+ fresh, noFree, stranded))
+                            restore.as((kept :+ fresh, noFree, stranded, best))
                     }
               }
             }
-            .flatMap { case (newNodes, noFree, stranded) =>
+            .flatMap { case (newNodes, noFree, stranded, best) =>
               if stranded.isEmpty then strandedNodes.remove(key)
               else strandedNodes.put(key, stranded)
               // Fill (index, role) slots the distribution wants but no row holds: fleet slots left
               // pending by a NoFreeServer, or a row genuinely missing on any backend. Skipped when
-              // a respawn already found no free server this pass (a second claim would fail too).
-              val afterHeal = spawnState.copy(nodes = newNodes)
-              val missing   = missingSlots(key, afterHeal.distribution, newNodes)
+              // a respawn miss already dooms every claim of the pool this pass (see doomsAll): a
+              // second claim would fail too. The respawns' most pressing miss is written once:
+              // here when the fill does not run (or fails before it starts), else by the fill's
+              // spawnAll, which ranks it with the fill's own misses.
+              val recordBest: IO[Unit] = IO.delay(best.foreach(pendingReasons.put(key, _)))
+              val afterHeal            = spawnState.copy(nodes = newNodes)
+              val missing              = missingSlots(key, afterHeal.distribution, newNodes)
               val fillIO: IO[List[RunningNode]] =
-                if missing.isEmpty || afterHeal.suspended || noFree then IO.pure(Nil)
+                if missing.isEmpty || afterHeal.suspended || noFree then recordBest.as(Nil)
                 else
                   val freshIO =
                     if blobRefreshed then IO.pure(afterHeal) else stateWithFreshBlob(key, afterHeal)
-                  freshIO.flatMap { fresh =>
+                  freshIO.onError { case _ => recordBest }.flatMap { fresh =>
                     val specs = missing.map { case (idx, role) =>
                       val id = PoolSupervisor.nodeId(key, idx)
                       specFromState(
@@ -1989,7 +2037,7 @@ final class PoolSupervisor(
                         fresh.maxConcurrentPerNode
                       )
                     }
-                    spawnAll(key, specs).flatTap { added =>
+                    spawnAll(key, specs, seed = best).flatTap { added =>
                       poolIdByKey.get(key).fold(IO.unit) { pid =>
                         added.foldLeft(IO.unit)((acc, n) =>
                           acc *> IO.blocking(store.upsertNode(n, pid))
@@ -2071,16 +2119,17 @@ final class PoolSupervisor(
   /** Slots reconcile fills for `present` to reach `dist`. A pool with cohorts refills by layout
     * position ([[MissingSlots.computeInLayout]]): a refilled id runs above the high-water mark, and
     * counting by role alone would number it past the layout, where it has no cohort and so no
-    * placement (a pending ssd slot landing on any fleet server). A layout whose size disagrees with
-    * `dist` (a lagging cache, as in [[spawnFromDistribution]]) falls back to the flat count, which
-    * a pool without cohorts always uses.
+    * placement (a pending ssd slot landing on any fleet server). A layout whose per-role counts
+    * disagree with `dist` ([[MissingSlots.layoutFits]]: a lagging cache, as in
+    * [[spawnFromDistribution]], including a same-size role swap) falls back to the flat count,
+    * which a pool without cohorts always uses.
     */
   private def missingSlots(
       key: PoolKey,
       dist: RoleDistribution,
       present: List[RunningNode]
   ): List[(Int, Role)] =
-    cohortLayout(key).filter(_.size == dist.total) match
+    cohortLayout(key).filter(MissingSlots.layoutFits(_, dist)) match
       case Some(layout) => MissingSlots.computeInLayout(layout, present)
       case None         => MissingSlots.compute(dist, present)
 
@@ -2088,6 +2137,13 @@ final class PoolSupervisor(
     * creation layout ([[MissingSlots.placementAt]]), so a refilled id above the layout keeps its
     * cohort. [[NodePlacement.empty]] when there are no explicit cohorts or the id has no index.
     * Used to respawn a dead node onto the same nodeSelector as the original, and by the refill.
+    *
+    * Known limit, by design: a node refilled before cohort-aware refill (numbered by role alone,
+    * above the layout size) gets its HOME position's placement here, which can differ from the
+    * position [[MissingSlots.computeInLayout]] counts it against. In layout `[ssd W, plain W, plain
+    * W]`, such a plain refill `-4` (home 1) respawns as an ssd node, and may then sit pending on
+    * `none_match` or take an ssd server, for as long as that id lives. Only pools refilled before
+    * the upgrade carry such ids.
     */
   private def placementForNodeId(key: PoolKey, nodeId: String): NodePlacement =
     (nodeId.split('-').lastOption.flatMap(_.toIntOption), cohortLayout(key)) match
