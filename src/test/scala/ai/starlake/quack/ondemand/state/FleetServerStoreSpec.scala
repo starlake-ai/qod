@@ -873,6 +873,20 @@ class PostgresFleetServerStoreSpec extends AnyFlatSpec with Matchers with FleetS
         pool.shutdownNow()
   }
 
+  // Only this code writes the column, but a hand edit must not break every listing and claim.
+  it should "read a hand-written labels value leniently, skipping non-string values" in withDb {
+    (pg, _, dbName) =>
+      pg.recordHeartbeat(hb("a"))
+      TestPostgres.psql(
+        dbName,
+        """UPDATE qodstate_fleet_server SET labels = '{"gpus": 2, "disk":"ssd"}'::jsonb WHERE name = 'a'"""
+      )
+      pg.get("a").get.labels shouldBe Map("disk" -> "ssd")
+      pg.list().map(r => (r.name, r.labels)) shouldBe List(("a", Map("disk" -> "ssd")))
+      pg.claim(assignment("n1"), 30, None, Map("disk" -> "ssd")).map(_.labels) shouldBe
+        Right(Map("disk" -> "ssd"))
+  }
+
   it should "keep servers that joined before 0041 approved (upgrade backfill)" in {
     TestPostgres.ensureReachable()
     val dbName = s"qodfs_test_${System.nanoTime()}"

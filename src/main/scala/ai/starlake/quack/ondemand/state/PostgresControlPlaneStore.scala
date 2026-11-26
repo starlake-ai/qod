@@ -2087,7 +2087,11 @@ final class PostgresControlPlaneStore(
     // NOTHING and a plain SELECT take no lock on an existing server row; step 2b's approval
     // UPDATE does lock the row, but only while it is still pending (AND NOT approved), and a
     // concurrent claim's FOR UPDATE OF s SKIP LOCKED already ignores pending rows, so it never
-    // skips over one for that reason. A row deleted and committed between our statements (READ
+    // skips over one for that reason. Step 2d's labels UPDATE locks the row (an approved one) only
+    // on a real label change: it is guarded by IS DISTINCT FROM, so a steady-state heartbeat takes
+    // no lock. A claim running inside that short window skips the server once, and its miss reads
+    // as NoneFree (locked rows count as taken) until the next attempt. A row deleted and committed
+    // between our statements (READ
     // COMMITTED: each statement takes a fresh snapshot) shows up as an empty SELECT or an FK
     // violation on the heartbeat insert; either rolls back and retries once, and the retry's
     // INSERT re-creates the row (a re-join).
@@ -2592,10 +2596,27 @@ final class PostgresControlPlaneStore(
       sourceAddr = Option(rs.getString("source_addr")),
       approvedSource = Option(rs.getString("approved_source")),
       nodeAction = Option(rs.getString("node_action")),
-      labels = io.circe.parser
-        .decode[Map[String, String]](rs.getString("labels"))
-        .fold(e => throw new IllegalStateException(s"bad labels json: $e"), identity)
+      labels = labelsOf(rs.getString("name"), rs.getString("labels"))
     )
+
+  // Server names already warned about for a labels value this code would not write: one WARN per
+  // name per process, not one per row on every listing.
+  private val warnedLabels = java.util.concurrent.ConcurrentHashMap.newKeySet[String]()
+
+  /** The labels column, read leniently. Only this code writes it (a string-to-string object), but a
+    * hand edit (`{"gpus": 2}`) must not fail every listing and every claim's row read: string
+    * values are kept, anything else is skipped with one WARN per server name.
+    */
+  private def labelsOf(name: String, raw: String): Map[String, String] =
+    val obj  = io.circe.parser.parse(raw).toOption.flatMap(_.asObject)
+    val kept =
+      obj.fold(Map.empty[String, String])(_.toMap.flatMap((k, v) => v.asString.map(k -> _)))
+    if obj.forall(_.size != kept.size) && warnedLabels.add(name) then
+      logger.warn(
+        s"fleet server '$name': labels $raw hold values that are not strings; skipping them " +
+          "(its next heartbeat rewrites them when its qod fleet join reports labels)"
+      )
+    kept
 
   // ---------------- helpers ----------------
 
