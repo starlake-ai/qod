@@ -1,20 +1,6 @@
 # Changelog
 
-## 0.15.1
-
-### Added
-
-- **`QOD_DATA_DIR` moves the CLI's durable state directory.** `qod serve`, `qod start`, `qod stop`,
-  `qod status` and `qod admin` keep the embedded Postgres, DuckLake data and certificates under the
-  platform user data dir; set `QOD_DATA_DIR` to put them elsewhere. Together with `QOD_CONFIG_FILE`
-  it gives a second, fully separate install on the same machine, such as a throwaway one for a
-  sample project, without touching the first one's password, data or CLI profile.
-
-- **Module source types in the console.** The federation form's type picker lists module-provided
-  source types after the built-in four, and mounts a type's console editor
-  (`FederatedSourceProvider.editor`, source editor contract 1) in place of the type's fields; core
-  still saves the source and its secrets, never leaving an enabled source without them.
-  `GET /api/federated-source-types` lists the module types. See docs/connector-spis.md.
+## Unreleased
 
 ### Upgrading
 
@@ -31,12 +17,6 @@
   the layout size), which can differ from the cohort it was refilled for, so when it restarts it
   may go pending with `none_match` or take a server of that other cohort, for as long as the id
   lives. Only pools whose cohort slots were refilled before the upgrade have such ids.
-- **Check the boot output for column masks that do not return their column's type.** qod-node
-  applies a mask only when its result has exactly its column's type, and refuses every read of
-  the column otherwise (`QoD: column mask cannot be applied safely with its original column
-  type`). At each boot the manager now prints one `WARN:` line on stderr per such mask and DuckLake
-  database, naming the tenant, the role, the policy id, the column, the mask's type and the
-  column's, never the mask. Rewrite each with the `TRY_CAST` form below, or use `NULL` or a deny.
 
 ### Added
 
@@ -65,6 +45,34 @@
 - **A refilled cohort slot keeps its cohort on every backend.** A slot's cohort is its position in
   the creation layout (index modulo the layout size). On Kubernetes a refilled cohort slot lost its
   placement (node selector and tolerations) and could start on any node.
+
+## 0.15.1
+
+### Added
+
+- **`QOD_DATA_DIR` moves the CLI's durable state directory.** `qod serve`, `qod start`, `qod stop`,
+  `qod status` and `qod admin` keep the embedded Postgres, DuckLake data and certificates under the
+  platform user data dir; set `QOD_DATA_DIR` to put them elsewhere. Together with `QOD_CONFIG_FILE`
+  it gives a second, fully separate install on the same machine, such as a throwaway one for a
+  sample project, without touching the first one's password, data or CLI profile.
+
+- **Module source types in the console.** The federation form's type picker lists module-provided
+  source types after the built-in four, and mounts a type's console editor
+  (`FederatedSourceProvider.editor`, source editor contract 1) in place of the type's fields; core
+  still saves the source and its secrets, never leaving an enabled source without them.
+  `GET /api/federated-source-types` lists the module types. See docs/connector-spis.md.
+
+### Upgrading
+
+- **Check the boot output for column masks that do not return their column's type.** qod-node
+  applies a mask only when its result has exactly its column's type, and refuses every read of
+  the column otherwise (`QoD: column mask cannot be applied safely with its original column
+  type`). At each boot the manager now prints one `WARN:` line on stderr per such mask and DuckLake
+  database, naming the tenant, the role, the policy id, the column, the mask's type and the
+  column's, never the mask. Rewrite each with the `TRY_CAST` form below, or use `NULL` or a deny.
+
+### Fixed
+
 - **A column mask can be written for a column that is neither text nor DOUBLE.** The allowed mask
   forms produced only text or DOUBLE results, and refused every cast to another type, while
   qod-node refuses a mask whose result does not have its column's type: on an `INTEGER`, `DATE` or
