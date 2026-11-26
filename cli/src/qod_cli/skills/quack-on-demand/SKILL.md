@@ -2500,7 +2500,7 @@ Every Linux or macOS server: `QOD_FLEET_JOIN_TOKEN=<random> uvx qod fleet join -
 under systemd or launchd (unit files below): `qod fleet join` is long-running, it heartbeats and runs the node the manager assigns until stopped. The node is qod-node, the node binary qod bundles for Linux and macOS (x86_64, aarch64), installed in the qod cache beside the DuckDB library qod downloads; `--qod-node-bin <path>` runs another build. Run the same qod version on the servers as the manager. Pass the token through the environment, never
 `--join-token`: a command-line argument is visible to every local user in `ps`. A joined server runs exactly one node; pools are scheduled
 onto free servers whose reported RAM covers the pool's `--memory`. `qod pool create --size 3` before three
-servers exist is fine: the pool shows `pending` (reason `none_free` or `none_fits`) until they join.
+servers exist is fine: the pool shows `pending` (reason `none_free`, `none_fits` or `none_match`) until they join.
 
 The join token is as sensitive as the control-plane Postgres password: whoever holds it can join a
 server and receive the credentials of every pool scheduled onto it. Keep unit files root-only, rotate
@@ -2534,6 +2534,18 @@ approve` answers `source_unknown` while the server has no known source address y
 next heartbeat. Behind a trusted proxy that does not send `X-Forwarded-For`, a server's source
 stays unknown, so it stays pending and `qod fleet approve` answers `source_unknown`; fix the proxy
 or `QOD_FLEET_TRUSTED_PROXIES`.
+
+**Server labels.** Label a server with `qod fleet join --label disktype=ssd` (repeatable) or
+`QOD_FLEET_LABELS=disktype=ssd,tier=db` (ignored when any `--label` is given): Kubernetes label rules,
+at most 64; an invalid set exits 2 at start (the manager answers `400 invalid_labels`). `qod fleet
+servers` shows `labels`. A pool's cohort `nodeSelector` is honoured on fleet: its new nodes go only on
+servers whose labels contain the whole selector (exact, case-sensitive). A pool with no cohorts, and
+maintenance and merge nodes, prefer servers with no extra labels and use a labeled one only when no
+plainer server is free (a preference, not a reservation). With no free server carrying the labels the
+pool is `pending` with reason `none_match` (`needs labels ...; no free server has them`): restart a
+free server with the label. Tolerations are ignored on fleet. Relabeling a server never moves the node
+it holds; the labels apply to the next claim. Labels are declared by any holder of the join token: they
+steer placement, they are not an isolation boundary.
 
 **Reading fleet errors.** Every fleet refusal states its facts (registered vs reported address,
 approved source, drained, the node a server holds) and ends with a `to fix` block saying where to
