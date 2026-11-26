@@ -133,6 +133,7 @@ import type {
   FederatedSecretUpsertRequest,
   FederatedSecretResponse,
   FederatedSecretListResponse,
+  FederatedSourceTypesResponse,
   // Active statements + kill
   ActiveStatementsResponse,
   KillStatementRequest,
@@ -216,6 +217,7 @@ export const api = {
   changePassword: (req: ChangePasswordRequest) => post<void>('/auth/change-password', req),
   whoami:  () => get<WhoamiResponse>('/auth/whoami'),
   consolePages: () => get<ConsolePagesResponse>('/console/pages'),
+  federatedSourceTypes: () => get<FederatedSourceTypesResponse>('/federated-source-types'),
   platformPermissions: () => get<{ permissions: PlatformPermissionView[] }>('/platform/permission/list'),
   platformRoles: () => get<{ roles: PlatformRoleView[] }>('/platform/role/list'),
   createPlatformRole: (req: { name: string; description?: string; permissions: string[] }) =>

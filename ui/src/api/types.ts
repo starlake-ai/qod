@@ -879,6 +879,9 @@ export interface WhoamiResponse {
 // ----- Console pages and platform roles (issue #274) -----
 export interface ConsolePageView { module: string; id: string; label: string; path: string; bundle: string }
 export interface ConsolePagesResponse { pages: ConsolePageView[] }
+/** A module-provided federated source type; `editorBundle` null when it has no console editor. */
+export interface FederatedSourceTypeView { module: string; sourceType: string; label: string; editorBundle: string | null }
+export interface FederatedSourceTypesResponse { types: FederatedSourceTypeView[] }
 export interface PlatformPermissionView { name: string; module?: string | null; description?: string | null; declared: boolean }
 export interface PlatformRoleView { id: string; name: string; description?: string | null; permissions: string[] }
 
