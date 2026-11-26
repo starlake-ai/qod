@@ -2,7 +2,8 @@ package ai.starlake.quack.module
 
 import ai.starlake.quack.docs.DocEndpoints
 import ai.starlake.quack.ondemand.api.SecurityAuditEndpoints
-import ai.starlake.quack.ondemand.module.ModuleSurfaces
+import ai.starlake.quack.model.FederatedSource
+import ai.starlake.quack.ondemand.module.{ModuleSurfaces, ResolvedSourceType}
 import ai.starlake.quack.spi.*
 import cats.effect.IO
 import org.scalatest.flatspec.AnyFlatSpec
@@ -16,19 +17,21 @@ class ModuleSurfacesSpec extends AnyFlatSpec with Matchers:
       prefixes: Set[String] = Set.empty,
       pages: List[ConsolePage] = Nil,
       mounts: List[StaticMount] = List(StaticMount("/ops", "/ops")),
-      public: Set[String] = Set.empty
+      public: Set[String] = Set.empty,
+      providers: List[FederatedSourceProvider] = Nil
   ): ManagerModule = new ManagerModule:
-    def name                         = n
-    def changelogPath                = None
-    def start(ctx: ManagerContext)   = IO.unit
-    def endpoints                    = Nil
-    def publicPathPrefixes           = public
-    override def staticMounts        = mounts
-    override def permissions         = perms
-    override def staffPathPrefixes   = prefixes
-    override def consolePages        = pages
-    def onEvent(event: ManagerEvent) = IO.unit
-    def stop                         = IO.unit
+    def name                              = n
+    def changelogPath                     = None
+    def start(ctx: ManagerContext)        = IO.unit
+    def endpoints                         = Nil
+    def publicPathPrefixes                = public
+    override def staticMounts             = mounts
+    override def permissions              = perms
+    override def staffPathPrefixes        = prefixes
+    override def consolePages             = pages
+    override def federatedSourceProviders = providers
+    def onEvent(event: ManagerEvent)      = IO.unit
+    def stop                              = IO.unit
 
   private val p = PlatformPermission("hosted.quota.extra", "extra minutes")
 
@@ -377,7 +380,8 @@ class ModuleSurfacesSpec extends AnyFlatSpec with Matchers:
       "user",
       "security",
       "platform",
-      "console"
+      "console",
+      "federated-source-types"
     )
     // /data/v1 is not under /api, and module names are not core.
     coreSegments should not contain "data"
@@ -397,4 +401,104 @@ class ModuleSurfacesSpec extends AnyFlatSpec with Matchers:
       "WARN: platform role 'support' grants 'gone.module.x', which no loaded module declares; " +
         "it has no effect"
     )
+  }
+
+  /** A provider of wire `w` whose `editor` getter evaluates `ed` on every read. */
+  private def provider(w: String, ed: => Option[SourceEditor]): FederatedSourceProvider =
+    new FederatedSourceProvider:
+      val wire                                               = w
+      val extensionName                                      = "qod_test_connector"
+      val reservedSecretPrefixes: List[String]               = Nil
+      def errors(s: FederatedSource, r: Set[String])         = Nil
+      def normalizedConfig(raw: String)                      = Right(raw)
+      def renderTemplate(s: FederatedSource, r: Set[String]) = Right("")
+      override def editor                                    = ed
+
+  private val Editor = SourceEditor("Test connector", "/ops/editor.js")
+
+  // `plain` declares no platform surface: an editor is checked on every module.
+  "A module source type" should "be listed with its editor when the bundle lies under a mount" in {
+    val s = validate(
+      mod(
+        "plain",
+        providers =
+          List(provider("test_connector", Some(Editor)), provider("plain_connector", None))
+      )
+    ).toOption.get
+    s.sourceTypes shouldBe List(
+      ResolvedSourceType("plain", "test_connector", "Test connector", Some("/ops/editor.js")),
+      ResolvedSourceType("plain", "plain_connector", "plain_connector", None)
+    )
+  }
+
+  it should "list only the wires the provider registry holds" in {
+    val s = ModuleSurfaces
+      .validate(
+        List(
+          mod(
+            "plain",
+            providers =
+              List(provider("test_connector", Some(Editor)), provider("late_connector", None))
+          )
+        ),
+        coreSegments,
+        _ == "test_connector"
+      )
+      .toOption
+      .get
+    s.sourceTypes.map(_.sourceType) shouldBe List("test_connector")
+  }
+
+  it should "refuse an editor bundle outside every mount, naming the module" in {
+    val r = refused(
+      mod(
+        "plain",
+        providers =
+          List(provider("test_connector", Some(SourceEditor("T", "/elsewhere/editor.js"))))
+      )
+    )
+    r should include("module plain: source editor of 'test_connector'")
+    r should include("is not under any of the module's static mounts")
+  }
+
+  it should "refuse an editor bundle under a root mount" in {
+    val r = refused(
+      mod(
+        "plain",
+        mounts = List(StaticMount("/", "/www")),
+        providers = List(provider("test_connector", Some(SourceEditor("T", "/editor.js"))))
+      )
+    )
+    r should include("module plain: source editor of 'test_connector'")
+    r should include("a root mount (/) covers no bundle")
+  }
+
+  it should "refuse an editor bundle holding a bad segment" in {
+    for b <- List(
+        "/ops/../editor.js",
+        "/ops/a b.js",
+        "/ops//editor.js",
+        "/ops/editor.js?v=1",
+        "https://cdn.example/editor.js",
+        "ops/editor.js"
+      )
+    do
+      withClue(b) {
+        refused(
+          mod("plain", providers = List(provider("test_connector", Some(SourceEditor("T", b)))))
+        ) should include("must be an origin-relative path of segments over [A-Za-z0-9._-]")
+      }
+  }
+
+  it should "list the editor it checked, reading each editor once" in {
+    var reads = 0
+    val p     = provider(
+      "test_connector", {
+        reads += 1
+        if reads == 1 then Some(Editor) else Some(SourceEditor("T", "https://cdn.example/x.js"))
+      }
+    )
+    val s = validate(mod("plain", providers = List(p))).toOption.get
+    reads shouldBe 1
+    s.sourceTypes.flatMap(_.editorBundle) shouldBe List("/ops/editor.js")
   }

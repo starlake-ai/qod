@@ -88,3 +88,17 @@ object FederatedSourceEndpoints:
     Any
   ] =
     fedBase.delete.in(path[String]("alias") / "secrets" / path[String]("name")).in(authToken)
+
+  /** The module-provided source types the console's federation form offers, for any admin session:
+    * each with its label and its editor bundle, if any.
+    */
+  val listFederatedSourceTypes: PublicEndpoint[
+    Option[String],
+    (sttp.model.StatusCode, ErrorResponse),
+    FederatedSourceTypesResponse,
+    Any
+  ] =
+    base.get
+      .in("federated-source-types")
+      .in(authToken)
+      .out(jsonBody[FederatedSourceTypesResponse])

@@ -11,6 +11,10 @@
   database, naming the tenant, the role, the policy id, the column, the mask's type and the
   column's, never the mask. Rewrite each with the `TRY_CAST` form below, or use `NULL` or a deny.
 
+### Added
+
+- Module source types in the console: the federation form's type picker lists module-provided source types after the built-in four, and mounts a type's console editor (`FederatedSourceProvider.editor`, source editor contract 1) in place of the type's fields; core still saves the source and its secrets, never leaving an enabled source without them. `GET /api/federated-source-types` lists the module types. See docs/connector-spis.md.
+
 ### Fixed
 
 - **A column mask can be written for a column that is neither text nor DOUBLE.** The allowed mask

@@ -879,6 +879,9 @@ export interface WhoamiResponse {
 // ----- Console pages and platform roles (issue #274) -----
 export interface ConsolePageView { module: string; id: string; label: string; path: string; bundle: string }
 export interface ConsolePagesResponse { pages: ConsolePageView[] }
+/** A module-provided federated source type; `editorBundle` null when it has no console editor. */
+export interface FederatedSourceTypeView { module: string; sourceType: string; label: string; editorBundle: string | null }
+export interface FederatedSourceTypesResponse { types: FederatedSourceTypeView[] }
 export interface PlatformPermissionView { name: string; module?: string | null; description?: string | null; declared: boolean }
 export interface PlatformRoleView { id: string; name: string; description?: string | null; permissions: string[] }
 
@@ -1299,8 +1302,9 @@ export interface MaintenanceRunResponse {
 
 /** `sql` is a free-form operator-written setupSql block; `iceberg_rest`,
   * `postgres` and `mysql` are typed sources whose ATTACH the manager renders
-  * itself. */
-export type FederatedSourceType = 'sql' | 'iceberg_rest' | 'postgres' | 'mysql';
+  * itself. Any other value is a module-provided type
+  * (`GET /api/federated-source-types`), whose config travels as `pluginConfig`. */
+export type FederatedSourceType = 'sql' | 'iceberg_rest' | 'postgres' | 'mysql' | (string & {});
 
 /** Typed declaration of one external Postgres or MySQL database (`postgres` /
   * `mysql` sources). Mirrors the manager's `RdbmsConfig`. `password` is a
@@ -1363,6 +1367,8 @@ export interface FederatedSourceCreateRequest {
   readOnly?: boolean;
   /** `postgres` / `mysql` only. */
   connection?: RdbmsConnection;
+  /** Module-provided types only: the provider's own config object. */
+  pluginConfig?: unknown;
 }
 
 export interface FederatedSourceResponse {
@@ -1380,6 +1386,8 @@ export interface FederatedSourceResponse {
     * or disabled row, which has no attach state at all. */
   attachStatus?: string;
   connection?: RdbmsConnection;
+  /** Module-provided types only: the config as stored ({{secret.NAME}} placeholders, never values). */
+  pluginConfig?: unknown;
 }
 
 export interface FederatedSourceListResponse {

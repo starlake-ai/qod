@@ -131,7 +131,10 @@ final class ManagerServer(
     platform: Option[PlatformHandlers] = None,
     // The modules' console pages (ModuleSurfaces.pages), listed by GET /api/console/pages, which is
     // always mounted: with none, every caller reads an empty list.
-    consolePages: List[ai.starlake.quack.ondemand.module.ResolvedConsolePage] = Nil
+    consolePages: List[ai.starlake.quack.ondemand.module.ResolvedConsolePage] = Nil,
+    // The modules' federated source types (ModuleSurfaces.sourceTypes), listed by GET
+    // /api/federated-source-types, which is always mounted: with none, the list is empty.
+    sourceTypes: List[ai.starlake.quack.ondemand.module.ResolvedSourceType] = Nil
 ) extends LazyLogging:
 
   // The bearer-credential lookups, composed session-first: the JWT verify is a
@@ -153,6 +156,8 @@ final class ManagerServer(
   private val sessionOfToken: String => Option[SessionTokenStore.Session] = credentials.sessionOf
 
   private val console = new ConsoleHandlers(consolePages, credentials.platformCallerOf)
+
+  private val sourceTypeList = new FederatedSourceTypeHandlers(sourceTypes, scopeOfToken)
 
   extension [I, E, O](e: sttp.tapir.PublicEndpoint[I, E, O, Any])
     /** Binds `e` to a handler of the common shape `handler(inputs...)(scopeOf)`: the endpoint's
@@ -1065,7 +1070,8 @@ final class ManagerServer(
       RbacEndpoints.updateRowPolicy.scoped(rowPolicies.update(_, _)),
       RbacEndpoints.deleteRowPolicy.scoped(rowPolicies.delete(_, _)),
       RbacEndpoints.listRowPolicies.scoped(rowPolicies.list(_, _)),
-      PlatformEndpoints.consolePages.serverLogic(console.list)
+      PlatformEndpoints.consolePages.serverLogic(console.list),
+      FederatedSourceEndpoints.listFederatedSourceTypes.serverLogic(sourceTypeList.list)
     ) ++ platform.toList.flatMap { p =>
       List[ServerEndpoint[Any, IO]](
         PlatformEndpoints.listPermissions.scoped(p.listPermissions(_)),

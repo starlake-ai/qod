@@ -59,7 +59,8 @@ trait ManagerModule:
   def consolePages: List[ConsolePage] = Nil
 
   /** Federated source types this module contributes. Read right after construction, before
-    * `start()`: pool restore renders sources before modules start.
+    * `start()`: pool restore renders sources before modules start. Read once more after `start()`,
+    * with `staticMounts`, to check and list each provider's console `editor`.
     */
   def federatedSourceProviders: List[FederatedSourceProvider] = Nil
 

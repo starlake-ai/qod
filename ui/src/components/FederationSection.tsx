@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { api, ApiError, errorMessage } from '../api/client';
 import type {
   FederatedSourceResponse,
@@ -13,6 +13,13 @@ import type {
 import { useAuth } from '../auth/AuthContext';
 import { DeleteIcon, EditIcon } from './Icons';
 import { Modal } from './Modal';
+import PluginSourceEditor from '../federation/PluginSourceEditor';
+import { editorReadOnly, type SourceEditorSecret } from '../federation/sourceEditorContract';
+import { savePluginSource } from '../federation/pluginSourceSave';
+import {
+  formKindOf, isBuiltInSourceType, NO_EDITOR_MESSAGE, sourceTypeOptions,
+} from '../federation/sourceTypes';
+import { useFederatedSourceTypes } from '../federation/useFederatedSourceTypes';
 
 /** Copy-pasteable Setup SQL templates surfaced as quick-insert buttons above
   * the textarea. Each picks a common DuckDB federation flow. Placeholders
@@ -894,7 +901,8 @@ export default function FederationSection({
   tenantDb: string;
   onClose: () => void;
 }) {
-  const { superuser } = useAuth();
+  const { superuser, username, permissions } = useAuth();
+  const pluginTypes = useFederatedSourceTypes();
   const [sources, setSources] = useState<FederatedSourceResponse[]>([]);
   const [error, setError]     = useState<string | null>(null);
   const [adding, setAdding]   = useState(false);
@@ -915,9 +923,18 @@ export default function FederationSection({
   const [icebergMode, setIcebergMode] = useState<IcebergMode>('none');
   const [iceberg,     setIceberg]     = useState<IcebergFields>(EMPTY_ICEBERG_FIELDS);
   const [rdbms,       setRdbms]       = useState<RdbmsFields>(EMPTY_RDBMS_FIELDS);
+  // A module-provided type: the stored source being edited (null when creating), and whether
+  // core's rule lets the caller change it (null while the source's secrets are being read).
+  const [editingSource,  setEditingSource]  = useState<FederatedSourceResponse | null>(null);
+  const [pluginReadOnly, setPluginReadOnly] = useState<boolean | null>(false);
+  // Bumped whenever the form opens or closes, so a late secrets read never lands in another form.
+  const editRun = useRef(0);
 
-  const isIceberg = sourceType === 'iceberg_rest';
-  const isRdbms   = isRdbmsType(sourceType);
+  const isIceberg  = sourceType === 'iceberg_rest';
+  const isRdbms    = isRdbmsType(sourceType);
+  const formKind   = formKindOf(sourceType, pluginTypes);
+  const isPlugin   = formKind === 'plugin-editor' || formKind === 'plugin-no-editor';
+  const pluginType = pluginTypes.find(t => t.sourceType === sourceType);
   const setIcebergField = (key: keyof IcebergFields, value: string) =>
     setIceberg(prev => ({ ...prev, [key]: value }));
   const setRdbmsField = (key: keyof RdbmsFields, value: string) =>
@@ -947,6 +964,9 @@ export default function FederationSection({
     setIcebergMode('none');
     setIceberg(EMPTY_ICEBERG_FIELDS);
     setRdbms(EMPTY_RDBMS_FIELDS);
+    setEditingSource(null);
+    setPluginReadOnly(false);
+    editRun.current += 1;
     setError(null);
   }
 
@@ -985,6 +1005,22 @@ export default function FederationSection({
     setIceberg(icebergFieldsOf(s.config));
     setRdbms(rdbmsFieldsOf(s.connection));
     setError(null);
+    setEditingSource(s);
+    const run = ++editRun.current;
+    if (isBuiltInSourceType(s.sourceType)) {
+      setPluginReadOnly(false);
+    } else {
+      // Core's rule: a source holding secrets is changed by a superuser only. Unread, a tenant
+      // admin gets the read-only editor (the manager would refuse the change anyway).
+      setPluginReadOnly(null);
+      api.listFederatedSecrets(tenant, tenantDb, s.alias)
+        .then(r => { if (editRun.current === run) setPluginReadOnly(editorReadOnly(s, r.secrets.length, superuser)); })
+        .catch(e => {
+          if (editRun.current !== run) return;
+          setError(errorMessage(e));
+          setPluginReadOnly(!superuser);
+        });
+    }
     setEditingAlias(s.alias);
     setAdding(true);
   }
@@ -999,6 +1035,8 @@ export default function FederationSection({
     ev.preventDefault();
     setError(null);
     if (!credentialsOk) return;
+    // A module type saves through its editor (ctx.save), never through this submit.
+    if (isPlugin) return;
     // The manager normalizes every alias through Names.normalizeOrError
     // (lowercase); sending the normalized form is what keeps the value the
     // operator sees in this field identical to the one it is stored under.
@@ -1084,6 +1122,23 @@ export default function FederationSection({
     }
   }
 
+  /** ctx.save of a module's editor: core's own create-then-secrets sequence; the form closes on
+    * success, and the editor gets the manager's errors otherwise. */
+  async function savePlugin(pluginConfig: unknown, secrets: SourceEditorSecret[]) {
+    setError(null);
+    const run = editRun.current;
+    const result = await savePluginSource(api, {
+      tenant, tenantDb, alias, description, sourceType, pluginConfig, secrets,
+    });
+    if (result.ok) {
+      // The form may have been cancelled or switched while the save ran: only close the one it
+      // was started from.
+      if (editRun.current === run) closeForm();
+      await reload();
+    }
+    return result;
+  }
+
   async function handleDelete(a: string) {
     if (!confirm(`Delete federated source '${a}'? This also removes all its secrets.`)) return;
     setError(null);
@@ -1153,10 +1208,9 @@ export default function FederationSection({
                 onChange={ev => selectSourceType(ev.target.value as FederatedSourceType)}
                 disabled={editingAlias != null}
               >
-                <option value="sql">sql - your own ATTACH / setup SQL</option>
-                <option value="iceberg_rest">iceberg_rest - external Iceberg REST catalog</option>
-                <option value="postgres">postgres - external Postgres database</option>
-                <option value="mysql">mysql - external MySQL database</option>
+                {sourceTypeOptions(pluginTypes, sourceType).map(o => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
               </select>
             </label>
             {editingAlias != null && (
@@ -1164,7 +1218,7 @@ export default function FederationSection({
                 The type is fixed for an existing alias: the manager refuses a flip between types
                 rather than replacing your setup SQL with a rendered config unseen. Delete the
                 source and recreate it to change type.
-                {!superuser && (isIceberg || isRdbms) && (
+                {!superuser && (isIceberg || isRdbms || isPlugin) && (
                   <>
                     {' '}Once a source holds a secret, its connection stays as it is and a read-only
                     source stays read-only: a superuser changes it, or delete the source and create
@@ -1489,7 +1543,29 @@ export default function FederationSection({
               </>
             )}
 
-            {!isIceberg && !isRdbms && (
+            {formKind === 'plugin-no-editor' && (
+              <div className="subtle" style={{ margin: '.5rem 0' }}>{NO_EDITOR_MESSAGE}</div>
+            )}
+            {formKind === 'plugin-editor' && pluginReadOnly == null && (
+              <div className="loading">Loading editor...</div>
+            )}
+            {formKind === 'plugin-editor' && pluginType?.editorBundle && pluginReadOnly != null && (
+              <PluginSourceEditor
+                key={sourceType}
+                sourceType={sourceType}
+                module={pluginType.module}
+                bundle={pluginType.editorBundle}
+                tenant={tenant}
+                tenantDb={tenantDb}
+                user={{ username: username ?? '', superuser, permissions }}
+                source={editingSource}
+                readOnly={pluginReadOnly}
+                save={savePlugin}
+                cancel={closeForm}
+              />
+            )}
+
+            {!isIceberg && !isRdbms && !isPlugin && (
             <label>
               Setup SQL <span style={{ color: 'var(--bad)' }}>*</span>
               <div className="setup-templates">
@@ -1535,13 +1611,16 @@ export default function FederationSection({
             <label className="checkbox-label">
               <input
                 type="checkbox"
-                checked={readOnly}
+                checked={isPlugin || readOnly}
+                disabled={isPlugin}
                 onChange={ev => setReadOnly(ev.target.checked)}
               />
               {' '}Read-only catalog
             </label>
             <div style={{ fontSize: '.75em', color: 'var(--text-mute)' }}>
-              {isIceberg || isRdbms
+              {isPlugin
+                ? 'A module-provided source is always saved read-only.'
+                : isIceberg || isRdbms
                 ? 'Renders a READ_ONLY ATTACH option and denies writes at the edge. Takes effect on an already-running node only after the pool recycles.'
                   + (isRdbms
                     ? ' The edge also refuses raw-SQL passthrough calls (postgres_execute, postgres_query, query with computed SQL, ...) aimed at it, but cannot see a macro or view that already wraps one. Connect as a database user without write privileges: that is the complete guarantee.'
@@ -1551,7 +1630,9 @@ export default function FederationSection({
               </div>
               <div className="row" style={{ gap: 8, marginTop: '1rem', justifyContent: 'flex-end' }}>
                 <button type="button" className="cancel-button" style={{ minWidth: '7rem' }} onClick={closeForm}>Cancel</button>
-                <button type="submit" style={{ minWidth: '7rem' }} disabled={!credentialsOk}>{editingAlias ? 'Save' : 'Create'}</button>
+                {!isPlugin && (
+                  <button type="submit" style={{ minWidth: '7rem' }} disabled={!credentialsOk}>{editingAlias ? 'Save' : 'Create'}</button>
+                )}
               </div>
             </form>
         </Modal>

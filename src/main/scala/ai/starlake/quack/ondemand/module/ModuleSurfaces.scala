@@ -1,7 +1,13 @@
 package ai.starlake.quack.ondemand.module
 
 import ai.starlake.quack.ondemand.rbac.{DeclaredPermission, PlatformPermissions}
-import ai.starlake.quack.spi.{ConsolePage, ManagerModule, PlatformPermission, StaticMount}
+import ai.starlake.quack.spi.{
+  ConsolePage,
+  ManagerModule,
+  PlatformPermission,
+  SourceEditor,
+  StaticMount
+}
 import sttp.tapir.AnyEndpoint
 
 final case class ResolvedConsolePage(
@@ -13,16 +19,28 @@ final case class ResolvedConsolePage(
 ):
   def path: String = s"/ui/x/$module/$id"
 
+/** A module's federated source type as `GET /api/federated-source-types` lists it: `label` is its
+  * editor's, or the wire itself when it has no editor; `editorBundle` is the checked bundle.
+  */
+final case class ResolvedSourceType(
+    module: String,
+    sourceType: String,
+    label: String,
+    editorBundle: Option[String]
+)
+
 /** The platform surfaces of the loaded modules (issue #274), validated once at boot after every
   * module's start(). A Left aborts the boot, naming the module and the item. `publicPrefixes` are
   * every module's public path prefixes as validated, the values the server is given: a getter is
-  * read once, so a second read can never hand the guard a prefix nobody checked.
+  * read once, so a second read can never hand the guard a prefix nobody checked. `sourceTypes` are
+  * every module's federated source types with the editors as checked, read in the same way.
   */
 final case class ModuleSurfaces(
     permissions: List[DeclaredPermission],
     staffPrefixes: Set[String],
     pages: List[ResolvedConsolePage],
-    publicPrefixes: Set[String]
+    publicPrefixes: Set[String],
+    sourceTypes: List[ResolvedSourceType] = Nil
 )
 
 object ModuleSurfaces:
@@ -150,7 +168,9 @@ object ModuleSurfaces:
       staffPrefixes: Set[String],
       pages: List[ConsolePage],
       mounts: List[StaticMount],
-      publicPrefixes: Set[String]
+      publicPrefixes: Set[String],
+      /** Each provider's wire and editor, read once. */
+      sourceTypes: List[(String, Option[SourceEditor])]
   ):
     def hasSurface: Boolean = permissions.nonEmpty || staffPrefixes.nonEmpty || pages.nonEmpty
 
@@ -160,12 +180,17 @@ object ModuleSurfaces:
     * prefix lies under `/api/<module name>/`; a module named after a core segment would make such a
     * prefix cover core routes, so a module with any platform surface may not take one. Such a
     * module's name must also match [a-z0-9-]+ and be unique among them; a module with no surface is
-    * not checked. Each module's surfaces are read once, and the result is built from those same
-    * values.
+    * not checked. Every module's source editors are checked, with or without a platform surface:
+    * each bundle must lie under one of the module's own static mounts, as a console page's does.
+    * Each module's surfaces are read once, and the result is built from those same values.
+    * `installed`: whether a source type's wire is in the provider registry (installed at boot,
+    * before `start()`). A getter that answers differently after `start()` could name a wire the
+    * registry never got; such a type is left out of `sourceTypes`, as nothing could save one.
     */
   def validate(
       modules: List[ManagerModule],
-      coreApiSegments: Set[String]
+      coreApiSegments: Set[String],
+      installed: String => Boolean = _ => true
   ): Either[String, ModuleSurfaces] =
     val declared = modules.map(m =>
       Declared(
@@ -174,7 +199,8 @@ object ModuleSurfaces:
         m.staffPathPrefixes,
         m.consolePages,
         m.staticMounts,
-        m.publicPathPrefixes
+        m.publicPathPrefixes,
+        m.federatedSourceProviders.map(p => (p.wire, p.editor))
       )
     )
     val errs     = List.newBuilder[String]
@@ -183,11 +209,26 @@ object ModuleSurfaces:
     val perms    = List.newBuilder[DeclaredPermission]
     val prefixes = Set.newBuilder[String]
     val pages    = List.newBuilder[ResolvedConsolePage]
+    val types    = List.newBuilder[ResolvedSourceType]
     declared.zipWithIndex.foreach { (d, i) =>
       val others = declared.zipWithIndex.collect { case (o, j) if j != i => o.module.name }.toSet
       d.publicPrefixes.toList.sorted.foreach { pre =>
         publicPrefixRefusal(pre, d.mounts, coreApiSegments, others).foreach(r =>
           errs += s"module ${d.module.name}: $r"
+        )
+      }
+    }
+    declared.foreach { d =>
+      d.sourceTypes.filter((wire, _) => installed(wire)).foreach { (wire, editor) =>
+        editor.foreach { e =>
+          bundleRefusal(d.mounts, e.bundle)
+            .foreach(r => errs += s"module ${d.module.name}: source editor of '$wire': $r")
+        }
+        types += ResolvedSourceType(
+          d.module.name,
+          wire,
+          editor.fold(wire)(_.label),
+          editor.map(_.bundle)
         )
       }
     }
@@ -233,6 +274,7 @@ object ModuleSurfaces:
           perms.result(),
           prefixes.result(),
           pages.result(),
-          declared.flatMap(_.publicPrefixes).toSet
+          declared.flatMap(_.publicPrefixes).toSet,
+          types.result()
         )
       )
