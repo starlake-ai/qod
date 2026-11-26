@@ -9577,6 +9577,8 @@ components:
           format: int64
         node:
           $ref: '#/components/schemas/FleetNodeReportDto'
+        labels:
+          $ref: '#/components/schemas/Map_String'
     FleetHeartbeatResponse:
       title: FleetHeartbeatResponse
       type: object
@@ -9677,6 +9679,7 @@ components:
       - joinedAt
       - lastHeartbeatAt
       - approval
+      - labels
       properties:
         name:
           type: string
@@ -9730,6 +9733,8 @@ components:
           type: string
         nodeAction:
           type: string
+        labels:
+          $ref: '#/components/schemas/Map_String'
     FleetServerListResponse:
       title: FleetServerListResponse
       type: object
