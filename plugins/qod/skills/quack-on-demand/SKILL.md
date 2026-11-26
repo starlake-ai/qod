@@ -2543,8 +2543,10 @@ servers whose labels contain the whole selector (exact, case-sensitive). A pool 
 maintenance and merge nodes, prefer servers with no extra labels and use a labeled one only when no
 plainer server is free (a preference, not a reservation). With no free server carrying the labels the
 pool is `pending` with reason `none_match` (`needs labels ...; no free server has them`): restart a
-free server with the label. Tolerations are ignored on fleet. Relabeling a server never moves the node
-it holds; the labels apply to the next claim. Labels are declared by any holder of the join token: they
+free server with the label. Tolerations are ignored on fleet. Labels are read when `qod fleet join`
+starts: changing them means restarting it, which restarts the node the server runs, and the node may
+come back on another server. Drain the server first (`qod fleet drain <name>`), restart the join with
+the new labels, then `qod fleet undrain <name>`; the new labels apply to later claims. Labels are declared by any holder of the join token: they
 steer placement, they are not an isolation boundary.
 
 **Reading fleet errors.** Every fleet refusal states its facts (registered vs reported address,

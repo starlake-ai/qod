@@ -12,6 +12,11 @@
   before upgrading the manager. Pools without cohorts, and maintenance and merge nodes, prefer
   servers with no labels the selector did not ask for, and only use a labeled one when no plainer
   server is free: a preference, not a reservation.
+- **A cohort node refilled before this release may restart in another cohort.** Such a node got an
+  id numbered by role alone, past the pool's layout. Its cohort now comes from its id (index modulo
+  the layout size), which can differ from the cohort it was refilled for, so when it restarts it
+  may go pending with `none_match` or take a server of that other cohort, for as long as the id
+  lives. Only pools whose cohort slots were refilled before the upgrade have such ids.
 - **Check the boot output for column masks that do not return their column's type.** qod-node
   applies a mask only when its result has exactly its column's type, and refuses every read of
   the column otherwise (`QoD: column mask cannot be applied safely with its original column
@@ -33,7 +38,10 @@
   server carries the labels the pool is pending with the new reason `none_match` (`needs labels
   ...; no free server has them ...`); per pool the precedence is `none_match`, `none_fits`, then
   `none_free`. Tolerations mean nothing on a fleet and are ignored, with one WARN per pool.
-  Relabeling a server that holds a node never moves the node. `qod fleet servers` and
+  Labels are read when `qod fleet join` starts: changing them means restarting it, which restarts
+  the node the server runs, and the node may come back on another server. Drain the server first
+  (`qod fleet drain <name>`), restart the join with the new labels, then
+  `qod fleet undrain <name>`; the new labels apply to later claims. `qod fleet servers` and
   `GET /api/fleet/servers` show `labels`, the UI Servers page has a Labels column, and the UI's
   placement wording now covers Kubernetes and fleet. Labels are declared by whoever holds the join
   token: they steer placement and are not an isolation boundary.
