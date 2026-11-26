@@ -1231,6 +1231,18 @@ final case class ConsolePageView(
 )
 final case class ConsolePagesResponse(pages: List[ConsolePageView])
 
+/** A module-provided federated source type, as the console's federation form lists it.
+  * `editorBundle` is the script of its console editor (source editor contract 1), None (null on the
+  * wire) when it has none.
+  */
+final case class FederatedSourceTypeView(
+    module: String,
+    sourceType: String,
+    label: String,
+    editorBundle: Option[String]
+)
+final case class FederatedSourceTypesResponse(types: List[FederatedSourceTypeView])
+
 /** GET /user/{id}/effective response. Permits the UI to show what a given user can actually do
   * without spelunking through roles/groups.
   */
@@ -2126,6 +2138,8 @@ object Dtos:
   given Codec[StaffListResponse]              = deriveCodec
   given Codec[ConsolePageView]                = deriveCodec
   given Codec[ConsolePagesResponse]           = deriveCodec
+  given Codec[FederatedSourceTypeView]        = deriveCodec
+  given Codec[FederatedSourceTypesResponse]   = deriveCodec
 
   // RBAC: roles
   given Codec[RoleCreateRequest]           = deriveCodec

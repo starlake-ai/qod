@@ -2301,6 +2301,7 @@ object Main extends IOApp with LazyLogging:
         moduleStaffPrefixes = surfaces.staffPrefixes,
         platform = Some(platformHandlers),
         consolePages = surfaces.pages,
+        sourceTypes = surfaces.sourceTypes,
         passwordReset = Some(passwordResetHandlers),
         pat = Some(patHandlers),
         branches = branchHandlers,

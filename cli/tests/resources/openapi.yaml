@@ -2652,6 +2652,40 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/federated-source-types:
+    get:
+      operationId: getApiFederated-source-types
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: qod_session
+        in: cookie
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FederatedSourceTypesResponse'
+        '400':
+          description: 'Invalid value for: header X-API-Key, Invalid value for: cookie
+            qod_session'
+          content:
+            text/plain:
+              schema:
+                type: string
+        default:
+          description: ''
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/fleet/servers:
     get:
       operationId: getApiFleetServers
@@ -9480,6 +9514,30 @@ components:
         connection:
           $ref: '#/components/schemas/RdbmsConfig'
         pluginConfig: {}
+    FederatedSourceTypeView:
+      title: FederatedSourceTypeView
+      type: object
+      required:
+      - module
+      - sourceType
+      - label
+      properties:
+        module:
+          type: string
+        sourceType:
+          type: string
+        label:
+          type: string
+        editorBundle:
+          type: string
+    FederatedSourceTypesResponse:
+      title: FederatedSourceTypesResponse
+      type: object
+      properties:
+        types:
+          type: array
+          items:
+            $ref: '#/components/schemas/FederatedSourceTypeView'
     FleetAssignmentDto:
       title: FleetAssignmentDto
       type: object

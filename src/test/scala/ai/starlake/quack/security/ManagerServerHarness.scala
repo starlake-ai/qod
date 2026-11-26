@@ -342,6 +342,8 @@ object ManagerServerHarness:
       moduleStaffPrefixes: Set[String] = Set.empty,
       // The modules' console pages, as GET /api/console/pages lists them (issue #274).
       consolePages: List[ai.starlake.quack.ondemand.module.ResolvedConsolePage] = Nil,
+      // The modules' federated source types, as GET /api/federated-source-types lists them.
+      sourceTypes: List[ai.starlake.quack.ondemand.module.ResolvedSourceType] = Nil,
       // SPI module event sink (Task 9): defaulted to noop so every pre-existing caller
       // compiles unchanged; specs that want to observe emissions pass a recording sink.
       events: ai.starlake.quack.spi.ManagerEventSink = ai.starlake.quack.spi.ManagerEventSink.noop,
@@ -848,6 +850,7 @@ object ManagerServerHarness:
       moduleStaffPrefixes = moduleStaffPrefixes,
       platform = Some(new PlatformHandlers(sup, userHandlers, audit)),
       consolePages = consolePages,
+      sourceTypes = sourceTypes,
       passwordReset = Some(passwordResetHandlers),
       pat = patHandlers,
       branches = branchesOf.map(build => build(sup, previewHandlers, restCaller)),

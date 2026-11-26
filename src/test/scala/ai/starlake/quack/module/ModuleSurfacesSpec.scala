@@ -380,7 +380,8 @@ class ModuleSurfacesSpec extends AnyFlatSpec with Matchers:
       "user",
       "security",
       "platform",
-      "console"
+      "console",
+      "federated-source-types"
     )
     // /data/v1 is not under /api, and module names are not core.
     coreSegments should not contain "data"
