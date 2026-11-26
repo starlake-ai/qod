@@ -72,6 +72,11 @@ class FleetHandlersSpec extends AnyFlatSpec with Matchers:
       .heartbeat(req().copy(labels = Some(Map("-bad" -> "x"))), Some("secret"), loopback, None)
       .unsafeRunSync()
     r.left.map(e => (e._1, e._2.error)) shouldBe Left((StatusCode.BadRequest, "invalid_labels"))
+    // The on-server fix comes first; upgrading qod stays an alternative (a version skew).
+    val actions = r.left.toOption.get._2.actions.get
+    actions.map(_.where) shouldBe List("server", "server")
+    actions.head.command should include("--label / QOD_FLEET_LABELS")
+    actions(1).command should include("upgrade qod")
     store.get("srv-1") shouldBe None
   }
 

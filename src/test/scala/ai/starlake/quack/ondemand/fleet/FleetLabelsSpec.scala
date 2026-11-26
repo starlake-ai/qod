@@ -11,6 +11,10 @@ class FleetLabelsSpec extends AnyFlatSpec with Matchers:
     FleetLabels.problem("example.com/zone", "eu-1") shouldBe None
   }
 
+  it should "accept a key under the qod. prefix (no prefix is reserved)" in {
+    FleetLabels.problem("qod.io/x", "y") shouldBe None
+  }
+
   it should "reject a key starting with a dash" in {
     FleetLabels.problem("-bad", "x").get should include("-bad")
   }
