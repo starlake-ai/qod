@@ -1548,6 +1548,8 @@ export default function FederationSection({
             )}
             {formKind === 'plugin-editor' && pluginType?.editorBundle && pluginReadOnly != null && (
               <PluginSourceEditor
+                key={sourceType}
+                sourceType={sourceType}
                 module={pluginType.module}
                 bundle={pluginType.editorBundle}
                 tenant={tenant}
