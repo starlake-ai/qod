@@ -140,6 +140,55 @@ because tenant admins control that config and the node's init SQL runs with full
 If a stored plugin source has no provider at boot (module absent), that source is skipped
 with a `SourceProviderMissing` error; other sources are unaffected.
 
+### Console editor
+
+A provider may name a console editor for its type: `override def editor =
+Some(SourceEditor(label, bundle))`. `bundle` is an origin-relative path of `[A-Za-z0-9._-]`
+segments under one of the module's own `staticMounts` (a root mount covers none). It is checked
+at boot after `start()`, like a console page's bundle; a refused editor fails the boot with a
+message naming the module. The federation form's type picker lists module types after the four
+built-in ones, as `<sourceType>: <label>`; a type without an editor is listed too, and the form
+says "this source type has no editor; use the REST API". Editing a stored module source mounts
+the type's editor too, and the editor remounts when the source type changes.
+
+`GET /api/federated-source-types` (any admin session) answers
+`{types: [{module, sourceType, label, editorBundle}]}`, with `label` the editor's (the wire when
+there is no editor) and `editorBundle` null for a type without an editor.
+
+Editor contract 1: the bundle exports `qodSourceEditorContract = 1` and `mount(el, ctx)`,
+returning an unmount function or a Promise of one. A bundle that fails to load, speaks another
+contract, throws in `mount` or returns no unmount function shows an error naming its module; the
+rest of the form works on. Core keeps the alias, description, read-only flag, list, delete and
+secrets panel; the editor replaces only the type's own fields. `ctx` holds `contract: 1`,
+`apiBase: '/api'`, `tenant`, `tenantDb`, `user` (`username`, `superuser`, `permissions`),
+`source` (the stored source when editing, null when creating), `readOnly` (true when the source
+holds secrets and the caller is not a superuser, so the manager would refuse a change),
+`save(pluginConfig, secrets)`, `cancel()` and `theme: 'dark'`. `save` stores
+`{alias, description, sourceType, readOnly: true, pluginConfig}` and then each `{name, value}`
+secret, and resolves to `{ok: true}` or `{ok: false, errors}`. Keep secret values out of
+`pluginConfig`: reference them as `{{secret.NAME}}` placeholders and hand the values to `save`.
+
+The save sequence never leaves an enabled source naming a missing secret. A new source, or an
+existing one holding no secrets, is saved disabled, then every secret is written, then the source
+is saved as asked. If a secret fails, the source stays disabled and the error says so and names
+the secret to set; if the final save is refused, the error ends with "the source remains
+disabled". An existing source that already holds secrets is saved first and its secrets after;
+secrets new to it are written first and deleted again if the source is refused. A secret held
+through an `externalRef` is never overwritten with a value.
+
+`errors` carries each failure whole. The manager answers a refused source with one
+`invalid_federated_source` message that joins its errors with "; ", and a provider error may itself
+contain "; ", so `save` returns that message as one entry and never splits it. An editor that
+wants per-field errors validates through its own module endpoint before saving.
+
+Authorization of a module's own routes about a tenant-db's sources (a validation or discovery
+endpoint the editor calls): core's rule for creating a module-provided source is the REST guard
+that every non-public `/api` route passes, plus
+`TenantScopeCheck.reject(apiKey, tenant)(ctx.scopeOf)`, the call
+`FederatedSourceHandlers.createSource` makes with the same resolver. A module route under `/api`
+gets the guard; the module makes the call itself. The guard reads no tenant from a module's path,
+so that call is what confines the caller to the tenant.
+
 ## Refusal messages
 
 All start with `QoD: ` and never include policy SQL, literals, identity values or backend
