@@ -142,6 +142,10 @@ Support/qod`, `%APPDATA%\qod`) is moved there on first use.
 a profile with `--profile NAME` or `QOD_PROFILE`; the default profile is
 named `default`.
 
+`QOD_DATA_DIR` moves the durable state (embedded Postgres, DuckLake data,
+certificates) away from the platform user data dir; with `QOD_CONFIG_FILE` it
+gives a fully separate install.
+
 | Setting | Env var | Default | Notes |
 |---|---|---|---|
 | `manager_url` | `QOD_MANAGER_URL` | `http://localhost:20900` | REST plane base URL. |

@@ -224,3 +224,30 @@ def test_cached_jre_reads_the_cache_only(tmp_path, monkeypatch):
     java.write_text("")
     assert launcher.cached_jre(tmp_path / "jre") == str(java)
     assert launcher.ensure_jre(tmp_path / "jre", os_name="linux", arch="x86_64") == str(java)
+
+
+def test_default_data_dir_honors_qod_data_dir(monkeypatch, tmp_path):
+    from qod_cli import launcher
+
+    monkeypatch.setenv("QOD_DATA_DIR", str(tmp_path / "isolated"))
+    assert launcher.default_data_dir() == tmp_path / "isolated"
+
+
+def test_default_data_dir_expands_user(monkeypatch):
+    from pathlib import Path
+
+    from qod_cli import launcher
+
+    monkeypatch.setenv("QOD_DATA_DIR", "~/qod-x")
+    assert launcher.default_data_dir() == Path.home() / "qod-x"
+
+
+def test_default_data_dir_ignores_blank_qod_data_dir(monkeypatch):
+    from pathlib import Path
+
+    import platformdirs
+
+    from qod_cli import launcher
+
+    monkeypatch.setenv("QOD_DATA_DIR", "  ")
+    assert launcher.default_data_dir() == Path(platformdirs.user_data_dir("qod"))

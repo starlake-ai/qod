@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Added
+
+- **`QOD_DATA_DIR` moves the CLI's durable state directory.** `qod serve`, `qod start`, `qod stop`,
+  `qod status` and `qod admin` keep the embedded Postgres, DuckLake data and certificates under the
+  platform user data dir; set `QOD_DATA_DIR` to put them elsewhere. Together with `QOD_CONFIG_FILE`
+  it gives a second, fully separate install on the same machine, such as a throwaway one for a
+  sample project, without touching the first one's password, data or CLI profile.
+
 ### Upgrading
 
 - **Check the boot output for column masks that do not return their column's type.** qod-node
