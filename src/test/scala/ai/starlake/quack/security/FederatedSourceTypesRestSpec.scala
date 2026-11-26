@@ -6,9 +6,9 @@ import io.circe.parser.parse
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
-/** `GET /api/federated-source-types`: the module source types the console's federation form
-  * offers. Any admin session reads them (a tenant admin or a superuser), like the federated-source
-  * routes the form calls; the guard refuses a tenant user, a staff caller and an anonymous one.
+/** `GET /api/federated-source-types`: the module source types the console's federation form offers.
+  * Any admin session reads them (a tenant admin or a superuser), like the federated-source routes
+  * the form calls; the guard refuses a tenant user, a staff caller and an anonymous one.
   */
 class FederatedSourceTypesRestSpec extends AnyFlatSpec with Matchers with SecurityHttpHelpers:
 

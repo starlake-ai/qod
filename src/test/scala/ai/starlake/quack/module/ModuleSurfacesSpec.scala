@@ -20,18 +20,18 @@ class ModuleSurfacesSpec extends AnyFlatSpec with Matchers:
       public: Set[String] = Set.empty,
       providers: List[FederatedSourceProvider] = Nil
   ): ManagerModule = new ManagerModule:
-    def name                         = n
-    def changelogPath                = None
-    def start(ctx: ManagerContext)   = IO.unit
-    def endpoints                    = Nil
-    def publicPathPrefixes           = public
-    override def staticMounts        = mounts
-    override def permissions         = perms
-    override def staffPathPrefixes   = prefixes
-    override def consolePages        = pages
+    def name                              = n
+    def changelogPath                     = None
+    def start(ctx: ManagerContext)        = IO.unit
+    def endpoints                         = Nil
+    def publicPathPrefixes                = public
+    override def staticMounts             = mounts
+    override def permissions              = perms
+    override def staffPathPrefixes        = prefixes
+    override def consolePages             = pages
     override def federatedSourceProviders = providers
-    def onEvent(event: ManagerEvent) = IO.unit
-    def stop                         = IO.unit
+    def onEvent(event: ManagerEvent)      = IO.unit
+    def stop                              = IO.unit
 
   private val p = PlatformPermission("hosted.quota.extra", "extra minutes")
 
@@ -421,7 +421,8 @@ class ModuleSurfacesSpec extends AnyFlatSpec with Matchers:
     val s = validate(
       mod(
         "plain",
-        providers = List(provider("test_connector", Some(Editor)), provider("plain_connector", None))
+        providers =
+          List(provider("test_connector", Some(Editor)), provider("plain_connector", None))
       )
     ).toOption.get
     s.sourceTypes shouldBe List(
@@ -434,7 +435,8 @@ class ModuleSurfacesSpec extends AnyFlatSpec with Matchers:
     val r = refused(
       mod(
         "plain",
-        providers = List(provider("test_connector", Some(SourceEditor("T", "/elsewhere/editor.js"))))
+        providers =
+          List(provider("test_connector", Some(SourceEditor("T", "/elsewhere/editor.js"))))
       )
     )
     r should include("module plain: source editor of 'test_connector'")
