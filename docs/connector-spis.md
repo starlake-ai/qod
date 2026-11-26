@@ -193,8 +193,8 @@ wants per-field errors validates through its own module endpoint before saving.
   it can call any `/api` route the caller can.
 - `ctx.source.pluginConfig` holds secret placeholders (`{{secret.NAME}}`), never values.
 - Every module source is saved `readOnly: true`: core cannot judge what a plugin's writes do, so it
-  never offers them. The `ctx.readOnly` rule is conservative: it is true for any source holding a
-  secret that the caller, not a superuser, may not change.
+  never offers them. The `ctx.readOnly` rule is conservative: it is true
+  for a non-superuser editing a source that holds any secret, whether or not the edit would touch it.
 - Saving an existing source that holds no secret, with new secrets, disables it until those
   secrets are written, then saves it as asked.
 

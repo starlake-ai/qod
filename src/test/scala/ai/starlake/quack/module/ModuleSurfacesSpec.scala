@@ -431,6 +431,24 @@ class ModuleSurfacesSpec extends AnyFlatSpec with Matchers:
     )
   }
 
+  it should "list only the wires the provider registry holds" in {
+    val s = ModuleSurfaces
+      .validate(
+        List(
+          mod(
+            "plain",
+            providers =
+              List(provider("test_connector", Some(Editor)), provider("late_connector", None))
+          )
+        ),
+        coreSegments,
+        _ == "test_connector"
+      )
+      .toOption
+      .get
+    s.sourceTypes.map(_.sourceType) shouldBe List("test_connector")
+  }
+
   it should "refuse an editor bundle outside every mount, naming the module" in {
     val r = refused(
       mod(

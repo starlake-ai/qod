@@ -2473,7 +2473,14 @@ object Main extends IOApp with LazyLogging:
         IO.defer(
           IO.fromEither(
             ai.starlake.quack.ondemand.module.ModuleSurfaces
-              .validate(modules, coreApiSegments)
+              .validate(
+                modules,
+                coreApiSegments,
+                wire =>
+                  ai.starlake.quack.ondemand.federation.FederatedSourceProviders
+                    .of(wire)
+                    .isDefined
+              )
               .left
               .map(msg => new IllegalStateException(s"module surfaces refused: $msg"))
           )

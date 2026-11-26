@@ -183,10 +183,14 @@ object ModuleSurfaces:
     * not checked. Every module's source editors are checked, with or without a platform surface:
     * each bundle must lie under one of the module's own static mounts, as a console page's does.
     * Each module's surfaces are read once, and the result is built from those same values.
+    * `installed`: whether a source type's wire is in the provider registry (installed at boot,
+    * before `start()`). A getter that answers differently after `start()` could name a wire the
+    * registry never got; such a type is left out of `sourceTypes`, as nothing could save one.
     */
   def validate(
       modules: List[ManagerModule],
-      coreApiSegments: Set[String]
+      coreApiSegments: Set[String],
+      installed: String => Boolean = _ => true
   ): Either[String, ModuleSurfaces] =
     val declared = modules.map(m =>
       Declared(
@@ -215,11 +219,10 @@ object ModuleSurfaces:
       }
     }
     declared.foreach { d =>
-      d.sourceTypes.foreach { (wire, editor) =>
+      d.sourceTypes.filter((wire, _) => installed(wire)).foreach { (wire, editor) =>
         editor.foreach { e =>
-          bundleRefusal(d.mounts, e.bundle).foreach(r =>
-            errs += s"module ${d.module.name}: source editor of '$wire': $r"
-          )
+          bundleRefusal(d.mounts, e.bundle)
+            .foreach(r => errs += s"module ${d.module.name}: source editor of '$wire': $r")
         }
         types += ResolvedSourceType(
           d.module.name,
