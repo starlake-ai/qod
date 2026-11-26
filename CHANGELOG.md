@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.15.1
 
 ### Added
 
@@ -10,6 +10,12 @@
   it gives a second, fully separate install on the same machine, such as a throwaway one for a
   sample project, without touching the first one's password, data or CLI profile.
 
+- **Module source types in the console.** The federation form's type picker lists module-provided
+  source types after the built-in four, and mounts a type's console editor
+  (`FederatedSourceProvider.editor`, source editor contract 1) in place of the type's fields; core
+  still saves the source and its secrets, never leaving an enabled source without them.
+  `GET /api/federated-source-types` lists the module types. See docs/connector-spis.md.
+
 ### Upgrading
 
 - **Check the boot output for column masks that do not return their column's type.** qod-node
@@ -18,10 +24,6 @@
   type`). At each boot the manager now prints one `WARN:` line on stderr per such mask and DuckLake
   database, naming the tenant, the role, the policy id, the column, the mask's type and the
   column's, never the mask. Rewrite each with the `TRY_CAST` form below, or use `NULL` or a deny.
-
-### Added
-
-- Module source types in the console: the federation form's type picker lists module-provided source types after the built-in four, and mounts a type's console editor (`FederatedSourceProvider.editor`, source editor contract 1) in place of the type's fields; core still saves the source and its secrets, never leaving an enabled source without them. `GET /api/federated-source-types` lists the module types. See docs/connector-spis.md.
 
 ### Fixed
 
