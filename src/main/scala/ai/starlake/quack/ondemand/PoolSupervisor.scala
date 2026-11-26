@@ -24,7 +24,7 @@ import ai.starlake.quack.model.{
   UserS3CredentialRules
 }
 import ai.starlake.quack.ondemand.rbac.{RbacResolver, UserMemberships}
-import ai.starlake.quack.ondemand.fleet.MissingSlots
+import ai.starlake.quack.ondemand.fleet.{MissingSlots, PendingDetail}
 import ai.starlake.quack.ondemand.runtime.{
   InitSql,
   NoFreeServer,
@@ -215,8 +215,8 @@ final class PoolSupervisor(
   private val pools = TrieMap.empty[PoolKey, PoolState]
   // PoolKey -> pool.id, so per-node mutations know the FK to qodstate_pool.
   private val poolIdByKey = TrieMap.empty[PoolKey, String]
-  // Why the last spawn attempt left a slot pending (`none_free` | `none_fits`), fed by
-  // NoFreeServer. Replica-local: it explains this replica's last attempt, which under HA is the
+  // Why the last spawn attempt left a slot pending (`none_free` | `none_fits` | `none_match`), fed
+  // by NoFreeServer. Replica-local: it explains this replica's last attempt, which under HA is the
   // leader's reconcile or the replica that served the scale call. Read via pendingReason.
   private final case class PendingCause(reason: String, detail: Option[String])
   private val pendingReasons = TrieMap.empty[PoolKey, PendingCause]
@@ -1514,9 +1514,11 @@ final class PoolSupervisor(
   /** Start `specs` sequentially, clearing any stale NodeLoadTracker entry first (a reused node id
     * must not inherit a lingering draining=true flag). Returns the started nodes in spawn order.
     *
-    * A [[NoFreeServer]] (fleet backend: no server free or none fits) leaves that slot pending
-    * instead of failing the operation; reconcile fills it once capacity appears. Every other
-    * failure, AND a cancellation of the calling fiber (request timeout, resume hold timeout,
+    * A [[NoFreeServer]] (fleet backend: no server free, none fits or none carries the cohort's
+    * labels) leaves that slot pending instead of failing the operation; reconcile fills it once
+    * capacity appears. The pool shows one reason: the most pressing of this call's misses
+    * ([[PendingDetail.precedence]]), written once when the call ends, whatever its outcome. Every
+    * other failure, AND a cancellation of the calling fiber (request timeout, resume hold timeout,
     * shutdown), first stops (best effort) every node this call already started, then propagates
     * unchanged: callers persist rows and the new distribution only after the whole call succeeds,
     * so a node left running here would be capacity no row tracks (a fleet server kept assigned, a
@@ -1528,33 +1530,48 @@ final class PoolSupervisor(
     * own claim) so the pool lock is held about one stop timeout at worst.
     */
   private def spawnAll(key: PoolKey, specs: List[NodeSpec]): IO[List[RunningNode]] =
-    Ref.of[IO, List[RunningNode]](Nil).flatMap { started =>
-      val startEach: IO[Unit] = specs.traverse_ { spec =>
-        (IO.delay(tracker.remove(spec.nodeId)) *>
-          IO.uncancelable { poll =>
-            poll(startNodeEmitting(key, spec)).flatMap(n => started.update(_ :+ n))
-          }).recoverWith { case NoFreeServer(_, id, reason, _, detail) =>
-          IO.delay {
-            pendingReasons.put(key, PendingCause(reason, detail))
-            logger.info(s"fleet: slot $id of $key pending ($reason)")
+    (Ref.of[IO, List[RunningNode]](Nil), Ref.of[IO, Option[PendingCause]](None)).flatMapN {
+      (started, missed) =>
+        // Slots of different cohorts can miss for different reasons (one on labels, the next on
+        // a free server once an earlier slot took the last one), but a pool shows one. Keep the
+        // most pressing miss of THIS batch (the later one on a tie, its listing is fresher) and
+        // write it once below: a per-slot write would let the last miss hide a label miss only
+        // an operator can fix, and merging with the stored entry would let a reason from an
+        // earlier pass outrank this one's.
+        val startEach: IO[Unit] = specs.traverse_ { spec =>
+          (IO.delay(tracker.remove(spec.nodeId)) *>
+            IO.uncancelable { poll =>
+              poll(startNodeEmitting(key, spec)).flatMap(n => started.update(_ :+ n))
+            }).recoverWith { case NoFreeServer(_, id, reason, _, detail) =>
+            IO.delay(logger.info(s"fleet: slot $id of $key pending ($reason)")) *>
+              missed.update {
+                case Some(best)
+                    if PendingDetail.precedence(best.reason) < PendingDetail.precedence(reason) =>
+                  Some(best)
+                case _ => Some(PendingCause(reason, detail))
+              }
           }
         }
-      }
-      def rollback(cause: String): IO[Unit] = started.get.flatMap { rs =>
-        if rs.isEmpty then IO.unit
-        else
-          IO.delay(
-            logger.warn(
-              s"spawn in $key $cause; stopping ${rs.size} node(s) this call started: " +
-                rs.map(_.nodeId).mkString(", ")
-            )
-          ) *> rs.parTraverse_(n => stopNodeBestEffort(key, n.nodeId, "spawn-rollback"))
-      }
-      startEach.guaranteeCase {
-        case Outcome.Succeeded(_) => IO.unit
-        case Outcome.Errored(t)   => IO.uncancelable(_ => rollback(s"failed (${t.getMessage})"))
-        case Outcome.Canceled()   => IO.uncancelable(_ => rollback("was cancelled"))
-      } *> started.get
+        // Written on every outcome, as the per-slot write it replaces was: a later slot failing on
+        // another error (which rolls the batch back below) or a cancellation still leaves the
+        // earlier misses recorded.
+        val recordMissed: IO[Unit] =
+          missed.get.flatMap(_.traverse_(c => IO.delay(pendingReasons.put(key, c))))
+        def rollback(cause: String): IO[Unit] = started.get.flatMap { rs =>
+          if rs.isEmpty then IO.unit
+          else
+            IO.delay(
+              logger.warn(
+                s"spawn in $key $cause; stopping ${rs.size} node(s) this call started: " +
+                  rs.map(_.nodeId).mkString(", ")
+              )
+            ) *> rs.parTraverse_(n => stopNodeBestEffort(key, n.nodeId, "spawn-rollback"))
+        }
+        startEach.guarantee(recordMissed).guaranteeCase {
+          case Outcome.Succeeded(_) => IO.unit
+          case Outcome.Errored(t)   => IO.uncancelable(_ => rollback(s"failed (${t.getMessage})"))
+          case Outcome.Canceled()   => IO.uncancelable(_ => rollback("was cancelled"))
+        } *> started.get
     }
 
   /** Start one node and emit [[ManagerEvent.NodeStarted]]. Every `backend.start` call site routes
@@ -2109,8 +2126,9 @@ final class PoolSupervisor(
       .map(s => (s.distribution.total - s.nodes.size).max(0))
       .getOrElse(0)
 
-  /** Why the last spawn attempt left a slot of `key` pending (`none_free` | `none_fits`), or left a
-    * dead node on its unreachable server for lack of a free one; None (and the entry cleared) once
+  /** Why the last spawn attempt left a slot of `key` pending (`none_free` | `none_fits` |
+    * `none_match`, the most pressing of a batch by [[PendingDetail.precedence]]), or left a dead
+    * node on its unreachable server for lack of a free one; None (and the entry cleared) once
     * neither holds.
     */
   def pendingReason(key: PoolKey): Option[String] = pendingCause(key).map(_.reason)

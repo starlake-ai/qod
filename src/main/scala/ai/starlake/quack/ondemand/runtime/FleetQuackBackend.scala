@@ -20,14 +20,16 @@ import com.typesafe.scalalogging.LazyLogging
 import io.fabric8.kubernetes.api.model.Quantity
 
 import java.time.Instant
+import scala.collection.concurrent.TrieMap
 import scala.concurrent.duration._
 import scala.util.Try
 
-/** No server is free (or none fits) for `nodeId`. `heldBy` names the schedulable server that still
-  * holds the node id's assignment (kept, since the replacement claim rolled back), None when
-  * nothing holds it or the holder is drained: a drained holder (a crash between drain's release and
-  * its flag) must not keep the node forever. `detail` is the operator-facing sentence of
-  * [[ai.starlake.quack.ondemand.fleet.PendingDetail]], None when the server listing failed.
+/** No server is free (or none fits, or none carries the cohort's labels) for `nodeId`. `heldBy`
+  * names the schedulable server that still holds the node id's assignment (kept, since the
+  * replacement claim rolled back), None when nothing holds it or the holder is drained: a drained
+  * holder (a crash between drain's release and its flag) must not keep the node forever. `detail`
+  * is the operator-facing sentence of [[ai.starlake.quack.ondemand.fleet.PendingDetail]], None when
+  * the server listing failed.
   */
 final case class NoFreeServer(
     poolKey: PoolKey,
@@ -67,6 +69,9 @@ final class FleetQuackBackend(
 
   override val isFleet: Boolean = true
 
+  // A cohort's nodeSelector steers the claim (`labels @> selector`); its tolerations are ignored.
+  override val supportsPlacement: Boolean = true
+
   override val allowsLocalFiles: Boolean = nodeFiles.allowLocal
 
   def livenessOf(row: FleetServerRow): ServerLiveness =
@@ -79,6 +84,19 @@ final class FleetQuackBackend(
 
   // Metastore keys that reach no fleet server, named once per pool and key.
   private val droppedKeys = new NodeMetastore.DroppedKeys(logger)
+
+  // Pools whose tolerations were already named. A fleet server has labels but no taints, so a
+  // toleration means nothing here; it is ignored, not refused, so a pool exported from Kubernetes
+  // imports and runs on a fleet. Once per pool, like droppedKeys: every slot start passes here.
+  private val toleratedPools = TrieMap.empty[PoolKey, Unit]
+
+  private def reportTolerations(spec: NodeSpec): Unit =
+    val n = spec.placement.tolerations.size
+    if n > 0 && toleratedPools.putIfAbsent(spec.poolKey, ()).isEmpty then
+      logger.warn(
+        s"${spec.poolKey}: ignoring $n toleration(s) of a cohort placement: fleet servers have " +
+          "no taints, only labels a nodeSelector can match"
+      )
 
   private def assignmentFor(spec: NodeSpec, token: String): FleetAssignment =
     droppedKeys.report(spec.poolKey, spec.metastore)
@@ -138,11 +156,15 @@ final class FleetQuackBackend(
     // Claim and arm the release atomically: a cancellation between the claim and the guarantee
     // would otherwise leak a claimed server. Every non-success outcome after the claim (error,
     // cancellation, failed report, timeout) releases it.
+    // The cohort's nodeSelector narrows the claim to servers carrying every pair; an empty one
+    // (no cohorts, a maintenance or merge node) takes any server, plain ones first.
     val need                          = requiredMemoryBytes(spec)
+    val selector                      = spec.placement.nodeSelector
     val claimAndWait: IO[RunningNode] = IO.uncancelable { poll =>
-      IO.blocking(
-        store.claimReplacing(assignmentFor(spec, token), cfg.heartbeatTimeoutSec, need)
-      ).flatMap {
+      IO.blocking {
+        reportTolerations(spec)
+        store.claimReplacing(assignmentFor(spec, token), cfg.heartbeatTimeoutSec, need, selector)
+      }.flatMap {
         case Left(miss) =>
           val reason = miss match
             case ClaimMiss.NoneFree  => "none_free"
@@ -152,7 +174,7 @@ final class FleetQuackBackend(
             IO.blocking(store.byNodeId(spec.nodeId).filterNot(_.unschedulable).map(_.name))
           // A failed listing must not mask the miss itself: the slot stays pending either way.
           val detailIO =
-            IO.blocking(PendingDetail.describe(reason, store.list(), livenessOf, need))
+            IO.blocking(PendingDetail.describe(reason, store.list(), livenessOf, need, selector))
               .attempt
               .map(_.toOption)
           holderIO.flatMap { holder =>
