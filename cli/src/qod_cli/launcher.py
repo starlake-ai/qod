@@ -191,7 +191,11 @@ def default_cache_dir() -> Path:
 
 def default_data_dir() -> Path:
     """Durable state anchor for `qod start` (DuckLake data, certs): unlike the
-    cache dir, wiping this loses data."""
+    cache dir, wiping this loses data. `QOD_DATA_DIR` moves it elsewhere; with
+    `QOD_CONFIG_FILE` it gives a fully separate install."""
+    override = os.environ.get("QOD_DATA_DIR", "").strip()
+    if override:
+        return Path(override).expanduser()
     import platformdirs
 
     return Path(platformdirs.user_data_dir("qod"))
