@@ -11,7 +11,7 @@ function secret(name: string, externalRef?: string): FederatedSecretResponse {
 
 /** A fake manager. `secrets` is what the source holds, or 'missing' (404) when it does not exist.
  *  `failCreate` is thrown by the enabled create, `failSecret` by every secret write. */
-function fake(secrets: FederatedSecretResponse[] | 'missing', o: { failCreate?: unknown; failSecret?: unknown; failList?: unknown } = {}) {
+function fake(secrets: FederatedSecretResponse[] | 'missing', o: { failCreate?: unknown; failSecret?: unknown; failList?: unknown; failSecretOn?: string; failDelete?: boolean } = {}) {
   const calls: string[] = [];
   const api: PluginSaveApi = {
     async createFederatedSource(_t, _d, req) {
@@ -27,10 +27,13 @@ function fake(secrets: FederatedSecretResponse[] | 'missing', o: { failCreate?: 
     },
     async upsertFederatedSecret(_t, _d, _a, req) {
       calls.push(`secret ${req.name}=${req.value}`);
-      if (o.failSecret !== undefined) throw o.failSecret;
+      if (o.failSecret !== undefined && (o.failSecretOn === undefined || o.failSecretOn === req.name)) throw o.failSecret;
       return secret(req.name);
     },
-    async deleteFederatedSecret(_t, _d, _a, name) { calls.push(`delete ${name}`); },
+    async deleteFederatedSecret(_t, _d, _a, name) {
+      calls.push(`delete ${name}`);
+      if (o.failDelete) throw new ApiError(500, 'nope');
+    },
   };
   return { api, calls };
 }
@@ -82,6 +85,55 @@ describe('savePluginSource', () => {
         'set secret TC_TOKEN under Secrets, then save the source again to enable it'],
     });
     expect(f.calls).toEqual(['list', 'create disabled', 'secret TC_TOKEN=k']);
+  });
+
+  it('saves an existing source holding no secrets disabled first, then enables it', async () => {
+    const f = fake([]);
+    expect(await savePluginSource(f.api, input())).toEqual({ ok: true });
+    expect(f.calls).toEqual(['list', 'create disabled', 'secret TC_TOKEN=k', 'create']);
+  });
+
+  it('says an existing secretless source stays disabled when its secret cannot be written', async () => {
+    const f = fake([], { failSecret: new ApiError(500, 'boom') });
+    const r = await savePluginSource(f.api, input());
+    expect(r).toEqual({
+      ok: false,
+      errors: ['the source was saved DISABLED but its secret TC_TOKEN was not (boom); expand the source, ' +
+        'set secret TC_TOKEN under Secrets, then save the source again to enable it'],
+    });
+    expect(f.calls).toEqual(['list', 'create disabled', 'secret TC_TOKEN=k']);
+  });
+
+  it('says the source remains disabled when the enabling write is refused', async () => {
+    const f = fake('missing', { failCreate: new ApiError(403, 'superuser only', 'superuser_required') });
+    const r = await savePluginSource(f.api, input());
+    expect(r).toEqual({ ok: false, errors: ['superuser only; the source remains disabled'] });
+    expect(f.calls).toEqual(['list', 'create disabled', 'secret TC_TOKEN=k', 'create']);
+  });
+
+  it('names a secret whose rollback delete failed', async () => {
+    const refusal = new ApiError(403, 'refused', 'superuser_required');
+    const f = fake([secret('TC_TOKEN')], { failCreate: refusal, failDelete: true });
+    const r = await savePluginSource(f.api, input({
+      secrets: [{ name: 'TC_TOKEN', value: 'k' }, { name: 'TC_EXTRA', value: 'e' }],
+    }));
+    expect(r).toEqual({ ok: false, errors: ['refused; secret TC_EXTRA could not be removed'] });
+  });
+
+  it('says the config was saved when a held secret cannot be updated (all held)', async () => {
+    const f = fake([secret('TC_TOKEN')], { failSecret: new ApiError(500, 'boom') });
+    const r = await savePluginSource(f.api, input());
+    expect(r).toEqual({ ok: false, errors: ['the source configuration was saved but secret TC_TOKEN was not updated (boom)'] });
+    expect(f.calls).toEqual(['list', 'create', 'secret TC_TOKEN=k']);
+  });
+
+  it('says the config was saved when a held secret cannot be updated (with a fresh one)', async () => {
+    const f = fake([secret('TC_TOKEN')], { failSecret: new ApiError(500, 'boom'), failSecretOn: 'TC_TOKEN' });
+    const r = await savePluginSource(f.api, input({
+      secrets: [{ name: 'TC_TOKEN', value: 'k' }, { name: 'TC_EXTRA', value: 'e' }],
+    }));
+    expect(r).toEqual({ ok: false, errors: ['the source configuration was saved but secret TC_TOKEN was not updated (boom)'] });
+    expect(f.calls).toEqual(['list', 'secret TC_EXTRA=e', 'create', 'secret TC_TOKEN=k']);
   });
 
   it('hands back the manager error message whole, as the manager built it', async () => {

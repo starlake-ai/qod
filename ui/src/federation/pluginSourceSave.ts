@@ -28,7 +28,8 @@ export interface PluginSaveInput {
  *  secret, through the sequence the form uses for a Postgres password, for a list of secrets:
  *  - a new source (its secret listing 404s) is saved disabled, then every secret, then as asked:
  *    an enabled source naming a missing secret would fail the tenant-db's federation at spawn;
- *  - an existing source is saved first and its secrets after, so a refusal writes nothing; secrets
+ *  - an existing source holding no secrets takes the same path;
+ *  - an existing source holding some is saved first and its secrets after, so a refusal writes nothing; secrets
  *    new to a source already holding others go first, so their placeholders resolve at every
  *    instant, and are deleted again on a refusal;
  *  - a secret held through an externalRef is never overwritten with a value.
@@ -56,22 +57,7 @@ export async function savePluginSource(api: PluginSaveApi, input: PluginSaveInpu
         if (e instanceof ApiError && e.status === 404) return null;
         throw e;
       });
-    if (stored == null) {
-      await api.createFederatedSource(tenant, tenantDb, { ...request, disabled: true });
-      for (const s of targets) {
-        try {
-          await api.upsertFederatedSecret(tenant, tenantDb, alias, s);
-        } catch (e) {
-          return {
-            ok: false,
-            errors: [`the source was saved DISABLED but its secret ${s.name} was not (${errorMessage(e)}); ` +
-              `expand the source, set secret ${s.name} under Secrets, then save the source again to enable it`],
-          };
-        }
-      }
-      await api.createFederatedSource(tenant, tenantDb, request);
-      return { ok: true };
-    }
+    if (stored == null || stored.length === 0) return await saveDisabledFirst(api, input, alias, request);
     for (const s of targets) {
       const ref = stored.find(x => x.name === s.name)?.externalRef;
       if (ref)
@@ -82,11 +68,6 @@ export async function savePluginSource(api: PluginSaveApi, input: PluginSaveInpu
     }
     const fresh = targets.filter(s => !stored.some(x => x.name === s.name));
     const held = targets.filter(s => stored.some(x => x.name === s.name));
-    if (stored.length === 0 || fresh.length === 0) {
-      await api.createFederatedSource(tenant, tenantDb, request);
-      for (const s of targets) await api.upsertFederatedSecret(tenant, tenantDb, alias, s);
-      return { ok: true };
-    }
     const written: string[] = [];
     try {
       for (const s of fresh) {
@@ -95,15 +76,59 @@ export async function savePluginSource(api: PluginSaveApi, input: PluginSaveInpu
       }
       await api.createFederatedSource(tenant, tenantDb, request);
     } catch (e) {
-      for (const name of written)
-        await api.deleteFederatedSecret(tenant, tenantDb, alias, name).catch(() => undefined);
-      throw e;
+      const stuck: string[] = [];
+      for (const name of written) {
+        try {
+          await api.deleteFederatedSecret(tenant, tenantDb, alias, name);
+        } catch {
+          stuck.push(name);
+        }
+      }
+      return {
+        ok: false,
+        errors: [errorsOf(e)[0] + stuck.map(n => `; secret ${n} could not be removed`).join('')],
+      };
     }
-    for (const s of held) await api.upsertFederatedSecret(tenant, tenantDb, alias, s);
+    for (const s of held) {
+      try {
+        await api.upsertFederatedSecret(tenant, tenantDb, alias, s);
+      } catch (e) {
+        return {
+          ok: false,
+          errors: [`the source configuration was saved but secret ${s.name} was not updated (${errorMessage(e)})`],
+        };
+      }
+    }
     return { ok: true };
   } catch (e) {
     return { ok: false, errors: errorsOf(e) };
   }
+}
+
+/** A source with no stored secrets (new, or existing and holding none): saved disabled, then every
+ *  secret, then enabled, so an enabled source never names a missing secret. */
+async function saveDisabledFirst(
+  api: PluginSaveApi, input: PluginSaveInput, alias: string, request: FederatedSourceCreateRequest,
+): Promise<SaveResult> {
+  const { tenant, tenantDb } = input;
+  await api.createFederatedSource(tenant, tenantDb, { ...request, disabled: true });
+  for (const s of input.secrets) {
+    try {
+      await api.upsertFederatedSecret(tenant, tenantDb, alias, s);
+    } catch (e) {
+      return {
+        ok: false,
+        errors: [`the source was saved DISABLED but its secret ${s.name} was not (${errorMessage(e)}); ` +
+          `expand the source, set secret ${s.name} under Secrets, then save the source again to enable it`],
+      };
+    }
+  }
+  try {
+    await api.createFederatedSource(tenant, tenantDb, request);
+  } catch (e) {
+    return { ok: false, errors: [`${errorsOf(e)[0]}; the source remains disabled`] };
+  }
+  return { ok: true };
 }
 
 /** One message per failure. The manager joins a refused source's errors with "; "
