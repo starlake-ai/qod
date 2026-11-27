@@ -20,13 +20,15 @@ final case class ResolvedConsolePage(
   def path: String = s"/ui/x/$module/$id"
 
 /** A module's federated source type as `GET /api/federated-source-types` lists it: `label` is its
-  * editor's, or the wire itself when it has no editor; `editorBundle` is the checked bundle.
+  * editor's, or the wire itself when it has no editor; `editorBundle` is the checked bundle;
+  * `editsHeldSources` is the provider's flag, read once with the editor.
   */
 final case class ResolvedSourceType(
     module: String,
     sourceType: String,
     label: String,
-    editorBundle: Option[String]
+    editorBundle: Option[String],
+    editsHeldSources: Boolean = false
 )
 
 /** The platform surfaces of the loaded modules (issue #274), validated once at boot after every
@@ -169,8 +171,8 @@ object ModuleSurfaces:
       pages: List[ConsolePage],
       mounts: List[StaticMount],
       publicPrefixes: Set[String],
-      /** Each provider's wire and editor, read once. */
-      sourceTypes: List[(String, Option[SourceEditor])]
+      /** Each provider's wire, editor and editsHeldSources flag, read once. */
+      sourceTypes: List[(String, Option[SourceEditor], Boolean)]
   ):
     def hasSurface: Boolean = permissions.nonEmpty || staffPrefixes.nonEmpty || pages.nonEmpty
 
@@ -200,7 +202,7 @@ object ModuleSurfaces:
         m.consolePages,
         m.staticMounts,
         m.publicPathPrefixes,
-        m.federatedSourceProviders.map(p => (p.wire, p.editor))
+        m.federatedSourceProviders.map(p => (p.wire, p.editor, p.editsHeldSources))
       )
     )
     val errs     = List.newBuilder[String]
@@ -219,7 +221,7 @@ object ModuleSurfaces:
       }
     }
     declared.foreach { d =>
-      d.sourceTypes.filter((wire, _) => installed(wire)).foreach { (wire, editor) =>
+      d.sourceTypes.filter((wire, _, _) => installed(wire)).foreach { (wire, editor, editsHeld) =>
         editor.foreach { e =>
           bundleRefusal(d.mounts, e.bundle)
             .foreach(r => errs += s"module ${d.module.name}: source editor of '$wire': $r")
@@ -228,7 +230,8 @@ object ModuleSurfaces:
           d.module.name,
           wire,
           editor.fold(wire)(_.label),
-          editor.map(_.bundle)
+          editor.map(_.bundle),
+          editsHeld
         )
       }
     }

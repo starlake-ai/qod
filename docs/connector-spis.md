@@ -167,8 +167,9 @@ says "this source type has no editor; use the REST API". Editing a stored module
 the type's editor too, and the editor remounts when the source type changes.
 
 `GET /api/federated-source-types` (any admin session) answers
-`{types: [{module, sourceType, label, editorBundle}]}`, with `label` the editor's (the wire when
-there is no editor) and `editorBundle` null for a type without an editor.
+`{types: [{module, sourceType, label, editorBundle, editsHeldSources}]}`, with `label` the
+editor's (the wire when there is no editor), `editorBundle` null for a type without an editor, and
+`editsHeldSources` the provider's flag.
 
 Editor contract 1: the bundle exports `qodSourceEditorContract = 1` and `mount(el, ctx)`,
 returning an unmount function or a Promise of one. A bundle that fails to load, speaks another

@@ -431,6 +431,23 @@ class ModuleSurfacesSpec extends AnyFlatSpec with Matchers:
     )
   }
 
+  it should "carry each provider's editsHeldSources flag" in {
+    val opted = new FederatedSourceProvider:
+      val wire                                               = "test_connector"
+      val extensionName                                      = "qod_test_connector"
+      val reservedSecretPrefixes: List[String]               = Nil
+      def errors(s: FederatedSource, r: Set[String])         = Nil
+      def normalizedConfig(raw: String)                      = Right(raw)
+      def renderTemplate(s: FederatedSource, r: Set[String]) = Right("")
+      override def editsHeldSources                          = true
+      override def connectionOf(raw: String)                 = Some(raw)
+    val s = validate(
+      mod("plain", providers = List(opted, provider("plain_connector", None)))
+    ).toOption.get
+    s.sourceTypes.map(t => t.sourceType -> t.editsHeldSources) shouldBe
+      List("test_connector" -> true, "plain_connector" -> false)
+  }
+
   it should "list only the wires the provider registry holds" in {
     val s = ModuleSurfaces
       .validate(

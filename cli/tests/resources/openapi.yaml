@@ -9521,6 +9521,7 @@ components:
       - module
       - sourceType
       - label
+      - editsHeldSources
       properties:
         module:
           type: string
@@ -9530,6 +9531,8 @@ components:
           type: string
         editorBundle:
           type: string
+        editsHeldSources:
+          type: boolean
     FederatedSourceTypesResponse:
       title: FederatedSourceTypesResponse
       type: object

@@ -14,7 +14,9 @@ final class FederatedSourceTypeHandlers(
     scopeOf: SessionScope.Resolver
 ):
   private val views =
-    types.map(t => FederatedSourceTypeView(t.module, t.sourceType, t.label, t.editorBundle))
+    types.map(t =>
+      FederatedSourceTypeView(t.module, t.sourceType, t.label, t.editorBundle, t.editsHeldSources)
+    )
 
   def list(apiKey: Option[String]): HandlerErrors.Out[FederatedSourceTypesResponse] =
     IO.blocking {

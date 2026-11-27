@@ -17,7 +17,8 @@ class FederatedSourceTypeHandlersSpec extends AnyFlatSpec with Matchers:
       "test-module",
       "test_connector",
       "Test connector",
-      Some("/test-module/editor.js")
+      Some("/test-module/editor.js"),
+      editsHeldSources = true
     ),
     ResolvedSourceType("test-module", "plain_connector", "plain_connector", None)
   )
@@ -40,9 +41,16 @@ class FederatedSourceTypeHandlersSpec extends AnyFlatSpec with Matchers:
                 "test-module",
                 "test_connector",
                 "Test connector",
-                Some("/test-module/editor.js")
+                Some("/test-module/editor.js"),
+                editsHeldSources = true
               ),
-              FederatedSourceTypeView("test-module", "plain_connector", "plain_connector", None)
+              FederatedSourceTypeView(
+                "test-module",
+                "plain_connector",
+                "plain_connector",
+                None,
+                editsHeldSources = false
+              )
             )
           )
         )
@@ -53,6 +61,13 @@ class FederatedSourceTypeHandlersSpec extends AnyFlatSpec with Matchers:
     val json = handlers.list(Some("admin")).unsafeRunSync().toOption.get.asJson
     json.hcursor.downField("types").downN(1).downField("editorBundle").focus shouldBe
       Some(Json.Null)
+  }
+
+  it should "encode editsHeldSources on every type" in {
+    val json  = handlers.list(Some("admin")).unsafeRunSync().toOption.get.asJson
+    val types = json.hcursor.downField("types")
+    types.downN(0).downField("editsHeldSources").focus shouldBe Some(Json.True)
+    types.downN(1).downField("editsHeldSources").focus shouldBe Some(Json.False)
   }
 
   it should "answer an empty list when no module contributes a type" in {
