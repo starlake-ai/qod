@@ -121,6 +121,24 @@ class FederatedSourceStoreSpec extends AnyFlatSpec with Matchers with OptionValu
     fs.listSecrets("src-X") shouldBe empty
   }
 
+  it should "write a source and delete its secrets in one transaction" in withStores { (fs, cp) =>
+    val tdId = seedTd(cp)
+    val src  = FederatedSource("src-C", tdId, "conn", "...")
+    fs.upsertSource(src)
+    fs.upsertSource(FederatedSource("src-D", tdId, "taken", "..."))
+    fs.upsertSecret(FederatedSecret("sec-C1", "src-C", "K1", Some("v1"), None))
+    fs.upsertSecret(FederatedSecret("sec-C2", "src-C", "K2", Some("v2"), None))
+    // A failing row write takes the deletion back with it: the alias belongs to another row.
+    intercept[Throwable](fs.upsertSourceClearingSecrets(src.copy(alias = "taken")))
+    fs.listSecrets("src-C").map(_.name) shouldBe List("K1", "K2")
+    fs.getSource(tdId, "conn").value.setupSql shouldBe "..."
+    // A write that lands deletes every secret and says how many.
+    fs.upsertSourceClearingSecrets(src.copy(description = Some("moved"))) shouldBe 2
+    fs.listSecrets("src-C") shouldBe empty
+    fs.getSource(tdId, "conn").value.description shouldBe Some("moved")
+    fs.upsertSourceClearingSecrets(src) shouldBe 0
+  }
+
   it should "list all enabled sources for a tenant-db in deterministic order" in withStores {
     (fs, cp) =>
       val tdId = seedTd(cp)

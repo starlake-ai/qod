@@ -24,9 +24,9 @@ export function startSourceEditor(o: StartEditorOptions): () => void {
   // then reports an error without reaching core's, a cancel does nothing.
   const ctx: SourceEditorContext = {
     ...o.ctx,
-    save: (pluginConfig, secrets) => stopped
+    save: (pluginConfig, secrets, options) => stopped
       ? Promise.resolve({ ok: false, errors: ['the editor was closed'] })
-      : o.ctx.save(pluginConfig, secrets),
+      : o.ctx.save(pluginConfig, secrets, options),
     cancel: () => { if (!stopped) o.ctx.cancel(); },
   };
   const fail = (message: string) => {

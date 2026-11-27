@@ -1931,7 +1931,12 @@ object Main extends IOApp with LazyLogging:
           sessionOf = jwtSessionOf,
           platformCallerOf = credentialScopes.platformCallerOf,
           systemSql = ai.starlake.quack.ondemand.module
-            .ModuleSystemSql(m.name, routedExecutor(recordExecution = true), auditRecorder)
+            .ModuleSystemSql(m.name, routedExecutor(recordExecution = true), auditRecorder),
+          // The stored sources of this module's own types, through the store the federation
+          // handlers write.
+          ownSources = manifestFedStore.fold[ai.starlake.quack.spi.OwnSources](
+            ai.starlake.quack.ondemand.module.ModuleOwnSources.Empty
+          )(fs => ai.starlake.quack.ondemand.module.ModuleOwnSources.of(m, fs))
         )
       val moduleStart: IO[Unit] =
         modules.traverse_(m =>

@@ -130,6 +130,21 @@ who may write sources can create one. A provider must refuse in `errors()` any c
 ATTACH would use the node's ambient credentials (environment, instance role, credential
 chain, local files) instead of the source's own secrets.
 
+Editing a source that holds secrets: by default only a superuser changes the connection or config
+of a source holding secrets, or makes a read-only one writable. A provider lifts that rule for its
+type by overriding both `editsHeldSources = true` and `connectionOf(raw)`, which names what the
+source's secrets are bound to (an endpoint and the secret name the config uses, for example) for a
+config that parses, and None otherwise. For a source of such a type whose secrets are all held as
+values, a write whose config names the same connection keeps the secrets and is open to anyone who
+may write the source. A write naming another connection is refused `409
+connection_change_requires_disabled` unless it saves the source disabled, for every caller,
+superusers included; that disabled write deletes every secret of the source in the same
+transaction, audited `federation.source.upsert` `ok` with detail `cleared` (`secrets: <n>`). A
+read-only source still stays read-only for a non-superuser. A held `externalRef` secret, a config
+`connectionOf` cannot name, or a provider that is not loaded keeps the superuser rule. Accepted
+risk: whoever edits such a source may point it at anything the stored secret reaches on the same
+connection, so return in the identity everything a secret is bound to.
+
 Quoting: core refuses a plugin source whose rendered template has a `{{secret.NAME}}`
 placeholder outside a single-quoted literal. There is no plain-token fallback as for legacy
 `sql` sources; the source is skipped with a `PluginSecretUnquoted` error and the tenant-db's
@@ -152,8 +167,9 @@ says "this source type has no editor; use the REST API". Editing a stored module
 the type's editor too, and the editor remounts when the source type changes.
 
 `GET /api/federated-source-types` (any admin session) answers
-`{types: [{module, sourceType, label, editorBundle}]}`, with `label` the editor's (the wire when
-there is no editor) and `editorBundle` null for a type without an editor.
+`{types: [{module, sourceType, label, editorBundle, editsHeldSources}]}`, with `label` the
+editor's (the wire when there is no editor), `editorBundle` null for a type without an editor, and
+`editsHeldSources` the provider's flag.
 
 Editor contract 1: the bundle exports `qodSourceEditorContract = 1` and `mount(el, ctx)`,
 returning an unmount function or a Promise of one. A bundle that fails to load, speaks another
@@ -162,8 +178,10 @@ rest of the form works on. Core keeps the alias, description, read-only flag, li
 secrets panel; the editor replaces only the type's own fields. `ctx` holds `contract: 1`,
 `apiBase: '/api'`, `tenant`, `tenantDb`, `user` (`username`, `superuser`, `permissions`),
 `source` (the stored source when editing, null when creating), `readOnly` (true when the source
-holds secrets and the caller is not a superuser, so the manager would refuse a change),
-`save(pluginConfig, secrets)`, `cancel()` and `theme: 'dark'`. `save` stores
+holds secrets, the caller is not a superuser, and either the type does not set `editsHeldSources`
+or a secret is held through an `externalRef`, so the manager would refuse a change),
+`heldSecrets` (the names of the source's stored secrets, empty when creating),
+`save(pluginConfig, secrets, options?)`, `cancel()` and `theme: 'dark'`. `save` stores
 `{alias, description, sourceType, readOnly: true, pluginConfig}` and then each `{name, value}`
 secret, and resolves to `{ok: true}` or `{ok: false, errors}`. Keep secret values out of
 `pluginConfig`: reference them as `{{secret.NAME}}` placeholders and hand the values to `save`.
@@ -175,6 +193,14 @@ the secret to set; if the final save is refused, the error ends with "the source
 disabled". An existing source that already holds secrets is saved first and its secrets after;
 secrets new to it are written first and deleted again if the source is refused. A secret held
 through an `externalRef` is never overwritten with a value.
+
+`save(pluginConfig, secrets, {connectionChanged: true})` says the edit changes what the source's
+secrets are bound to (the provider's `connectionOf`). For an existing source holding secrets the
+sequence is then the disabled-first one: the source is saved disabled, which deletes its stored
+secrets, every secret handed to `save` is written, then the source is saved as asked. The editor
+must hand again every secret the source needs; with none, `save` answers `{ok: false, errors:
+['changing the connection clears the stored secrets: type them again']}` and saves nothing. The
+third argument is optional (false when omitted), so an editor that passes two saves as before.
 
 `errors` carries each failure whole. The manager answers a refused source with one
 `invalid_federated_source` message that joins its errors with "; ", and a provider error may itself
@@ -194,7 +220,10 @@ wants per-field errors validates through its own module endpoint before saving.
 - `ctx.source.pluginConfig` holds secret placeholders (`{{secret.NAME}}`), never values.
 - Every module source is saved `readOnly: true`: core cannot judge what a plugin's writes do, so it
   never offers them. The `ctx.readOnly` rule is conservative: it is true
-  for a non-superuser editing a source that holds any secret, whether or not the edit would touch it.
+  for a non-superuser editing a source that holds any secret, whether or not the edit would touch it,
+  unless the type sets `editsHeldSources` and no secret is held through an `externalRef`.
+- Contract 1 grows only additively: `heldSecrets` and the third `save` argument are new, and an
+  older console sends neither, so check `Array.isArray(ctx.heldSecrets)` before relying on them.
 - Saving an existing source that holds no secret, with new secrets, disables it until those
   secrets are written, then saves it as asked.
 
@@ -205,6 +234,14 @@ that every non-public `/api` route passes, plus
 `FederatedSourceHandlers.createSource` makes with the same resolver. A module route under `/api`
 gets the guard; the module makes the call itself. The guard reads no tenant from a module's path,
 so that call is what confines the caller to the tenant.
+
+Reading a stored source from a module route: `ctx.ownSources` answers `source(tenantDbId, alias)`,
+the stored source when its type is one of the module's own provider wires (None for any other
+type or an unknown alias), and `secretValue(tenantDbId, alias, name)`, the value of its secret
+when it is held as a value (None for an `externalRef` secret or a missing one). Both read the
+control-plane database: call them inside `IO.blocking`, once the route has authorized its caller
+as above. Take the endpoint from the stored config, never from the request, never log the value,
+and send it only to that endpoint.
 
 ## Refusal messages
 

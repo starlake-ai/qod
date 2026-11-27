@@ -360,7 +360,8 @@ class FederatedSourceHandlersSpec
         publish = ai.starlake.quack.ondemand.ha.StateChangePublisher.noop,
         catalogAliasOf = _ => None
       )
-      val out = h.createSource("acme", "acme_prod", pluginReq(), None).unsafeRunSync().toOption.value
+      val out =
+        h.createSource("acme", "acme_prod", pluginReq(), None).unsafeRunSync().toOption.value
       out.sourceType shouldBe "test_connector"
       out.readOnly shouldBe true
       out.pluginConfig shouldBe Some(pluginJson)
@@ -374,13 +375,18 @@ class FederatedSourceHandlersSpec
       val onIce = iceReq().copy(pluginConfig = Some(pluginJson))
       h.createSource("acme", "acme_prod", onIce, None).unsafeRunSync().left.value._2.message should
         include("pluginConfig is for module-provided sourceTypes")
-      val withConfig = pluginReq().copy(config = Some(IcebergRestConfig(warehouse = "w")))
+      val withConfig  = pluginReq().copy(config = Some(IcebergRestConfig(warehouse = "w")))
       val (code, err) =
         h.createSource("acme", "acme_prod", withConfig, None).unsafeRunSync().left.value
       code shouldBe StatusCode.BadRequest
       err.message should include("config is for sourceType 'iceberg_rest', not 'test_connector'")
       val withConn = pluginReq().copy(connection = pgReq().connection)
-      h.createSource("acme", "acme_prod", withConn, None).unsafeRunSync().left.value._2.message should
+      h.createSource("acme", "acme_prod", withConn, None)
+        .unsafeRunSync()
+        .left
+        .value
+        ._2
+        .message should
         include("connection is for sourceType 'postgres' / 'mysql'")
     }
 
@@ -1556,6 +1562,207 @@ class FederatedSourceHandlersSpec
       denied.head.toString should not include "elsewhere.example.com"
     }
 
+  // --- a module type that opts into edits of a source holding secrets -----------------------
+  // TestProvider opts in: its connection is the config's "endpoint".
+
+  private def heldPluginReq(
+      alias: String,
+      endpoint: Option[String] = Some("https://a.example.com"),
+      collections: List[String] = List("docs"),
+      disabled: Boolean = false,
+      writable: Boolean = false
+  ) = FederatedSourceCreateRequest(
+    alias = alias,
+    sourceType = Some("test_connector"),
+    pluginConfig = Some(
+      io.circe.Json.fromFields(
+        endpoint.map(e => "endpoint" -> io.circe.Json.fromString(e)).toList ++
+          List(
+            "collections" -> io.circe.Json.fromValues(collections.map(io.circe.Json.fromString))
+          ) ++
+          (if writable then List("writable" -> io.circe.Json.True) else Nil)
+      )
+    ),
+    disabled = disabled
+  )
+
+  private def secretNames(fs: FederatedSourceStore, tdId: String, alias: String) =
+    fs.listSecrets(fs.getSource(tdId, alias).value.id).map(_.name)
+
+  "A module source holding a secret, of a type that opts in" should
+    "take another config on the same connection from a tenant admin, keeping its secrets" in
+    withEnv { (fs, resolver, tdId) =>
+      val (su, admin) = bothHandlers(fs, resolver)
+      create(su, heldPluginReq("kept")).isRight shouldBe true
+      withSecret(su, "kept", "TC_TOKEN")
+      val out = create(admin, heldPluginReq("kept", collections = List("docs", "faq")))
+      withClue(out)(out.isRight shouldBe true)
+      fs.getSource(tdId, "kept").value.config.value should include("faq")
+      secretNames(fs, tdId, "kept") shouldBe List("TC_TOKEN")
+    }
+
+  it should "answer 409 to an enabled write of another connection, whoever makes it" in
+    withEnv { (fs, resolver, tdId) =>
+      val (su, admin) = bothHandlers(fs, resolver)
+      create(su, heldPluginReq("moved")).isRight shouldBe true
+      withSecret(su, "moved", "TC_TOKEN")
+      val before = fs.getSource(tdId, "moved").value
+      for (who, h) <- List("superuser" -> su, "tenant admin" -> admin) do
+        withClue(who) {
+          val (status, err) =
+            create(h, heldPluginReq("moved", endpoint = Some("https://b.example.com"))).left.value
+          status shouldBe StatusCode.Conflict
+          err.error shouldBe "connection_change_requires_disabled"
+          err.message shouldBe
+            "this source's connection changes, which deletes its secrets: save it disabled " +
+            "first, then set its secrets, then enable it"
+          fs.getSource(tdId, "moved").value shouldBe before
+          secretNames(fs, tdId, "moved") shouldBe List("TC_TOKEN")
+        }
+    }
+
+  it should "write a disabled change of connection and delete every secret it held" in
+    withEnv { (fs, resolver, tdId) =>
+      val (su, admin) = bothHandlers(fs, resolver)
+      create(su, heldPluginReq("rebound")).isRight shouldBe true
+      withSecret(su, "rebound", "TC_TOKEN")
+      withSecret(su, "rebound", "TC_EXTRA")
+      val b = heldPluginReq("rebound", endpoint = Some("https://b.example.com"))
+      create(admin, b.copy(disabled = true)).isRight shouldBe true
+      val row = fs.getSource(tdId, "rebound").value
+      row.disabled shouldBe true
+      row.config.value should include("https://b.example.com")
+      fs.listSecrets(row.id) shouldBe empty
+      // The disabled-first sequence ends with the source enabled on its new secret.
+      withSecret(admin, "rebound", "TC_TOKEN")
+      create(admin, b).isRight shouldBe true
+      fs.getSource(tdId, "rebound").value.disabled shouldBe false
+      secretNames(fs, tdId, "rebound") shouldBe List("TC_TOKEN")
+    }
+
+  it should "keep the superuser rule while a held secret is an externalRef" in
+    withEnv { (fs, resolver, tdId) =>
+      val (su, admin) = bothHandlers(fs, resolver)
+      create(su, heldPluginReq("refd")).isRight shouldBe true
+      su.upsertSecret(
+        "acme",
+        "acme_prod",
+        "refd",
+        FederatedSecretUpsertRequest(name = "TC_TOKEN", externalRef = Some("env:QOD_TC_TOKEN")),
+        None
+      ).unsafeRunSync()
+        .isRight shouldBe true
+      create(admin, heldPluginReq("refd", collections = List("faq"))).left.value._2.error shouldBe
+        "superuser_required"
+      // A superuser's write is not judged, and nothing is deleted.
+      create(su, heldPluginReq("refd", endpoint = Some("https://b.example.com"))).isRight shouldBe
+        true
+      secretNames(fs, tdId, "refd") shouldBe List("TC_TOKEN")
+    }
+
+  it should "refuse a tenant admin's disabled change of connection while a held secret is an externalRef" in
+    withEnv { (fs, resolver, tdId) =>
+      val (su, admin) = bothHandlers(fs, resolver)
+      create(su, heldPluginReq("refd2")).isRight shouldBe true
+      su.upsertSecret(
+        "acme",
+        "acme_prod",
+        "refd2",
+        FederatedSecretUpsertRequest(name = "TC_TOKEN", externalRef = Some("env:QOD_TC_TOKEN")),
+        None
+      ).unsafeRunSync()
+        .isRight shouldBe true
+      val before        = fs.getSource(tdId, "refd2").value
+      val (status, err) =
+        create(
+          admin,
+          heldPluginReq("refd2", endpoint = Some("https://b.example.com"), disabled = true)
+        ).left.value
+      status shouldBe StatusCode.Forbidden
+      err.error shouldBe "superuser_required"
+      fs.getSource(tdId, "refd2").value shouldBe before
+      secretNames(fs, tdId, "refd2") shouldBe List("TC_TOKEN")
+    }
+
+  it should "keep the superuser rule for a config whose connection the provider cannot name" in
+    withEnv { (fs, resolver, tdId) =>
+      val (su, admin) = bothHandlers(fs, resolver)
+      create(su, heldPluginReq("unnamed", endpoint = None)).isRight shouldBe true
+      withSecret(su, "unnamed", "TC_TOKEN")
+      val (status, err) =
+        create(
+          admin,
+          heldPluginReq("unnamed", endpoint = None, collections = List("faq"))
+        ).left.value
+      status shouldBe StatusCode.Forbidden
+      err.error shouldBe "superuser_required"
+      secretNames(fs, tdId, "unnamed") shouldBe List("TC_TOKEN")
+    }
+
+  it should "keep a read-only source read-only for a tenant admin on the same connection" in
+    withEnv { (fs, resolver, tdId) =>
+      val (su, admin) = bothHandlers(fs, resolver)
+      create(
+        su,
+        heldPluginReq("ro_same", writable = true).copy(readOnly = Some(true))
+      ).isRight shouldBe true
+      withSecret(su, "ro_same", "TC_TOKEN")
+      val before = fs.getSource(tdId, "ro_same").value
+      before.readOnly shouldBe true
+      val (status, err) =
+        create(
+          admin,
+          heldPluginReq("ro_same", writable = true).copy(readOnly = Some(false))
+        ).left.value
+      status shouldBe StatusCode.Forbidden
+      err.error shouldBe "superuser_required"
+      fs.getSource(tdId, "ro_same").value shouldBe before
+      secretNames(fs, tdId, "ro_same") shouldBe List("TC_TOKEN")
+    }
+
+  it should "refuse a tenant admin's writable, disabled change of connection of a read-only source" in
+    withEnv { (fs, resolver, tdId) =>
+      val (su, admin) = bothHandlers(fs, resolver)
+      create(
+        su,
+        heldPluginReq("ro_moved", writable = true).copy(readOnly = Some(true))
+      ).isRight shouldBe true
+      withSecret(su, "ro_moved", "TC_TOKEN")
+      val before = fs.getSource(tdId, "ro_moved").value
+      val req    = heldPluginReq(
+        "ro_moved",
+        endpoint = Some("https://b.example.com"),
+        disabled = true,
+        writable = true
+      )
+      val (status, err) = create(admin, req.copy(readOnly = Some(false))).left.value
+      status shouldBe StatusCode.Forbidden
+      err.error shouldBe "superuser_required"
+      fs.getSource(tdId, "ro_moved").value shouldBe before
+      secretNames(fs, tdId, "ro_moved") shouldBe List("TC_TOKEN")
+    }
+
+  it should "be audited ok with the count it deleted, denied on a 409, and never with a value" in
+    withEnv { (fs, resolver, _) =>
+      val events      = new ai.starlake.quack.ondemand.telemetry.testkit.RecordingTelemetryStore
+      val recorder    = new ai.starlake.quack.ondemand.telemetry.AuditRecorder(events, _ => None)
+      val (su, admin) = bothHandlers(fs, resolver, recorder)
+      create(su, heldPluginReq("audited_tc")).isRight shouldBe true
+      withSecret(su, "audited_tc", "TC_TOKEN")
+      withSecret(su, "audited_tc", "TC_EXTRA")
+      events.events.clear()
+      val b = heldPluginReq("audited_tc", endpoint = Some("https://b.example.com"))
+      create(admin, b).isLeft shouldBe true
+      create(admin, b.copy(disabled = true)).isRight shouldBe true
+      val upserts = events.events.toList.filter(
+        _.action == ai.starlake.quack.ondemand.telemetry.AuditActions.FederationSourceUpsert
+      )
+      upserts.map(_.outcome) shouldBe List("denied", "ok")
+      upserts.map(_.target) shouldBe List(Some("audited_tc"), Some("audited_tc"))
+      upserts.last.detail shouldBe Map("cleared" -> "secrets: 2")
+      events.events.toList.foreach(_.toString should not include "stored-secret-sentinel")
+    }
+
   "the boot report" should "name each sql source with no known author, never its SQL" in
     withEnv { (fs, _, tdId) =>
       fs.upsertSource(
@@ -1802,7 +2009,8 @@ class FederatedSourceHandlersSpec
     uri = "https://glue.example.com/iceberg",
     warehouse = "123456789012",
     authType = Some(IcebergAuthType.SigV4),
-    awsCredentials = Some(ai.starlake.quack.ondemand.federation.iceberg.AwsCredentials.CredentialChain),
+    awsCredentials =
+      Some(ai.starlake.quack.ondemand.federation.iceberg.AwsCredentials.CredentialChain),
     awsRegion = Some("eu-west-1"),
     awsScope = List("s3://lake/sales/")
   )
@@ -1810,7 +2018,10 @@ class FederatedSourceHandlersSpec
   "An Iceberg source using the credential chain" should "be refused to a tenant admin, nothing stored" in
     withEnv { (fs, resolver, tdId) =>
       val (_, admin) = bothHandlers(fs, resolver)
-      create(admin, iceReq("chain_ice", chainConfig)).left.value._2.error shouldBe "superuser_required"
+      create(
+        admin,
+        iceReq("chain_ice", chainConfig)
+      ).left.value._2.error shouldBe "superuser_required"
       fs.getSource(tdId, "chain_ice") shouldBe None
     }
 

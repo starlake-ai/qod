@@ -14,7 +14,7 @@ import { useAuth } from '../auth/AuthContext';
 import { DeleteIcon, EditIcon } from './Icons';
 import { Modal } from './Modal';
 import PluginSourceEditor from '../federation/PluginSourceEditor';
-import { editorReadOnly, type SourceEditorSecret } from '../federation/sourceEditorContract';
+import { editorReadOnly, type SaveOptions, type SourceEditorSecret } from '../federation/sourceEditorContract';
 import { savePluginSource } from '../federation/pluginSourceSave';
 import {
   formKindOf, isBuiltInSourceType, NO_EDITOR_MESSAGE, sourceTypeOptions,
@@ -927,6 +927,8 @@ export default function FederationSection({
   // core's rule lets the caller change it (null while the source's secrets are being read).
   const [editingSource,  setEditingSource]  = useState<FederatedSourceResponse | null>(null);
   const [pluginReadOnly, setPluginReadOnly] = useState<boolean | null>(false);
+  // The names of the edited module source's stored secrets, read with pluginReadOnly.
+  const [pluginHeldSecrets, setPluginHeldSecrets] = useState<string[]>([]);
   // Bumped whenever the form opens or closes, so a late secrets read never lands in another form.
   const editRun = useRef(0);
 
@@ -966,6 +968,7 @@ export default function FederationSection({
     setRdbms(EMPTY_RDBMS_FIELDS);
     setEditingSource(null);
     setPluginReadOnly(false);
+    setPluginHeldSecrets([]);
     editRun.current += 1;
     setError(null);
   }
@@ -1009,12 +1012,20 @@ export default function FederationSection({
     const run = ++editRun.current;
     if (isBuiltInSourceType(s.sourceType)) {
       setPluginReadOnly(false);
+      setPluginHeldSecrets([]);
     } else {
-      // Core's rule: a source holding secrets is changed by a superuser only. Unread, a tenant
+      // Core's rule: a source holding secrets is changed by a superuser only, unless its type opts
+      // into held-source edits and no secret is held through an externalRef. Unread, a tenant
       // admin gets the read-only editor (the manager would refuse the change anyway).
+      const editsHeld = pluginTypes.find(t => t.sourceType === s.sourceType)?.editsHeldSources ?? false;
       setPluginReadOnly(null);
+      setPluginHeldSecrets([]);
       api.listFederatedSecrets(tenant, tenantDb, s.alias)
-        .then(r => { if (editRun.current === run) setPluginReadOnly(editorReadOnly(s, r.secrets.length, superuser)); })
+        .then(r => {
+          if (editRun.current !== run) return;
+          setPluginHeldSecrets(r.secrets.map(x => x.name));
+          setPluginReadOnly(editorReadOnly(s, r.secrets, superuser, editsHeld));
+        })
         .catch(e => {
           if (editRun.current !== run) return;
           setError(errorMessage(e));
@@ -1124,11 +1135,12 @@ export default function FederationSection({
 
   /** ctx.save of a module's editor: core's own create-then-secrets sequence; the form closes on
     * success, and the editor gets the manager's errors otherwise. */
-  async function savePlugin(pluginConfig: unknown, secrets: SourceEditorSecret[]) {
+  async function savePlugin(pluginConfig: unknown, secrets: SourceEditorSecret[], options?: SaveOptions) {
     setError(null);
     const run = editRun.current;
     const result = await savePluginSource(api, {
       tenant, tenantDb, alias, description, sourceType, pluginConfig, secrets,
+      connectionChanged: options?.connectionChanged ?? false,
     });
     if (result.ok) {
       // The form may have been cancelled or switched while the save ran: only close the one it
@@ -1218,7 +1230,7 @@ export default function FederationSection({
                 The type is fixed for an existing alias: the manager refuses a flip between types
                 rather than replacing your setup SQL with a rendered config unseen. Delete the
                 source and recreate it to change type.
-                {!superuser && (isIceberg || isRdbms || isPlugin) && (
+                {!superuser && (isIceberg || isRdbms || (isPlugin && !pluginType?.editsHeldSources)) && (
                   <>
                     {' '}Once a source holds a secret, its connection stays as it is and a read-only
                     source stays read-only: a superuser changes it, or delete the source and create
@@ -1560,6 +1572,7 @@ export default function FederationSection({
                 user={{ username: username ?? '', superuser, permissions }}
                 source={editingSource}
                 readOnly={pluginReadOnly}
+                heldSecrets={pluginHeldSecrets}
                 save={savePlugin}
                 cancel={closeForm}
               />

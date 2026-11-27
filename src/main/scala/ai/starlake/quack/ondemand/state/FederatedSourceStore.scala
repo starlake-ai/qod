@@ -18,6 +18,12 @@ trait FederatedSourceOps:
   def getSecret(sourceId: String, name: String): Option[FederatedSecret]
   def listSecrets(sourceId: String): List[FederatedSecret]
 
+  /** Writes `s` and deletes every secret stored for it in one transaction, so a source never takes
+    * another connection while it still holds the secrets of the old one. Answers how many secrets
+    * were deleted.
+    */
+  def upsertSourceClearingSecrets(s: FederatedSource): Int
+
   /** Tenant-db ids that have at least one ENABLED federated source. Backs
     * [[ai.starlake.quack.ondemand.PoolSupervisor.restore]]'s skip-resolution guard: a tenant-db
     * absent from this set has nothing to resolve, so restore() never opens a connection for it.
@@ -259,6 +265,24 @@ class FederatedSourceStore(
       finally rs.close()
     finally ps.close()
   }
+
+  // ControlPlaneTx.run is what ControlPlaneStore.atomically runs on, for this same database: it
+  // joins a transaction the caller already holds, or opens one. The secrets go first, so a row
+  // write that fails (a unique alias, a lost connection) brings them back with the rollback.
+  def upsertSourceClearingSecrets(s: FederatedSource): Int =
+    ControlPlaneTx.run(jdbcUrl, () => DriverManager.getConnection(boundedUrl, user, password)) {
+      val cleared = withConn { c =>
+        val ps = c.prepareStatement(
+          "DELETE FROM qodstate_federated_secret WHERE federated_source_id = ?"
+        )
+        try
+          ps.setString(1, s.id)
+          ps.executeUpdate()
+        finally ps.close()
+      }
+      upsertSource(s)
+      cleared
+    }
 
   // ---------------- helpers ----------------
 

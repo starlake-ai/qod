@@ -1,4 +1,4 @@
-import type { FederatedSourceResponse } from '../api/types';
+import type { FederatedSecretResponse, FederatedSourceResponse } from '../api/types';
 
 /** Source editor contract 1. A module's editor bundle for one of its federated source types
  *  exports `qodSourceEditorContract = 1` and `mount(el, ctx)`, returning its unmount function (or a
@@ -12,6 +12,11 @@ export interface SourceEditorSecret { name: string; value: string }
 
 export type SaveResult = { ok: true } | { ok: false; errors: string[] };
 
+/** The save's third argument. `connectionChanged`: the edit changes what the source's secrets are
+ *  bound to, so core saves it disabled first (the manager then deletes its stored secrets), writes
+ *  every secret handed to it, then enables it. */
+export interface SaveOptions { connectionChanged?: boolean }
+
 export interface SourceEditorContext {
   contract: 1;
   apiBase: string;
@@ -20,11 +25,14 @@ export interface SourceEditorContext {
   user: { username: string; superuser: boolean; permissions: string[] };
   /** The stored source when editing, null when creating. */
   source: FederatedSourceResponse | null;
-  /** True when core's rule forbids the caller from changing the source: it holds secrets and the
-   *  caller is not a superuser. */
+  /** True when core's rule forbids the caller from changing the source: it holds secrets, the
+   *  caller is not a superuser, and its type does not opt into held-source edits or a secret is
+   *  held through an externalRef. */
   readOnly: boolean;
+  /** The names of the source's stored secrets; empty for a new source. */
+  heldSecrets: string[];
   /** Core's own save: the source with `readOnly: true` and this config, then each secret. */
-  save(pluginConfig: unknown, secrets: SourceEditorSecret[]): Promise<SaveResult>;
+  save(pluginConfig: unknown, secrets: SourceEditorSecret[], options?: SaveOptions): Promise<SaveResult>;
   /** Closes the form without saving. */
   cancel(): void;
   theme: 'dark';
@@ -56,12 +64,17 @@ export function checkEditorUnmount(value: unknown, module: string): EditorUnmoun
     : { ok: false, error: `module ${module}: the source editor's mount did not return an unmount function` };
 }
 
-/** Core's rule (FederatedSourceHandlers.changesHeldSource): a source holding secrets is changed by
- *  a superuser only. A new source holds none. */
+/** Core's rule (FederatedSourceHandlers.heldVerdict): a source holding secrets is changed by a
+ *  superuser only, unless its type opts into held-source edits (`editsHeldSources`) and none of
+ *  its secrets is held through an externalRef. A new source, or one holding none, is editable. */
 export function editorReadOnly(
-  source: FederatedSourceResponse | null, secretCount: number, superuser: boolean,
+  source: FederatedSourceResponse | null,
+  secrets: FederatedSecretResponse[],
+  superuser: boolean,
+  editsHeldSources: boolean,
 ): boolean {
-  return source != null && secretCount > 0 && !superuser;
+  if (source == null || superuser || secrets.length === 0) return false;
+  return !(editsHeldSources && secrets.every(s => !s.externalRef));
 }
 
 export interface SourceEditorContextInput {
@@ -70,6 +83,7 @@ export interface SourceEditorContextInput {
   user: SourceEditorContext['user'];
   source: FederatedSourceResponse | null;
   readOnly: boolean;
+  heldSecrets: string[];
   save: SourceEditorContext['save'];
   cancel: () => void;
 }
@@ -84,6 +98,7 @@ export function sourceEditorContext(p: SourceEditorContextInput): SourceEditorCo
     user: p.user,
     source: p.source,
     readOnly: p.readOnly,
+    heldSecrets: p.heldSecrets,
     save: p.save,
     cancel: p.cancel,
     theme: 'dark',

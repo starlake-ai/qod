@@ -1236,13 +1236,16 @@ final case class ConsolePagesResponse(pages: List[ConsolePageView])
 
 /** A module-provided federated source type, as the console's federation form lists it.
   * `editorBundle` is the script of its console editor (source editor contract 1), None (null on the
-  * wire) when it has none.
+  * wire) when it has none. `editsHeldSources` is its provider's flag: whether anyone who may write
+  * one of its sources may edit it while it holds secrets
+  * (`FederatedSourceProvider.editsHeldSources`).
   */
 final case class FederatedSourceTypeView(
     module: String,
     sourceType: String,
     label: String,
-    editorBundle: Option[String]
+    editorBundle: Option[String],
+    editsHeldSources: Boolean
 )
 final case class FederatedSourceTypesResponse(types: List[FederatedSourceTypeView])
 

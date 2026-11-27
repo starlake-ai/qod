@@ -20,6 +20,12 @@ final class InMemoryFederatedSourceStore
   override def upsertSource(s: FederatedSource): Unit =
     srcs(s.id) = s
 
+  override def upsertSourceClearingSecrets(s: FederatedSource): Int =
+    val cleared = secs.values.count(_.federatedSourceId == s.id)
+    secs.filterInPlace((_, sec) => sec.federatedSourceId != s.id)
+    srcs(s.id) = s
+    cleared
+
   override def deleteSource(id: String): Unit =
     srcs -= id
     secs.filterInPlace((_, sec) => sec.federatedSourceId != id)

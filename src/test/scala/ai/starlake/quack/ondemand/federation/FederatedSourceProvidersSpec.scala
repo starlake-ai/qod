@@ -10,9 +10,19 @@ object TestProvider extends FederatedSourceProvider:
   val extensionName: String = "qod_test_connector"
   val reservedSecretPrefixes: List[String] = List("qod_tc_")
   def errors(source: FederatedSource, reserved: Set[String]): List[String] =
-    if !source.readOnly then List("test_connector sources are read-only") else Nil
+    // A config with `"writable": true` lets a spec reach a writable module source (the
+    // read-only guard of a held write); without it a source must be read-only.
+    val writable = source.config.flatMap(io.circe.parser.parse(_).toOption)
+      .flatMap(_.hcursor.get[Boolean]("writable").toOption).getOrElse(false)
+    if !source.readOnly && !writable then List("test_connector sources are read-only") else Nil
   def normalizedConfig(raw: String): Either[String, String] =
     io.circe.parser.parse(raw).left.map(_.getMessage).map(_.noSpaces)
+  /** Opts in to edits of a source holding secrets: the connection is the config's `endpoint`, and
+    * a config without one names none (the superuser rule then holds).
+    */
+  override def editsHeldSources: Boolean = true
+  override def connectionOf(raw: String): Option[String] =
+    io.circe.parser.parse(raw).toOption.flatMap(_.hcursor.get[String]("endpoint").toOption)
   /** The one provider every spec installs (the registry is install-once per JVM). A config with
     * `"unquotedToken": true` makes it render the token placeholder outside a literal, which is how
     * specs reach core's refusal of such a template without a second registered provider.
@@ -90,4 +100,24 @@ class FederatedSourceProvidersSpec extends AnyFlatSpec with Matchers:
 
   "A provider" should "name no console editor by default" in {
     TestProvider.editor shouldBe None
+  }
+
+  it should "opt into no edits of a source holding secrets by default" in {
+    val plain = new FederatedSourceProvider:
+      val wire                                               = "plain_connector"
+      val extensionName                                      = "x"
+      val reservedSecretPrefixes: List[String]               = Nil
+      def errors(s: FederatedSource, r: Set[String])         = Nil
+      def normalizedConfig(raw: String)                      = Right(raw)
+      def renderTemplate(s: FederatedSource, r: Set[String]) = Right("")
+    plain.editsHeldSources shouldBe false
+    plain.connectionOf("""{"endpoint":"https://a"}""") shouldBe None
+  }
+
+  "TestProvider" should "name its config's endpoint as its connection" in {
+    TestProvider.editsHeldSources shouldBe true
+    TestProvider.connectionOf("""{"endpoint":"https://a","collections":["docs"]}""") shouldBe
+      Some("https://a")
+    TestProvider.connectionOf("""{"collections":["docs"]}""") shouldBe None
+    TestProvider.connectionOf("not json") shouldBe None
   }

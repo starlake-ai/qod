@@ -20,6 +20,7 @@ class BootPreflightFederatedAliasesSpec extends AnyFlatSpec with Matchers:
 
   private val throwing = new FederatedSourceOps:
     def upsertSource(s: FederatedSource): Unit                                = ()
+    def upsertSourceClearingSecrets(s: FederatedSource): Int                  = 0
     def deleteSource(id: String): Unit                                        = ()
     def getSource(tenantDbId: String, alias: String): Option[FederatedSource] = None
     def listSources(tenantDbId: String): List[FederatedSource]                = Nil

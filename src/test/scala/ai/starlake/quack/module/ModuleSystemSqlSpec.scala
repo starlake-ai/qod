@@ -228,7 +228,8 @@ class ModuleSystemSqlSpec extends AnyFlatSpec with Matchers:
         scopeOf = ai.starlake.quack.ondemand.auth.SessionScope.resolver(_ => None),
         sessionOf = _ => None,
         platformCallerOf = _ => None,
-        systemSql = (_, _) => cats.effect.IO.pure(Right(()))
+        systemSql = (_, _) => cats.effect.IO.pure(Right(())),
+        ownSources = ai.starlake.quack.ondemand.module.ModuleOwnSources.Empty
       )
     """ should compile
     """
@@ -241,7 +242,25 @@ class ModuleSystemSqlSpec extends AnyFlatSpec with Matchers:
         singleton = null,
         scopeOf = ai.starlake.quack.ondemand.auth.SessionScope.resolver(_ => None),
         sessionOf = _ => None,
-        platformCallerOf = _ => None
+        platformCallerOf = _ => None,
+        ownSources = ai.starlake.quack.ondemand.module.ModuleOwnSources.Empty
+      )
+    """ shouldNot typeCheck
+  }
+
+  it should "not be buildable without the module's own sources" in {
+    """
+      ai.starlake.quack.spi.ManagerContext(
+        supervisor = null,
+        users = null,
+        controlPlaneDs = null,
+        rawConfig = com.typesafe.config.ConfigFactory.empty(),
+        audit = null,
+        singleton = null,
+        scopeOf = ai.starlake.quack.ondemand.auth.SessionScope.resolver(_ => None),
+        sessionOf = _ => None,
+        platformCallerOf = _ => None,
+        systemSql = (_, _) => cats.effect.IO.pure(Right(()))
       )
     """ shouldNot typeCheck
   }

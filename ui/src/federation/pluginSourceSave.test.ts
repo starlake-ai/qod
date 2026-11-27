@@ -156,6 +156,47 @@ describe('savePluginSource', () => {
     expect(await savePluginSource(f.api, input({ alias: '  ' }))).toEqual({ ok: false, errors: ['alias is required'] });
     expect(f.calls).toEqual([]);
   });
+
+  it('saves a connection change disabled first, so the manager deletes the old secrets, then enables it', async () => {
+    const f = fake([secret('TC_TOKEN')]);
+    expect(await savePluginSource(f.api, input({ connectionChanged: true }))).toEqual({ ok: true });
+    expect(f.calls).toEqual(['list', 'create disabled', 'secret TC_TOKEN=k', 'create']);
+  });
+
+  it('keeps the held path when the connection does not change', async () => {
+    const f = fake([secret('TC_TOKEN')]);
+    expect(await savePluginSource(f.api, input({ connectionChanged: false }))).toEqual({ ok: true });
+    expect(f.calls).toEqual(['list', 'create', 'secret TC_TOKEN=k']);
+  });
+
+  it('refuses a connection change with no secret typed, saving nothing', async () => {
+    const f = fake([secret('TC_TOKEN')]);
+    expect(await savePluginSource(f.api, input({ secrets: [], connectionChanged: true }))).toEqual({
+      ok: false, errors: ['changing the connection clears the stored secrets: type them again'],
+    });
+    expect(f.calls).toEqual([]);
+  });
+
+  it('never writes a value over an externalRef secret on a connection change either', async () => {
+    const f = fake([secret('TC_TOKEN', 'vault:secret/data/tc#token')]);
+    const r = await savePluginSource(f.api, input({ connectionChanged: true }));
+    expect(r).toEqual({
+      ok: false,
+      errors: ['secret TC_TOKEN is resolved from vault:secret/data/tc#token; change it under Secrets instead of saving a value here'],
+    });
+    expect(f.calls).toEqual(['list']);
+  });
+
+  it('says the source stays disabled when a connection change cannot write its secret', async () => {
+    const f = fake([secret('TC_TOKEN')], { failSecret: new ApiError(500, 'boom') });
+    const r = await savePluginSource(f.api, input({ connectionChanged: true }));
+    expect(r).toEqual({
+      ok: false,
+      errors: ['the source was saved DISABLED but its secret TC_TOKEN was not (boom); expand the source, ' +
+        'set secret TC_TOKEN under Secrets, then save the source again to enable it'],
+    });
+    expect(f.calls).toEqual(['list', 'create disabled', 'secret TC_TOKEN=k']);
+  });
 });
 
 describe('errorsOf', () => {

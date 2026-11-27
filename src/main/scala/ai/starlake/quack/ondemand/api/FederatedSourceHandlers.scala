@@ -8,7 +8,7 @@ import ai.starlake.quack.model.{
   Names
 }
 import ai.starlake.quack.ondemand.auth.SessionScope
-import ai.starlake.quack.ondemand.federation.FederatedSourceRules
+import ai.starlake.quack.ondemand.federation.{FederatedSourceRules, HeldEdit}
 import ai.starlake.quack.ondemand.federation.iceberg.{IcebergRestConfig, IcebergSourceWarning}
 import ai.starlake.quack.ondemand.federation.rdbms.RdbmsConfig
 import ai.starlake.quack.ondemand.state.FederatedSourceOps
@@ -181,7 +181,7 @@ final class FederatedSourceHandlers(
             )
           case None =>
             val isPlugin = sourceType.isInstanceOf[FederatedSourceType.Plugin]
-            val source = FederatedSource(
+            val source   = FederatedSource(
               id = id,
               tenantDbId = tenantDbId,
               alias = alias,
@@ -278,10 +278,49 @@ final class FederatedSourceHandlers(
     invalidateSources(tenantDbId)
     publish.topologyChanged()
 
-  /** Whether writing `source` over `stored` changes what a row holding secrets does with them. */
-  private def changesHeldSource(stored: FederatedSource, source: FederatedSource): Boolean =
-    FederatedSourceRules.changesUseOfSecrets(stored, source) &&
-      fedStore.listSecrets(stored.id).nonEmpty
+  /** A write over a source holding secrets that only a superuser may make. */
+  private val HeldSourceRefusal: (StatusCode, ErrorResponse) =
+    StatusCode.Forbidden -> ErrorResponse(
+      "superuser_required",
+      "this federated source holds secrets, so its connection or config stays as " +
+        "it is, and a read-only source stays read-only: a superuser changes it, or " +
+        "delete the source and create it again with its secrets"
+    )
+
+  /** An enabled write that moves an opted-in module source to another connection. */
+  private val ConnectionChangeRefusal: (StatusCode, ErrorResponse) =
+    StatusCode.Conflict -> ErrorResponse(
+      "connection_change_requires_disabled",
+      "this source's connection changes, which deletes its secrets: save it disabled first, " +
+        "then set its secrets, then enable it"
+    )
+
+  /** Whether writing `source` over `existing` may go ahead, and whether it deletes the secrets
+    * stored for it (true), or its refusal. A row holding no secret is not judged. Otherwise a
+    * non-superuser never leaves a read-only source writable; then `FederatedSourceRules.heldEdit`
+    * decides: a module type that opts in keeps the secrets while its connection stays and takes
+    * another connection only on a disabled write, which deletes them (for every caller, a superuser
+    * included); anything else follows the superuser-only rule.
+    */
+  private def heldVerdict(
+      existing: Option[FederatedSource],
+      source: FederatedSource,
+      apiKey: Option[String]
+  ): Either[(StatusCode, ErrorResponse), Boolean] =
+    val held = existing.toList.flatMap(s => fedStore.listSecrets(s.id))
+    existing.filter(_ => held.nonEmpty) match
+      case None         => Right(false)
+      case Some(stored) =>
+        val denied = superuserDenied(apiKey)
+        FederatedSourceRules.heldEdit(stored, source, held) match
+          case _ if denied && stored.readOnly && !source.readOnly => Left(HeldSourceRefusal)
+          case HeldEdit.SuperuserOnly                             =>
+            if denied && FederatedSourceRules.changesUseOfSecrets(stored, source) then
+              Left(HeldSourceRefusal)
+            else Right(false)
+          case HeldEdit.KeepsSecrets  => Right(false)
+          case HeldEdit.ClearsSecrets =>
+            if source.disabled then Right(true) else Left(ConnectionChangeRefusal)
 
   /** Whether `req` writes a `sql` source: no sourceType (the default) or one naming `sql`. */
   private def writesSqlSource(req: FederatedSourceCreateRequest): Boolean =
@@ -361,68 +400,75 @@ final class FederatedSourceHandlers(
                   )
                 // A stored secret, an externalRef's included, goes only where it was saved for,
                 // the rule TenantSignInWrite holds for a tenant's client secret, and for what it
-                // was saved for: a read-only source stays read-only.
-                case Right(source)
-                    if superuserDenied(apiKey) && existing.exists(changesHeldSource(_, source)) =>
-                  audit.rest(
-                    apiKey,
-                    "control-plane",
-                    AuditActions.FederationSourceUpsert,
-                    "denied",
-                    tenant = tenantIdResolver(tenantName),
-                    target = Some(source.alias)
-                  )
-                  Left(
-                    StatusCode.Forbidden -> ErrorResponse(
-                      "superuser_required",
-                      "this federated source holds secrets, so its connection or config stays as " +
-                        "it is, and a read-only source stays read-only: a superuser changes it, or " +
-                        "delete the source and create it again with its secrets"
-                    )
-                  )
+                // was saved for: a read-only source stays read-only. A module type that opts in
+                // keeps its secrets while its connection stays, and takes another connection only
+                // saved disabled, which deletes them (heldVerdict).
                 case Right(source) =>
-                  // This endpoint is a create-request-as-upsert: every field is replaced by what
-                  // the request carries, so an OMITTED readOnly falls back to the type default
-                  // rather than to the stored value -- and for a `sql` source explicitly marked
-                  // read-only that default is false, i.e. a re-POST that only meant to edit
-                  // `setupSql` silently unlocks the catalog. The CLI and the MCP tool both omit the
-                  // field unless `--read-only`/`--no-read-only` was passed, so this is reachable
-                  // without anyone typing the word. Declarative replacement is this endpoint's
-                  // contract and is not being changed here, but it must not be SILENT:
-                  // `ManifestImporter` WARNs on exactly this class of downgrade (a sourceType flip
-                  // carrying readOnly with it) and this is the matching line for the REST path.
-                  // Logged on every true -> false direction, an explicit false included, and only
-                  // once the upsert is actually going to be written.
-                  if existing.exists(_.readOnly) && !source.readOnly then
-                    val how =
-                      if req.readOnly.isEmpty then "omitted readOnly" else "set readOnly=false"
-                    logger.warn(
-                      s"federated source '${source.alias}' (tenant-db $tenantDbId) was read-only " +
-                        s"and this upsert $how, so it becomes WRITABLE; pass readOnly=true to keep " +
-                        "it read-only"
-                    )
-                  fedStore.upsertSource(source)
-                  sourcesChanged(tenantDbId)
-                  if source.sourceType == FederatedSourceType.IcebergRest then
-                    IcebergSourceWarning.print(
-                      tenantIdResolver(tenantName).getOrElse(tenantName),
-                      tenantDbName,
-                      source.alias
-                    )
-                  // NEVER include setupSql or config in the audit detail.
-                  audit.rest(
-                    apiKey,
-                    "control-plane",
-                    AuditActions.FederationSourceUpsert,
-                    "ok",
-                    tenant = tenantIdResolver(tenantName),
-                    // `source.alias`, not `req.alias`: the row is written under the alias
-                    // `toSource` resolved (normalized, or a grandfathered legacy spelling), so
-                    // auditing the raw request would record `Sales_Lake` for a row stored as
-                    // `sales_lake` and leave the trail naming something that is not in the table.
-                    target = Some(source.alias)
-                  )
-                  Right(toSourceResponse(source))
+                  heldVerdict(existing, source, apiKey) match
+                    case Left(refusal) =>
+                      audit.rest(
+                        apiKey,
+                        "control-plane",
+                        AuditActions.FederationSourceUpsert,
+                        "denied",
+                        tenant = tenantIdResolver(tenantName),
+                        target = Some(source.alias)
+                      )
+                      Left(refusal)
+                    case Right(clearsSecrets) =>
+                      // This endpoint is a create-request-as-upsert: every field is replaced by
+                      // what the request carries, so an OMITTED readOnly falls back to the type
+                      // default rather than to the stored value -- and for a `sql` source
+                      // explicitly marked read-only that default is false, i.e. a re-POST that
+                      // only meant to edit `setupSql` silently unlocks the catalog. The CLI and
+                      // the MCP tool both omit the field unless `--read-only`/`--no-read-only`
+                      // was passed, so this is reachable without anyone typing the word.
+                      // Declarative replacement is this endpoint's contract and is not being
+                      // changed here, but it must not be SILENT: `ManifestImporter` WARNs on
+                      // exactly this class of downgrade (a sourceType flip carrying readOnly with
+                      // it) and this is the matching line for the REST path. Logged on every
+                      // true -> false direction, an explicit false included, and only once the
+                      // upsert is actually going to be written.
+                      if existing.exists(_.readOnly) && !source.readOnly then
+                        val how =
+                          if req.readOnly.isEmpty then "omitted readOnly" else "set readOnly=false"
+                        logger.warn(
+                          s"federated source '${source.alias}' (tenant-db $tenantDbId) was " +
+                            s"read-only and this upsert $how, so it becomes WRITABLE; pass " +
+                            "readOnly=true to keep it read-only"
+                        )
+                      // The row and the deletion of the old connection's secrets commit together.
+                      val cleared =
+                        if clearsSecrets then Some(fedStore.upsertSourceClearingSecrets(source))
+                        else
+                          fedStore.upsertSource(source)
+                          None
+                      sourcesChanged(tenantDbId)
+                      if source.sourceType == FederatedSourceType.IcebergRest then
+                        IcebergSourceWarning.print(
+                          tenantIdResolver(tenantName).getOrElse(tenantName),
+                          tenantDbName,
+                          source.alias
+                        )
+                      // NEVER include setupSql or config in the audit detail, nor a secret's
+                      // name or value: a deletion is recorded as a count. The key may not hold
+                      // "secret" (AuditEvent refuses such keys).
+                      audit.rest(
+                        apiKey,
+                        "control-plane",
+                        AuditActions.FederationSourceUpsert,
+                        "ok",
+                        tenant = tenantIdResolver(tenantName),
+                        // `source.alias`, not `req.alias`: the row is written under the alias
+                        // `toSource` resolved (normalized, or a grandfathered legacy spelling), so
+                        // auditing the raw request would record `Sales_Lake` for a row stored as
+                        // `sales_lake` and leave the trail naming something not in the table.
+                        target = Some(source.alias),
+                        detail = cleared.fold(Map.empty[String, String])(n =>
+                          Map("cleared" -> s"secrets: $n")
+                        )
+                      )
+                      Right(toSourceResponse(source))
     }
 
   def listSources(tenantName: String, tenantDbName: String): Out[FederatedSourceListResponse] =

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { FederatedSourceResponse } from '../api/types';
 import {
-  sourceEditorContext, type SaveResult, type SourceEditorContext, type SourceEditorSecret,
+  sourceEditorContext, type SourceEditorContext,
 } from './sourceEditorContract';
 import { startSourceEditor } from './sourceEditorHost';
 
@@ -29,7 +29,9 @@ export default function PluginSourceEditor(props: {
   user: SourceEditorContext['user'];
   source: FederatedSourceResponse | null;
   readOnly: boolean;
-  save: (pluginConfig: unknown, secrets: SourceEditorSecret[]) => Promise<SaveResult>;
+  /** The names of the source's stored secrets, read with `readOnly`. */
+  heldSecrets: string[];
+  save: SourceEditorContext['save'];
   cancel: () => void;
 }) {
   const host = useRef<HTMLDivElement>(null);
@@ -56,7 +58,8 @@ export default function PluginSourceEditor(props: {
         user: props.user,
         source: props.source,
         readOnly: props.readOnly,
-        save: (pluginConfig, secrets) => saveRef.current(pluginConfig, secrets),
+        heldSecrets: props.heldSecrets,
+        save: (pluginConfig, secrets, options) => saveRef.current(pluginConfig, secrets, options),
         cancel: () => cancelRef.current(),
       }),
       onError: setError,

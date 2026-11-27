@@ -305,7 +305,9 @@ def create(
     """Create a federated source, or change it: every field left out is reset.
 
     Once a source holds a secret, only a superuser changes its connection or config or makes it
-    writable; anyone else deletes the source and creates it again with its secrets.
+    writable; anyone else deletes the source and creates it again with its secrets. A module type
+    may lift that rule: its config then changes freely while the connection stays, and another
+    connection is taken only with --disabled, which deletes the source's secrets.
     """
     wire = _TYPE_WIRE.get(source_type)
     plugin = wire is None
