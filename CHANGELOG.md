@@ -54,11 +54,12 @@
   secrets' names), and takes `ctx.save(pluginConfig, secrets, {connectionChanged: true})`, which
   saves the source disabled, writes the secrets typed again, then enables it. Accepted risk:
   whoever edits such a source may reach anything the stored secret reaches on the same connection.
-- **`ManagerContext.ownSources` lets a module read its own stored sources.**
+- **`ManagerContext.ownSources` (required) lets a module read its own stored sources.**
   `OwnSources.source(tenantDbId, alias)` answers a stored source of one of the module's own types,
   and `secretValue(tenantDbId, alias, name)` the value of its secret when held as a value (None for
   an `externalRef`). A module route uses it to call the stored endpoint with the stored secret,
-  after authorizing its caller, and never logs the value.
+  after authorizing its caller, and never logs the value. A module's own tests that construct a
+  `ManagerContext` pass an `OwnSources` stub (an always-empty one, or their own).
 
 ### Changed
 

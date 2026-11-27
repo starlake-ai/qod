@@ -64,10 +64,25 @@ class FederatedSourceHeldEditSpec extends AnyFlatSpec with Matchers:
   }
 
   it should "leave a source holding an externalRef secret to the superuser rule" in {
-    heldEdit(source(opted, "https://a"), source(opted, "https://a", "faq"), List(plain, ref)) shouldBe
+    heldEdit(
+      source(opted, "https://a"),
+      source(opted, "https://a", "faq"),
+      List(plain, ref)
+    ) shouldBe
       HeldEdit.SuperuserOnly
     heldEdit(source(opted, "https://a"), source(opted, "https://b"), List(ref)) shouldBe
       HeldEdit.SuperuserOnly
+  }
+
+  it should "read a provider whose connectionOf throws as naming no connection" in {
+    val boom = provider("boom", opts = true, _ => throw new IllegalStateException("bad config"))
+    val t    = FederatedSourceType.Plugin("boom")
+    FederatedSourceRules.heldEdit(
+      source(t, "https://a"),
+      source(t, "https://b"),
+      List(plain),
+      Map("boom" -> boom).get
+    ) shouldBe HeldEdit.SuperuserOnly
   }
 
   it should "leave a type that does not opt in to the superuser rule" in {

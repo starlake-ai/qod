@@ -98,6 +98,10 @@ class ModuleOwnSourcesSpec extends AnyFlatSpec with Matchers:
     ModuleOwnSources.of(module(Nil), store).wires shouldBe empty
   }
 
+  it should "not own a wire another installed provider instance holds" in {
+    ModuleOwnSources.of(module(List(late("test_connector"))), store).wires shouldBe empty
+  }
+
   "ModuleOwnSources.Empty" should "own nothing" in {
     ModuleOwnSources.Empty.source("td-1", "own") shouldBe None
     ModuleOwnSources.Empty.secretValue("td-1", "own", "TC_TOKEN") shouldBe None

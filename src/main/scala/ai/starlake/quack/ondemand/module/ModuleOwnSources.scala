@@ -22,12 +22,14 @@ final class ModuleOwnSources(val wires: Set[String], store: FederatedSourceOps) 
 
 object ModuleOwnSources:
 
-  /** `m`'s own sources: the wires of its providers that the registry installed at boot. */
+  /** `m`'s own sources: the wires of its own provider instances that the registry installed at
+    * boot.
+    */
   def of(m: ManagerModule, store: FederatedSourceOps): ModuleOwnSources =
     new ModuleOwnSources(
       m.federatedSourceProviders
+        .filter(p => FederatedSourceProviders.of(p.wire).exists(_ eq p))
         .map(_.wire)
-        .filter(w => FederatedSourceProviders.of(w).isDefined)
         .toSet,
       store
     )

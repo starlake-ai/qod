@@ -1660,6 +1660,30 @@ class FederatedSourceHandlersSpec
       secretNames(fs, tdId, "refd") shouldBe List("TC_TOKEN")
     }
 
+  it should "refuse a tenant admin's disabled change of connection while a held secret is an externalRef" in
+    withEnv { (fs, resolver, tdId) =>
+      val (su, admin) = bothHandlers(fs, resolver)
+      create(su, heldPluginReq("refd2")).isRight shouldBe true
+      su.upsertSecret(
+        "acme",
+        "acme_prod",
+        "refd2",
+        FederatedSecretUpsertRequest(name = "TC_TOKEN", externalRef = Some("env:QOD_TC_TOKEN")),
+        None
+      ).unsafeRunSync()
+        .isRight shouldBe true
+      val before        = fs.getSource(tdId, "refd2").value
+      val (status, err) =
+        create(
+          admin,
+          heldPluginReq("refd2", endpoint = Some("https://b.example.com"), disabled = true)
+        ).left.value
+      status shouldBe StatusCode.Forbidden
+      err.error shouldBe "superuser_required"
+      fs.getSource(tdId, "refd2").value shouldBe before
+      secretNames(fs, tdId, "refd2") shouldBe List("TC_TOKEN")
+    }
+
   it should "keep the superuser rule for a config whose connection the provider cannot name" in
     withEnv { (fs, resolver, tdId) =>
       val (su, admin) = bothHandlers(fs, resolver)

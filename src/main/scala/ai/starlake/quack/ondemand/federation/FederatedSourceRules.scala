@@ -7,6 +7,7 @@ import ai.starlake.quack.spi.FederatedSourceProvider
 import io.circe.Json
 
 import java.util.Locale
+import scala.util.Try
 
 /** What a write over a stored source holding secrets does with them
   * ([[FederatedSourceRules.heldEdit]]): keeps them, must delete them, or is left to the
@@ -133,8 +134,8 @@ object FederatedSourceRules:
       case (FederatedSourceType.Plugin(w), FederatedSourceType.Plugin(v)) if w == v =>
         providerOf(w).filter(_.editsHeldSources).flatMap { p =>
           for
-            before <- stored.config.flatMap(p.connectionOf)
-            after  <- source.config.flatMap(p.connectionOf)
+            before <- stored.config.flatMap(raw => Try(p.connectionOf(raw)).toOption.flatten)
+            after  <- source.config.flatMap(raw => Try(p.connectionOf(raw)).toOption.flatten)
           yield (before, after)
         }
       case _ => None
