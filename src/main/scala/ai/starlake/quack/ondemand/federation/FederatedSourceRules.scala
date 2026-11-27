@@ -1,11 +1,19 @@
 package ai.starlake.quack.ondemand.federation
 
-import ai.starlake.quack.model.{FederatedSource, FederatedSourceType}
+import ai.starlake.quack.model.{FederatedSecret, FederatedSource, FederatedSourceType}
 import ai.starlake.quack.ondemand.federation.iceberg.{AwsCredentials, IcebergRestConfig}
 import ai.starlake.quack.ondemand.federation.rdbms.{RdbmsConfig, RdbmsKind}
+import ai.starlake.quack.spi.FederatedSourceProvider
 import io.circe.Json
 
 import java.util.Locale
+
+/** What a write over a stored source holding secrets does with them
+  * ([[FederatedSourceRules.heldEdit]]): keeps them, must delete them, or is left to the
+  * superuser-only rule ([[FederatedSourceRules.changesUseOfSecrets]]).
+  */
+enum HeldEdit:
+  case KeepsSecrets, ClearsSecrets, SuperuserOnly
 
 /** Every rule a stored federated-source row must satisfy, whichever path writes it: REST and MCP
   * (`FederatedSourceHandlers.toSource`) and manifest import (`ManifestImporter`). One function, so
@@ -66,7 +74,7 @@ object FederatedSourceRules:
         case FederatedSourceType.IcebergRest => IcebergRestConfig.fromJson(raw).map(_.toJson)
         case FederatedSourceType.Postgres | FederatedSourceType.Mysql =>
           RdbmsConfig.fromJson(raw).map(_.normalized(RdbmsKind.of(t).get).toJson)
-        case FederatedSourceType.Sql => Right(raw)
+        case FederatedSourceType.Sql       => Right(raw)
         case FederatedSourceType.Plugin(w) =>
           FederatedSourceProviders.of(w).toRight("not loaded").flatMap(_.normalizedConfig(raw))
       typed.toOption.flatMap(io.circe.parser.parse(_).toOption).fold(Json.fromString(raw))(settled)
@@ -103,6 +111,41 @@ object FederatedSourceRules:
         .exists(_.awsCredentials.contains(AwsCredentials.CredentialChain))
     )
 
+  /** What a write of `source` over `stored` does with the secrets `held` stored for it, for a
+    * module type that opts in (`FederatedSourceProvider.editsHeldSources` and `connectionOf`):
+    *   - [[HeldEdit.KeepsSecrets]]: the provider names the same connection for both configs, so the
+    *     secrets stay and the write is open to anyone who may write the source (also the answer
+    *     when nothing is held);
+    *   - [[HeldEdit.ClearsSecrets]]: it names another connection, so the write must delete every
+    *     held secret;
+    *   - [[HeldEdit.SuperuserOnly]]: the type does not opt in (a built-in type, a provider not
+    *     loaded or not opted in, a config it cannot name, a change of type) or a held secret is an
+    *     `externalRef`; [[changesUseOfSecrets]] then decides, as for every other source.
+    * The read-only flag is the caller's to judge, whatever this answers.
+    */
+  def heldEdit(
+      stored: FederatedSource,
+      source: FederatedSource,
+      held: List[FederatedSecret],
+      providerOf: String => Option[FederatedSourceProvider] = FederatedSourceProviders.of
+  ): HeldEdit =
+    val connections = (stored.sourceType, source.sourceType) match
+      case (FederatedSourceType.Plugin(w), FederatedSourceType.Plugin(v)) if w == v =>
+        providerOf(w).filter(_.editsHeldSources).flatMap { p =>
+          for
+            before <- stored.config.flatMap(p.connectionOf)
+            after  <- source.config.flatMap(p.connectionOf)
+          yield (before, after)
+        }
+      case _ => None
+    if held.isEmpty then HeldEdit.KeepsSecrets
+    else
+      connections match
+        case Some(_) if held.exists(_.externalRef.isDefined) => HeldEdit.SuperuserOnly
+        case Some((before, after))                           =>
+          if before == after then HeldEdit.KeepsSecrets else HeldEdit.ClearsSecrets
+        case None => HeldEdit.SuperuserOnly
+
   /** Empty when `source` may be stored. `reserved` is the tenant-db's own catalog alias plus every
     * OTHER source's alias in it, as the blob builder reserves them at spawn.
     */
@@ -117,7 +160,7 @@ object FederatedSourceRules:
       case FederatedSourceType.Sql =>
         // Judged on the setupSql text with `{{alias}}` expanded, so `qod_{{alias}}` under alias
         // `pg_x` is `qod_pg_x`. Secret values are not spliced in here (see ReservedSecretPrefixes).
-        val lower = source.setupSql.replace("{{alias}}", source.alias).toLowerCase(Locale.ROOT)
+        val lower    = source.setupSql.replace("{{alias}}", source.alias).toLowerCase(Locale.ROOT)
         val prefixes = ReservedSecretPrefixes ++ FederatedSourceProviders.reservedSecretPrefixes
         prefixes.filter(lower.contains).map { p =>
           s"setupSql mentions '$p', a secret-name prefix reserved for QoD's typed sources"
