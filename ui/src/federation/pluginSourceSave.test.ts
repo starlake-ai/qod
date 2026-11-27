@@ -156,15 +156,6 @@ describe('savePluginSource', () => {
     expect(await savePluginSource(f.api, input({ alias: '  ' }))).toEqual({ ok: false, errors: ['alias is required'] });
     expect(f.calls).toEqual([]);
   });
-});
-
-describe('errorsOf', () => {
-  it('never splits a message: a provider error may itself contain "; "', () => {
-    const credential = 'config: key "apiKey" looks like a literal credential; name a source secret in apiKeySecret instead';
-    expect(errorsOf(new ApiError(400, credential, 'invalid_federated_source'))).toEqual([credential]);
-    expect(errorsOf(new ApiError(403, 'x; y', 'superuser_required'))).toEqual(['x; y']);
-    expect(errorsOf(new Error('net'))).toEqual(['Error: net']);
-  });
 
   it('saves a connection change disabled first, so the manager deletes the old secrets, then enables it', async () => {
     const f = fake([secret('TC_TOKEN')]);
@@ -205,5 +196,14 @@ describe('errorsOf', () => {
         'set secret TC_TOKEN under Secrets, then save the source again to enable it'],
     });
     expect(f.calls).toEqual(['list', 'create disabled', 'secret TC_TOKEN=k']);
+  });
+});
+
+describe('errorsOf', () => {
+  it('never splits a message: a provider error may itself contain "; "', () => {
+    const credential = 'config: key "apiKey" looks like a literal credential; name a source secret in apiKeySecret instead';
+    expect(errorsOf(new ApiError(400, credential, 'invalid_federated_source'))).toEqual([credential]);
+    expect(errorsOf(new ApiError(403, 'x; y', 'superuser_required'))).toEqual(['x; y']);
+    expect(errorsOf(new Error('net'))).toEqual(['Error: net']);
   });
 });
