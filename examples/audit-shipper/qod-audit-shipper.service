@@ -1,0 +1,50 @@
+# Vector tailing the QoD audit file into object storage. /etc/qod-audit-shipper/ holds common.yaml
+# and the ONE sink-*.yaml you use (two sink files ship to both). See README.md.
+[Unit]
+Description=QoD audit file shipper (Vector)
+Documentation=https://vector.dev/docs/
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=qod-audit-shipper
+Group=qod-audit-shipper
+# The manager's group, for read access to the 0750 folder and 0640 files that
+# QOD_AUDIT_FILE_GROUP_READABLE=true gives.
+SupplementaryGroups=qod
+# Credentials, root:root mode 0600: systemd reads it before dropping privileges.
+EnvironmentFile=/etc/qod-audit-shipper/credentials.env
+# Vector expands the wildcard itself; a .json key file or the .env next to them is not read.
+ExecStart=/usr/bin/vector --config /etc/qod-audit-shipper/*.yaml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=5
+
+# Checkpoints and disk buffers: data_dir in common.yaml.
+StateDirectory=qod-audit-shipper
+StateDirectoryMode=0700
+ReadOnlyPaths=/var/log/qod
+UMask=0077
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

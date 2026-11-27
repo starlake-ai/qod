@@ -1,0 +1,67 @@
+# Source side of the QoD audit shipper (Vector 0.62.0). Run it with exactly one sink-*.yaml
+# next to it; see README.md.
+
+# Checkpoints and disk buffers live here: the unit's StateDirectory.
+data_dir: /var/lib/qod-audit-shipper
+# Date partitions in object keys are UTC days.
+timezone: UTC
+# A file source checkpoint moves only once its line is acknowledged by every sink (here: written
+# to the sink's disk buffer).
+acknowledgements:
+  enabled: true
+
+sources:
+  qod_audit_file:
+    type: file
+    # QOD_AUDIT_FILE_PATH and its rotated files (<path>.1 .. <path>.<QOD_AUDIT_FILE_MAX_FILES>).
+    # Rotation renames: a file keeps its first line, so its checksum fingerprint follows it from
+    # audit.ndjson to audit.ndjson.1 and reading continues where it stopped.
+    include:
+      - /var/log/qod/audit.ndjson*
+    fingerprint:
+      strategy: checksum
+      lines: 1
+    read_from: beginning
+    # Drain a rotated file before the newer one, so a backlog ships in order.
+    oldest_first: true
+    # Default is 100 KiB, above which a line is discarded; QoD lines are far smaller.
+    max_line_bytes: 1048576
+
+transforms:
+  qod_audit_ts:
+    type: remap
+    inputs: [qod_audit_file]
+    # Only the event timestamp changes, for the date partition. The text codec writes .message,
+    # the line exactly as QoD wrote it. A line without a parseable ts keeps the read time.
+    source: |
+      parsed, err = parse_json(.message)
+      if err == null {
+        ts, err = parse_timestamp(parsed.ts, "%+")
+        if err == null { .timestamp = ts }
+      }
+
+tests:
+  - name: line kept verbatim, timestamp from ts
+    inputs:
+      - insert_at: qod_audit_ts
+        type: log
+        log_fields:
+          message: '{"qodEvent":"audit","ts":"2026-11-26T23:59:59.999Z","family":"auth","actor":"alice"}'
+    outputs:
+      - extract_from: qod_audit_ts
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.message, "{\"qodEvent\":\"audit\",\"ts\":\"2026-11-26T23:59:59.999Z\",\"family\":\"auth\",\"actor\":\"alice\"}")
+              assert_eq!(.timestamp, t'2026-11-26T23:59:59.999Z')
+  - name: line without ts is kept
+    inputs:
+      - insert_at: qod_audit_ts
+        type: log
+        log_fields:
+          message: "not json"
+    outputs:
+      - extract_from: qod_audit_ts
+        conditions:
+          - type: vrl
+            source: assert_eq!(.message, "not json")

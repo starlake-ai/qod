@@ -490,7 +490,7 @@ final case class TelemetryConfig(
     @ConfigField(
       envVar = "QOD_AUDIT_SINK",
       description =
-        "Extra destination for every audit and statement event, on top of the store: none | stdout (one JSON line per event, tagged qodEvent=audit|statement, for a log shipper; SQL literals, engine error text and unauthenticated login names are redacted). Requires store=postgres. Lines dropped under stdout backpressure count in qod_journal_dropped_total{table=stdout}."
+        "Extra destination for every audit and statement event, on top of the store: none | stdout (one JSON line per event, tagged qodEvent=audit|statement, for a log shipper; SQL literals, engine error text and unauthenticated login names are redacted) | file (the same lines appended to a rotated file a log shipper tails, settings under QOD_AUDIT_FILE_*). Requires store=postgres. Lines dropped under backpressure or a failed write count in qod_journal_dropped_total{table=stdout|file}."
     )
     auditSink: String = "none",
     @field
@@ -499,14 +499,16 @@ final case class TelemetryConfig(
       description =
         "Record refused FlightSQL and native Quack handshakes (a bad or missing credential, a user with no access to the pool) as auth.login.failure audit events, at most one per minute per front door, client address and user name. Off by default; the client is refused either way."
     )
-    auditHandshakeFailures: Boolean = false
+    auditHandshakeFailures: Boolean = false,
+    auditFile: AuditFileConfig = AuditFileConfig()
 )
 
 object TelemetryConfig:
   def validate(
       store: String,
       stmtHistoryRetentionDays: Int,
-      auditSink: String = "none"
+      auditSink: String = "none",
+      auditFile: AuditFileConfig = AuditFileConfig()
   ): Either[String, Unit] =
     store match
       case "postgres" | "none" =>
@@ -515,12 +517,58 @@ object TelemetryConfig:
             "telemetry.stmtHistoryRetentionDays must be 0 (keep forever) or >= 2: the daily" +
               " rollup recompute rebuilds whole-day buckets from raw rows"
           )
-        else if auditSink != "none" && auditSink != "stdout" then
-          Left(s"unknown telemetry.auditSink: '$auditSink' (supported: none, stdout)")
+        else if !Set("none", "stdout", "file").contains(auditSink) then
+          Left(s"unknown telemetry.auditSink: '$auditSink' (supported: none, stdout, file)")
         else if auditSink != "none" && store == "none" then
           Left("telemetry.auditSink requires telemetry.store=postgres: store=none records nothing")
+        else if auditSink == "file" then auditFile.validate
         else Right(())
       case other => Left(s"unknown telemetry.store: '$other' (supported: postgres, none)")
+
+/** `telemetry.auditSink = file`: the file the audit and statement lines are appended to, for a log
+  * shipper to tail (examples/audit-shipper). Rotation and permissions: [[FileAuditWriter]].
+  */
+final case class AuditFileConfig(
+    @field @ConfigField(
+      envVar = "QOD_AUDIT_FILE_PATH",
+      description =
+        "Absolute path of the audit file (auditSink=file). Rotated files are <path>.1 (newest) to <path>.<maxFiles>; nothing else may rotate them."
+    )
+    path: String = "",
+    @field @ConfigField(
+      envVar = "QOD_AUDIT_FILE_MAX_BYTES",
+      description = "Size in bytes at which the audit file rotates (1048576 to 1099511627776)."
+    )
+    maxFileBytes: Long = 100L * 1024 * 1024,
+    @field @ConfigField(
+      envVar = "QOD_AUDIT_FILE_MAX_FILES",
+      description =
+        "Rotated audit files kept (1 to 1000). At the cap the oldest is deleted, logged at ERROR and counted in qod_audit_file_deleted_total: size the cap for the longest shipper outage you tolerate."
+    )
+    maxFiles: Int = 10,
+    @field @ConfigField(
+      envVar = "QOD_AUDIT_FILE_FSYNC_INTERVAL_SEC",
+      description =
+        "Seconds between forcing the audit file to disk (0 to 3600, 0 = after every line): a host crash loses at most what was written since."
+    )
+    fsyncIntervalSec: Int = 1,
+    @field @ConfigField(
+      envVar = "QOD_AUDIT_FILE_GROUP_READABLE",
+      description =
+        "Create the audit file 0640 and its folder 0750 instead of 0600 and 0700, for a shipper in the manager's group."
+    )
+    groupReadable: Boolean = false
+):
+  def validate: Either[String, Unit] =
+    if path.isBlank then Left("auditSink=file needs QOD_AUDIT_FILE_PATH")
+    else if !scala.util.Try(java.nio.file.Path.of(path).isAbsolute).getOrElse(false) then
+      Left(s"QOD_AUDIT_FILE_PATH must be an absolute path: '$path'")
+    else if maxFileBytes < (1L << 20) || maxFileBytes > (1L << 40) then
+      Left("QOD_AUDIT_FILE_MAX_BYTES must be 1048576 to 1099511627776")
+    else if maxFiles < 1 || maxFiles > 1000 then Left("QOD_AUDIT_FILE_MAX_FILES must be 1 to 1000")
+    else if fsyncIntervalSec < 0 || fsyncIntervalSec > 3600 then
+      Left("QOD_AUDIT_FILE_FSYNC_INTERVAL_SEC must be 0 to 3600")
+    else Right(())
 
 /** The REST listener's request limits (`quack-on-demand.restLimits`). */
 final case class RestLimitsConfig(

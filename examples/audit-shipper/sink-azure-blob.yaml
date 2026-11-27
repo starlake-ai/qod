@@ -1,0 +1,44 @@
+# Azure Blob Storage. Set `account_name` and `container_name`. Credential: a service principal,
+# AZURE_TENANT_ID / AZURE_CLIENT_ID / AZURE_CLIENT_SECRET in the EnvironmentFile. Vector 0.62 does
+# not interpolate ${VAR} in configs by default, so the exec secret backend below hands those
+# variables to the sink.
+#   On an Azure VM: replace `auth` with {azure_credential_kind: managed_identity} and drop `secret`.
+#   With a SAS instead: replace `account_name` and `auth` with
+#     connection_string: SECRET[qod_env.azure_connection_string]
+#   and print AZURE_STORAGE_CONNECTION_STRING under that key (validate it with --resolve-secrets).
+secret:
+  qod_env:
+    type: exec
+    command:
+      - /bin/sh
+      - -c
+      - >-
+        printf '{"tenant":{"value":"%s"},"client":{"value":"%s"},"secret":{"value":"%s"}}'
+        "$AZURE_TENANT_ID" "$AZURE_CLIENT_ID" "$AZURE_CLIENT_SECRET"
+
+sinks:
+  qod_audit_azure:
+    type: azure_blob
+    inputs: [qod_audit_ts]
+    account_name: qodaudit
+    auth:
+      azure_credential_kind: client_secret_credential
+      azure_tenant_id: SECRET[qod_env.tenant]
+      azure_client_id: SECRET[qod_env.client]
+      azure_client_secret: SECRET[qod_env.secret]
+    container_name: qod-audit
+    blob_prefix: "qod-audit/date=%Y-%m-%d/"
+    compression: gzip
+    encoding:
+      codec: text
+    framing:
+      method: newline_delimited
+    batch:
+      timeout_secs: 60
+    buffer:
+      type: disk
+      max_size: 1073741824
+      when_full: block
+    # The healthcheck reads the container properties, which a write-only role cannot.
+    healthcheck:
+      enabled: false
