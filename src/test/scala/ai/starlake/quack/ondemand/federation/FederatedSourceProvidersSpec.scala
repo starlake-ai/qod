@@ -10,7 +10,11 @@ object TestProvider extends FederatedSourceProvider:
   val extensionName: String = "qod_test_connector"
   val reservedSecretPrefixes: List[String] = List("qod_tc_")
   def errors(source: FederatedSource, reserved: Set[String]): List[String] =
-    if !source.readOnly then List("test_connector sources are read-only") else Nil
+    // A config with `"writable": true` lets a spec reach a writable module source (the
+    // read-only guard of a held write); without it a source must be read-only.
+    val writable = source.config.flatMap(io.circe.parser.parse(_).toOption)
+      .flatMap(_.hcursor.get[Boolean]("writable").toOption).getOrElse(false)
+    if !source.readOnly && !writable then List("test_connector sources are read-only") else Nil
   def normalizedConfig(raw: String): Either[String, String] =
     io.circe.parser.parse(raw).left.map(_.getMessage).map(_.noSpaces)
   /** Opts in to edits of a source holding secrets: the connection is the config's `endpoint`, and

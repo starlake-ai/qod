@@ -1569,14 +1569,18 @@ class FederatedSourceHandlersSpec
       alias: String,
       endpoint: Option[String] = Some("https://a.example.com"),
       collections: List[String] = List("docs"),
-      disabled: Boolean = false
+      disabled: Boolean = false,
+      writable: Boolean = false
   ) = FederatedSourceCreateRequest(
     alias = alias,
     sourceType = Some("test_connector"),
     pluginConfig = Some(
       io.circe.Json.fromFields(
-        endpoint.map(e => "endpoint" -> io.circe.Json.fromString(e)).toList :+
-          ("collections" -> io.circe.Json.fromValues(collections.map(io.circe.Json.fromString)))
+        endpoint.map(e => "endpoint" -> io.circe.Json.fromString(e)).toList ++
+          List(
+            "collections" -> io.circe.Json.fromValues(collections.map(io.circe.Json.fromString))
+          ) ++
+          (if writable then List("writable" -> io.circe.Json.True) else Nil)
       )
     ),
     disabled = disabled
@@ -1669,6 +1673,49 @@ class FederatedSourceHandlersSpec
       status shouldBe StatusCode.Forbidden
       err.error shouldBe "superuser_required"
       secretNames(fs, tdId, "unnamed") shouldBe List("TC_TOKEN")
+    }
+
+  it should "keep a read-only source read-only for a tenant admin on the same connection" in
+    withEnv { (fs, resolver, tdId) =>
+      val (su, admin) = bothHandlers(fs, resolver)
+      create(
+        su,
+        heldPluginReq("ro_same", writable = true).copy(readOnly = Some(true))
+      ).isRight shouldBe true
+      withSecret(su, "ro_same", "TC_TOKEN")
+      val before = fs.getSource(tdId, "ro_same").value
+      before.readOnly shouldBe true
+      val (status, err) =
+        create(
+          admin,
+          heldPluginReq("ro_same", writable = true).copy(readOnly = Some(false))
+        ).left.value
+      status shouldBe StatusCode.Forbidden
+      err.error shouldBe "superuser_required"
+      fs.getSource(tdId, "ro_same").value shouldBe before
+      secretNames(fs, tdId, "ro_same") shouldBe List("TC_TOKEN")
+    }
+
+  it should "refuse a tenant admin's writable, disabled change of connection of a read-only source" in
+    withEnv { (fs, resolver, tdId) =>
+      val (su, admin) = bothHandlers(fs, resolver)
+      create(
+        su,
+        heldPluginReq("ro_moved", writable = true).copy(readOnly = Some(true))
+      ).isRight shouldBe true
+      withSecret(su, "ro_moved", "TC_TOKEN")
+      val before = fs.getSource(tdId, "ro_moved").value
+      val req    = heldPluginReq(
+        "ro_moved",
+        endpoint = Some("https://b.example.com"),
+        disabled = true,
+        writable = true
+      )
+      val (status, err) = create(admin, req.copy(readOnly = Some(false))).left.value
+      status shouldBe StatusCode.Forbidden
+      err.error shouldBe "superuser_required"
+      fs.getSource(tdId, "ro_moved").value shouldBe before
+      secretNames(fs, tdId, "ro_moved") shouldBe List("TC_TOKEN")
     }
 
   it should "be audited ok with the count it deleted, denied on a 409, and never with a value" in
