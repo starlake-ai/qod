@@ -1,0 +1,24 @@
+# Google Cloud Storage. Set `bucket`. Credentials: GOOGLE_APPLICATION_CREDENTIALS (path to a
+# service account key file readable by the shipper user) in the EnvironmentFile, or nothing on a
+# Compute Engine VM, where the instance service account is used.
+sinks:
+  qod_audit_gcs:
+    type: gcp_cloud_storage
+    inputs: [qod_audit_ts]
+    bucket: qod-audit
+    key_prefix: "qod-audit/date=%Y-%m-%d/"
+    filename_extension: ndjson.gz
+    compression: gzip
+    encoding:
+      codec: text
+    framing:
+      method: newline_delimited
+    batch:
+      timeout_secs: 60
+    buffer:
+      type: disk
+      max_size: 1073741824
+      when_full: block
+    # HEAD on the bucket needs storage.buckets.get, which roles/storage.objectCreator lacks.
+    healthcheck:
+      enabled: false

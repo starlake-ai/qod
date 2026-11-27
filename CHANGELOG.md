@@ -11,6 +11,19 @@
   database, naming the tenant, the role, the policy id, the column, the mask's type and the
   column's, never the mask. Rewrite each with the `TRY_CAST` form below, or use `NULL` or a deny.
 
+### Added
+
+- **`QOD_AUDIT_SINK=file` hands audit and statement events to a log shipper** (#196). The manager
+  appends each event, as the redacted JSON line `stdout` writes, to `QOD_AUDIT_FILE_PATH`, rotates
+  it by size and by rename (`QOD_AUDIT_FILE_MAX_BYTES`, `QOD_AUDIT_FILE_MAX_FILES`) and forces it
+  to disk every `QOD_AUDIT_FILE_FSYNC_INTERVAL_SEC`, so Vector, Fluent Bit or the OpenTelemetry
+  Collector can tail it with checkpoints. The file is `0600` (`0640` with
+  `QOD_AUDIT_FILE_GROUP_READABLE`) and holds no credential. Writes never run on a statement's
+  thread: lines a slow, full or read-only disk cannot take are dropped and counted in
+  `qod_journal_dropped_total{table="file"}`, and a rotated file deleted at the cap is logged at
+  ERROR and counted in `qod_audit_file_deleted_total`. `examples/audit-shipper/` holds a reference
+  Vector setup for Amazon S3 and S3-compatible stores, Google Cloud Storage and Azure Blob Storage.
+
 ### Fixed
 
 - **A column mask can be written for a column that is neither text nor DOUBLE.** The allowed mask

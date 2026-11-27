@@ -1,0 +1,30 @@
+# Amazon S3 or any S3-compatible store. Set `bucket`; everything else comes from the environment
+# (EnvironmentFile of the unit):
+#   AWS_REGION              e.g. eu-west-3, or the region your S3-compatible store expects (gra)
+#   AWS_ENDPOINT_URL        only for an S3-compatible store, e.g. https://s3.gra.io.cloud.ovh.net
+#   AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY, or no keys on an instance role
+sinks:
+  qod_audit_s3:
+    type: aws_s3
+    inputs: [qod_audit_ts]
+    bucket: qod-audit
+    key_prefix: "qod-audit/date=%Y-%m-%d/"
+    filename_extension: ndjson.gz
+    compression: gzip
+    encoding:
+      codec: text
+    framing:
+      method: newline_delimited
+    batch:
+      timeout_secs: 60
+    buffer:
+      type: disk
+      max_size: 1073741824
+      when_full: block
+    # By default a 403 or 404 (revoked key, missing bucket) drops the batch; retry everything, so a
+    # bad credential stalls delivery and grows the buffer instead.
+    retry_strategy:
+      type: all
+    # HeadBucket needs s3:ListBucket, which a write-only key does not hold.
+    healthcheck:
+      enabled: false

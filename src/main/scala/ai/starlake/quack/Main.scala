@@ -40,6 +40,7 @@ import ai.starlake.quack.ondemand.bootstrap.{DemoBootstrapHook, ServeProvisionHo
 import ai.starlake.quack.ondemand.telemetry.{
   AuditRecorder,
   EventJournal,
+  FileAuditWriter,
   NoopTelemetryStore,
   PostgresTelemetryStore,
   StdoutTelemetrySink,
@@ -101,6 +102,7 @@ object Main extends IOApp with LazyLogging:
   given ProductHint[NodeFilesConfig]           = ProductHint[NodeFilesConfig](camelMapping)
   given ProductHint[NodeAuthzLimitsConfig]     = ProductHint[NodeAuthzLimitsConfig](camelMapping)
   given ProductHint[TelemetryConfig]           = ProductHint[TelemetryConfig](camelMapping)
+  given ProductHint[AuditFileConfig]           = ProductHint[AuditFileConfig](camelMapping)
   given ProductHint[MaintenanceConfig]         = ProductHint[MaintenanceConfig](camelMapping)
   given ProductHint[CatalogConfig]             = ProductHint[CatalogConfig](camelMapping)
   given ProductHint[RoutingConfig]             = ProductHint[RoutingConfig](camelMapping)
@@ -141,6 +143,7 @@ object Main extends IOApp with LazyLogging:
   given ConfigReader[NodeExtensionsConfig]     = deriveReader[NodeExtensionsConfig]
   given ConfigReader[NodeFilesConfig]          = deriveReader[NodeFilesConfig]
   given ConfigReader[NodeAuthzLimitsConfig]    = deriveReader[NodeAuthzLimitsConfig]
+  given ConfigReader[AuditFileConfig]          = deriveReader[AuditFileConfig]
   given ConfigReader[TelemetryConfig]          = deriveReader[TelemetryConfig]
   given ConfigReader[MaintenanceConfig]        = deriveReader[MaintenanceConfig]
   given ConfigReader[CatalogConfig]            = deriveReader[CatalogConfig]
@@ -359,7 +362,8 @@ object Main extends IOApp with LazyLogging:
       .validate(
         mgrCfg0.telemetry.store,
         mgrCfg0.telemetry.stmtHistoryRetentionDays,
-        mgrCfg0.telemetry.auditSink
+        mgrCfg0.telemetry.auditSink,
+        mgrCfg0.telemetry.auditFile
       )
       .left
       .foreach(msg => sys.error(msg))
@@ -651,9 +655,28 @@ object Main extends IOApp with LazyLogging:
     val baseTelemetryStore: TelemetryStore = mgrCfg.telemetry.store match
       case "none" => NoopTelemetryStore
       case _      => new PostgresTelemetryStore(cpJdbcUrl, meta("pgUser"), meta("pgPassword"))
-    val stdoutSink = Option.when(mgrCfg.telemetry.auditSink == "stdout")(
-      new StdoutTelemetrySink(baseTelemetryStore, mgrCfg.telemetry.journalCapacity)
-    )
+    // Opened here, so a path the manager cannot write refuses the boot instead of dropping every
+    // line.
+    val fileAuditWriter = Option.when(mgrCfg.telemetry.auditSink == "file") {
+      val cfg = mgrCfg.telemetry.auditFile
+      try FileAuditWriter(cfg)
+      catch
+        case scala.util.control.NonFatal(e) =>
+          sys.error(s"QOD_AUDIT_FILE_PATH: cannot open ${cfg.path}: $e")
+    }
+    val stdoutSink = mgrCfg.telemetry.auditSink match
+      case "stdout" =>
+        Some(new StdoutTelemetrySink(baseTelemetryStore, mgrCfg.telemetry.journalCapacity))
+      case "file" =>
+        fileAuditWriter.map(w =>
+          new StdoutTelemetrySink(
+            baseTelemetryStore,
+            mgrCfg.telemetry.journalCapacity,
+            out = w.append,
+            onClosed = () => w.close()
+          )
+        )
+      case _ => None
     val telemetryStore: TelemetryStore = stdoutSink.getOrElse(baseTelemetryStore)
     if telemetryStore.enabled then
       logger.info(s"telemetry: postgres (qodstate_audit), auditSink=${mgrCfg.telemetry.auditSink}")
@@ -1512,9 +1535,16 @@ object Main extends IOApp with LazyLogging:
       auditRecorder.onDropCounter(journalDropped)
       stdoutSink.foreach(_.onDropCounter { n =>
         metricsReg.composite
-          .counter("qod_journal_dropped_total", "table", "stdout")
+          .counter("qod_journal_dropped_total", "table", mgrCfg.telemetry.auditSink)
           .increment(n.toDouble)
       })
+      fileAuditWriter.foreach { w =>
+        val deleted = io.micrometer.core.instrument.Counter
+          .builder("qod_audit_file_deleted_total")
+          .description("Rotated audit files deleted at the rotation cap, perhaps before shipping")
+          .register(metricsReg.composite)
+        w.onDeleted(() => deleted.increment())
+      }
 
       // Per-pool attached-catalogs lookup for ACL resolution, cached 60s per PoolKey and
       // dropped at once by a federated-source write (federatedSourceCaches below), so a new
