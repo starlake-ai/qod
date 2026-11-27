@@ -169,8 +169,19 @@
       "min_from_version": "0.10.0",
       "rollback_without_restore": true,
       "rollback_blocked_by": [],
-      "notes": "https://github.com/starlake-ai/quack-on-demand/blob/v0.15.2/CHANGELOG.md",
-      "steps": []
+      "notes": "https://github.com/starlake-ai/qod/blob/v0.15.2/CHANGELOG.md#upgrading",
+      "steps": [
+        {
+          "when": "before",
+          "boot_refuses_until_done": false,
+          "text": "Label the fleet servers before upgrading the manager: a fleet pool's cohort nodeSelector is now honoured, so a cohort's new nodes only go on servers whose labels contain the selector, and a node that restarts or is refilled while no free server carries them goes pending with reason none_match. Start each server with qod fleet join --label key=value (or QOD_FLEET_LABELS). Running nodes are not moved; pools without cohorts are unaffected."
+        },
+        {
+          "when": "after",
+          "boot_refuses_until_done": false,
+          "text": "Watch pools whose cohort slots were refilled before the upgrade: such a node's cohort now comes from its id, so when it restarts it may go pending with none_match or take a server of another cohort, for as long as the id lives."
+        }
+      ]
     }
   ]
 }
