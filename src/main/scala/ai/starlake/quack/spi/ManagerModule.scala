@@ -23,7 +23,7 @@ final case class StaticMount(
 /** The plug-in contract for jars discovered via
   * `META-INF/services/ai.starlake.quack.spi.ManagerModule`.
   *
-  * Lifecycle: no-arg construction (ServiceLoader) -> changelogPath applied -> start(ctx) ->
+  * Lifecycle: no-arg construction (ServiceLoader) -> changelogPath applied -> prepare(controlPlane, config) -> pool restore -> start(ctx) ->
   * endpoints/publicPathPrefixes/staticMounts read once -> onEvent for the process lifetime -> stop
   * during graceful shutdown. Boot-time failures (construction, migration, start) abort the manager
   * boot; onEvent failures are contained by the dispatcher.
@@ -31,6 +31,13 @@ final case class StaticMount(
 trait ManagerModule:
   def name: String
   def changelogPath: Option[String]
+
+  /** Runs once at boot, after every module's changelog and BEFORE pool restore, which renders the
+    * federated sources of every tenant-db (so before [[start]]): the place for a module whose
+    * providers need stored state to render, such as per-tenant settings. A failure stops the boot.
+    */
+  def prepare(controlPlane: javax.sql.DataSource, config: com.typesafe.config.Config): IO[Unit] =
+    IO.unit
   def start(ctx: ManagerContext): IO[Unit]
 
   /** The module's REST routes. A route that reads a request body lives under `/api`: the REST

@@ -32,3 +32,36 @@ class ModuleMigrationsSpec extends AnyFlatSpec with Matchers:
       runnerFor = (_, _) => () => throw new RuntimeException("migration failed")
     )
   }
+
+  "ModuleMigrations.prepare" should "hand every module the control plane and config, in order" in {
+    val seen   = ListBuffer.empty[String]
+    val ds     = new org.postgresql.ds.PGSimpleDataSource()
+    val config = com.typesafe.config.ConfigFactory.parseString("a = 1")
+    def module(n: String): TestModule =
+      new TestModule:
+        override def name: String = n
+        override def prepare(
+            controlPlane: javax.sql.DataSource,
+            cfg: com.typesafe.config.Config
+        ): cats.effect.IO[Unit] =
+          cats.effect.IO { seen += s"$n:${controlPlane eq ds}:${cfg.getInt("a")}"; () }
+    ModuleMigrations.prepare(List(module("one"), module("two")), ds, config)
+    seen.toList shouldBe List("one:true:1", "two:true:1")
+  }
+
+  it should "stop the boot naming the module whose prepare fails" in {
+    val failing = new TestModule:
+      override def name: String = "broken"
+      override def prepare(
+          controlPlane: javax.sql.DataSource,
+          cfg: com.typesafe.config.Config
+      ): cats.effect.IO[Unit] = cats.effect.IO.raiseError(new RuntimeException("no table"))
+    val e = intercept[RuntimeException](
+      ModuleMigrations.prepare(
+        List(failing),
+        new org.postgresql.ds.PGSimpleDataSource(),
+        com.typesafe.config.ConfigFactory.empty()
+      )
+    )
+    e.getMessage should include("module broken: prepare failed")
+  }

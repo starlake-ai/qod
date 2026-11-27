@@ -20,6 +20,13 @@ class SpiDefaultsSpec extends AnyFlatSpec with Matchers:
     (new MinimalModule).staticMounts shouldBe Nil
   }
 
+  it should "default prepare to a no-op" in {
+    import cats.effect.unsafe.implicits.global
+    (new MinimalModule)
+      .prepare(new org.postgresql.ds.PGSimpleDataSource(), com.typesafe.config.ConfigFactory.empty())
+      .unsafeRunSync() shouldBe ()
+  }
+
   it should "default mutationGates to Nil" in {
     val m = new MinimalModule
     m.mutationGates shouldBe Nil

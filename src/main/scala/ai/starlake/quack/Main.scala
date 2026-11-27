@@ -566,6 +566,10 @@ object Main extends IOApp with LazyLogging:
     logger.info("state storage: postgres (normalized qodstate_* tables via Liquibase)")
     val store: PostgresControlPlaneStore =
       PostgresControlPlaneStore.fromDefaultMetastore(mgrCfg.defaultMetastore.asMap)
+    // After every module changelog (above) and before pool restore, which renders federated
+    // sources: modules whose providers need stored state load it here (ManagerModule.prepare).
+    ai.starlake.quack.ondemand.module.ModuleMigrations
+      .prepare(modules, store.jdbcDataSource, com.typesafe.config.ConfigFactory.load())
     // Each tenant's policy version (Liquibase 0050): NodeKeys stamps it into every handle, the
     // supervisor refreshes it after RBAC mutations and restores. One instance for both.
     val policyVersions =
