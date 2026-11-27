@@ -40,6 +40,35 @@
   placement wording now covers Kubernetes and fleet. Labels are declared by whoever holds the join
   token: they steer placement and are not an isolation boundary.
 
+- **A tenant admin may edit a module source that holds its secrets, when the module type opts in.**
+  A `FederatedSourceProvider` that overrides `editsHeldSources = true` and `connectionOf(raw)`
+  (what the source's secrets are bound to) lets anyone who may write one of its sources change its
+  config while the connection stays: the secrets are kept. A write naming another connection is
+  refused `409 connection_change_requires_disabled` unless it saves the source disabled; that write
+  deletes every secret of the source in the same transaction and is audited
+  `federation.source.upsert` `ok` with detail `cleared` (`secrets: <n>`, a count, never a name or
+  a value). A source holding an `externalRef` secret, a config the provider cannot name and every
+  built-in type keep the superuser-only rule, and a read-only source still stays read-only for a
+  non-superuser. `GET /api/federated-source-types` gains `editsHeldSources`. The console opens such
+  a source's editor editable for a tenant admin, hands the editor `ctx.heldSecrets` (the stored
+  secrets' names), and takes `ctx.save(pluginConfig, secrets, {connectionChanged: true})`, which
+  saves the source disabled, writes the secrets typed again, then enables it. Accepted risk:
+  whoever edits such a source may reach anything the stored secret reaches on the same connection.
+- **`ManagerContext.ownSources` lets a module read its own stored sources.**
+  `OwnSources.source(tenantDbId, alias)` answers a stored source of one of the module's own types,
+  and `secretValue(tenantDbId, alias, name)` the value of its secret when held as a value (None for
+  an `externalRef`). A module route uses it to call the stored endpoint with the stored secret,
+  after authorizing its caller, and never logs the value.
+
+### Changed
+
+- **A connection change of a module source whose type opts into held-source edits must be saved
+  disabled, superusers included.** For such a type, an enabled write over a source holding value
+  secrets whose config names another connection is now `409
+  connection_change_requires_disabled` for every caller: save it disabled (its secrets are
+  deleted), set its secrets, then enable it. Built-in types and module types that do not opt in
+  are unchanged.
+
 ### Fixed
 
 - **A refilled cohort slot keeps its cohort on every backend.** A slot's cohort is its position in
