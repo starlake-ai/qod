@@ -27,7 +27,8 @@ class FederationBlobBuilderSpec extends AnyFlatSpec with Matchers with OptionVal
       loadEnabled = _ => IO.pure(sources.filterNot(_.disabled)),
       loadSecrets = id => IO.pure(secrets.getOrElse(id, Nil)),
       resolver = resolver,
-      catalogAliasOf = catalogAliasOf
+      catalogAliasOf = catalogAliasOf,
+      tenantOf = _ => IO.pure(Some("t1"))
     )
 
   "FederationBlobBuilder.build" should "return None when no enabled sources" in {
@@ -548,7 +549,8 @@ class FederationBlobBuilderSpec extends AnyFlatSpec with Matchers with OptionVal
       loadEnabled = _ => IO.pure(List(s)),
       loadSecrets = _ => IO.pure(List(secret(s.id, "PWD", "v"))),
       resolver = counting,
-      catalogAliasOf = _ => IO.pure(None)
+      catalogAliasOf = _ => IO.pure(None),
+      tenantOf = _ => IO.pure(Some("t1"))
     )
     intercept[RuntimeException](b.build("td-1").unsafeRunSync())
     resolved shouldBe 0

@@ -694,6 +694,12 @@ object Main extends IOApp with LazyLogging:
     // name). Mirrors attachedCatalogsOf's resolution below. Null-safe before supRef is filled
     // (construction order) and never throws: a lookup failure just means one fewer reserved
     // alias, not a broken blob.
+    // The tenant (its id) a tenant-db belongs to, for providers whose rules or rendered SQL depend
+    // on it (FederatedSourceProvider's tenant-aware methods). Same lookup and null-safety as
+    // catalogAliasOfDbId below.
+    val tenantOfDbId: String => IO[Option[String]] = tdId =>
+      IO.delay(Option(supRef.get()).flatMap(_.getTenantDbById(tdId)).map(_.tenantId))
+
     val catalogAliasOfDbId: String => IO[Option[String]] = tdId =>
       IO.delay(
         Option(supRef.get())
@@ -707,7 +713,8 @@ object Main extends IOApp with LazyLogging:
           loadEnabled = tdId => IO.blocking(federatedStore.listEnabledSources(tdId)),
           loadSecrets = sid => IO.blocking(federatedStore.listSecrets(sid)),
           resolver = secretResolver,
-          catalogAliasOf = catalogAliasOfDbId
+          catalogAliasOf = catalogAliasOfDbId,
+          tenantOf = tenantOfDbId
         )
       }
 

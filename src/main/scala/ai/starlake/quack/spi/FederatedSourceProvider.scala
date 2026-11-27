@@ -37,6 +37,22 @@ trait FederatedSourceProvider:
   /** The node init SQL for this source, with placeholders, or why it cannot be rendered. */
   def renderTemplate(source: FederatedSource, reserved: Set[String]): Either[List[String], String]
 
+  /** [[errors]] for a source of the tenant `tenant` (its id), for a provider whose rules depend on
+    * the tenant. Core always calls this one; the default ignores the tenant.
+    */
+  def errors(source: FederatedSource, tenant: String, reserved: Set[String]): List[String] =
+    errors(source, reserved)
+
+  /** [[renderTemplate]] for a source of the tenant `tenant` (its id), for a provider whose rendered
+    * SQL depends on the tenant. Core always calls this one; the default ignores the tenant.
+    */
+  def renderTemplate(
+      source: FederatedSource,
+      tenant: String,
+      reserved: Set[String]
+  ): Either[List[String], String] =
+    renderTemplate(source, reserved)
+
   /** The console editor of this type, None for none (the form then says to use the REST API). Read
     * once at boot after the module's `start()`, with its `staticMounts`.
     */

@@ -114,7 +114,8 @@ final class FederationBlobBuilder(
     loadEnabled: String => IO[List[FederatedSource]],
     loadSecrets: String => IO[List[FederatedSecret]],
     resolver: SecretResolver,
-    catalogAliasOf: String => IO[Option[String]]
+    catalogAliasOf: String => IO[Option[String]],
+    tenantOf: String => IO[Option[String]]
 ) extends LazyLogging {
 
   private val PlaceholderRegex = """\{\{[^}]*\}\}""".r
@@ -149,14 +150,16 @@ final class FederationBlobBuilder(
   def buildOne(src: FederatedSource): IO[ResolvedFederationBlock] = for {
     siblings <- loadEnabled(src.tenantDbId)
     ownAlias <- ownAliasOf(src.tenantDbId)
-    block    <- renderOne(src, redactSecrets = false, reservedFor(siblings, src.id, ownAlias))
+    tenant   <- tenantOf(src.tenantDbId)
+    block    <- renderOne(src, tenant, redactSecrets = false, reservedFor(siblings, src.id, ownAlias))
   } yield block
 
   private def assemble(tenantDbId: String, redactSecrets: Boolean): IO[Option[String]] = for {
     sources  <- loadEnabled(tenantDbId).map(_.sortBy(_.alias))
     ownAlias <- ownAliasOf(tenantDbId)
+    tenant   <- tenantOf(tenantDbId)
     rendered <- sources.traverse { src =>
-      renderOne(src, redactSecrets, reservedFor(sources, src.id, ownAlias))
+      renderOne(src, tenant, redactSecrets, reservedFor(sources, src.id, ownAlias))
         .map(b => Option(b.sql))
         // Only that source's block goes: its siblings still attach.
         .recover {
@@ -209,10 +212,11 @@ final class FederationBlobBuilder(
 
   private def renderOne(
       src: FederatedSource,
+      tenant: Option[String],
       redactSecrets: Boolean,
       reservedAliases: Set[String]
   ): IO[ResolvedFederationBlock] = for {
-    template <- bodyTemplate(src, reservedAliases)
+    template <- bodyTemplate(src, tenant, reservedAliases)
     secrets  <- loadSecrets(src.id)
     byName = secrets.map(s => s.name -> s).toMap
     resolved <- substitute(src, template, byName, redactSecrets)
@@ -251,7 +255,11 @@ final class FederationBlobBuilder(
     * previous blob (or `""`), and logs -- degrading that tenant-db's WHOLE federation blob, not
     * just the offending source.
     */
-  private def bodyTemplate(src: FederatedSource, reservedAliases: Set[String]): IO[String] =
+  private def bodyTemplate(
+      src: FederatedSource,
+      tenant: Option[String],
+      reservedAliases: Set[String]
+  ): IO[String] =
     src.sourceType match
       case FederatedSourceType.Sql         => IO.pure(src.setupSql)
       case FederatedSourceType.IcebergRest =>
@@ -288,7 +296,15 @@ final class FederationBlobBuilder(
         FederatedSourceProviders.of(w) match
           case None    => IO.raiseError(new SourceProviderMissing(src.alias, w))
           case Some(p) =>
-            p.renderTemplate(src, reservedAliases) match
+            // A plugin's rendered SQL may depend on its tenant (FederatedSourceProvider's
+            // tenant-aware renderTemplate); a tenant-db that resolves to no tenant renders nothing.
+            tenant.fold(
+              IO.raiseError[Either[List[String], String]](
+                new RuntimeException(
+                  s"$w source '${src.alias}': its tenant-db '${src.tenantDbId}' has no tenant"
+                )
+              )
+            )(t => IO.pure(p.renderTemplate(src, t, reservedAliases))).flatMap {
               case Left(errs) =>
                 IO.raiseError(
                   new RuntimeException(
@@ -296,6 +312,7 @@ final class FederationBlobBuilder(
                   )
                 )
               case Right(sql) => IO.pure(sql)
+            }
 
   /** The Postgres / MySQL arm of [[bodyTemplate]], same contract as the Iceberg one: parse, run
     * `RdbmsConfig.validated` (the only way to obtain what `render` accepts), raise on anything

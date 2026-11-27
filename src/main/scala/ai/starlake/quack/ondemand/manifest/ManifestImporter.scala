@@ -872,6 +872,7 @@ object ManifestImporter extends LazyLogging:
                       federatedStore,
                       mtd,
                       tdId,
+                      tenantId,
                       TenantDb.catalogAlias(upserted.metastore, upserted.name),
                       errs
                     )
@@ -1483,6 +1484,7 @@ object ManifestImporter extends LazyLogging:
       federatedStore: Option[FederatedSourceStore],
       mtd: ManifestTenantDb,
       tdId: String,
+      tenantId: String,
       ownCatalogAlias: String,
       errs: scala.collection.mutable.ListBuffer[String]
   ): Unit =
@@ -1617,7 +1619,7 @@ object ManifestImporter extends LazyLogging:
               .filterNot(_ == alias)
               .map(fold)
               .toSet ++ Option(ownCatalogAlias).filter(_.nonEmpty).map(fold)
-          val shapeErrors = FederatedSourceRules.errors(source, reserved)
+          val shapeErrors = FederatedSourceRules.errors(source, tenantId, reserved)
           if shapeErrors.nonEmpty then
             errs += s"tenant-db '${mtd.name}' source '$alias': ${shapeErrors.mkString("; ")}"
           else

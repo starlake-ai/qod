@@ -50,7 +50,8 @@ class AttachErrorRedactorSpec extends AnyFlatSpec with Matchers:
       resolver = new PostgresSecretResolver(),
       // This spec is about redaction, not alias reservation: the one source has no sibling and
       // this fixture declares no tenant-db catalog alias, so nothing is reserved.
-      catalogAliasOf = _ => IO.pure(None)
+      catalogAliasOf = _ => IO.pure(None),
+      tenantOf = _ => IO.pure(Some("t1"))
     ).buildOne(src).unsafeRunSync()
 
   private def secretName(field: String): String  = "S_" + field.toUpperCase
@@ -678,7 +679,8 @@ class AttachErrorRedactorSpec extends AnyFlatSpec with Matchers:
         loadSecrets =
           _ => IO.pure(List(FederatedSecret("sec-pw", src.id, "PW", Some("pw'SENTINEL1"), None))),
         resolver = new PostgresSecretResolver(),
-        catalogAliasOf = _ => IO.pure(None)
+        catalogAliasOf = _ => IO.pure(None),
+      tenantOf = _ => IO.pure(Some("t1"))
       ).buildOne(src).unsafeRunSync()
       withClue(block.sql) {
         AttachErrorRedactor.credentialsIn(block.sql) shouldBe Set("pw'SENTINEL1")

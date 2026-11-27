@@ -6,6 +6,22 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
 object TestProvider extends FederatedSourceProvider:
+  /** The tenant core passed to the last tenant-aware call, for the specs that check it. */
+  @volatile var lastErrorsTenant: Option[String] = None
+  @volatile var lastRenderTenant: Option[String] = None
+
+  override def errors(source: FederatedSource, tenant: String, reserved: Set[String]): List[String] =
+    lastErrorsTenant = Some(tenant)
+    errors(source, reserved)
+
+  override def renderTemplate(
+      source: FederatedSource,
+      tenant: String,
+      reserved: Set[String]
+  ): Either[List[String], String] =
+    lastRenderTenant = Some(tenant)
+    renderTemplate(source, reserved)
+
   val wire: String          = "test_connector"
   val extensionName: String = "qod_test_connector"
   val reservedSecretPrefixes: List[String] = List("qod_tc_")

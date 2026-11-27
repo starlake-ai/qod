@@ -37,3 +37,20 @@ class SpiDefaultsSpec extends AnyFlatSpec with Matchers:
       ManagerEvent.TenantCreated("acme")
     )
   }
+
+  "FederatedSourceProvider" should "default the tenant-aware errors and renderTemplate to the old ones" in {
+    val p = new FederatedSourceProvider:
+      def wire: String                         = "spi_default"
+      def extensionName: String                = "x"
+      def reservedSecretPrefixes: List[String] = Nil
+      def errors(source: ai.starlake.quack.model.FederatedSource, reserved: Set[String]): List[String] =
+        List(s"old errors ${source.id}")
+      def normalizedConfig(raw: String): Either[String, String] = Right(raw)
+      def renderTemplate(
+          source: ai.starlake.quack.model.FederatedSource,
+          reserved: Set[String]
+      ): Either[List[String], String] = Right(s"old render ${source.id}")
+    val src = ai.starlake.quack.model.FederatedSource("s1", "td-1", "a")
+    p.errors(src, "acme", Set.empty) shouldBe List("old errors s1")
+    p.renderTemplate(src, "acme", Set.empty) shouldBe Right("old render s1")
+  }

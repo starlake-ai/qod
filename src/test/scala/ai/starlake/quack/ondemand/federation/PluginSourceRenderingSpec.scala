@@ -16,24 +16,54 @@ class PluginSourceRenderingSpec extends AnyFlatSpec with Matchers with OptionVal
   private def src(readOnly: Boolean = true, config: String = """{"endpoint":"x"}""") =
     FederatedSource("src-tc", "td-1", "tc", sourceType = plugin, config = Some(config), readOnly = readOnly)
 
-  private def builder(sources: List[FederatedSource], secrets: Map[String, List[FederatedSecret]]) =
+  private def builder(
+      sources: List[FederatedSource],
+      secrets: Map[String, List[FederatedSecret]],
+      tenantOf: String => IO[Option[String]] = _ => IO.pure(Some("acme"))
+  ) =
     new FederationBlobBuilder(
       loadEnabled = _ => IO.pure(sources),
       loadSecrets = id => IO.pure(secrets.getOrElse(id, Nil)),
       resolver = new PostgresSecretResolver(),
-      catalogAliasOf = _ => IO.pure(None)
+      catalogAliasOf = _ => IO.pure(None),
+      tenantOf = tenantOf
     )
 
+  "FederatedSourceRules.errors" should "pass the tenant to the provider" in {
+    TestProvider.lastErrorsTenant = None
+    FederatedSourceRules.errors(src(), "acme", Set.empty) shouldBe Nil
+    TestProvider.lastErrorsTenant shouldBe Some("acme")
+  }
+
+  "FederationBlobBuilder" should "render a plugin source with its tenant-db's tenant" in {
+    val secs = Map(src().id -> List(FederatedSecret("sec-1", src().id, "TC_TOKEN", Some("t"), None)))
+    TestProvider.lastRenderTenant = None
+    builder(List(src()), secs).build("td-1").unsafeRunSync()
+    TestProvider.lastRenderTenant shouldBe Some("acme")
+    TestProvider.lastRenderTenant = None
+    builder(List(src()), secs).buildOne(src()).unsafeRunSync()
+    TestProvider.lastRenderTenant shouldBe Some("acme")
+    TestProvider.lastRenderTenant = None
+    builder(List(src()), secs).logSafePreview("td-1").unsafeRunSync()
+    TestProvider.lastRenderTenant shouldBe Some("acme")
+  }
+
+  it should "refuse a plugin source whose tenant-db has no tenant" in {
+    val secs = Map(src().id -> List(FederatedSecret("sec-1", src().id, "TC_TOKEN", Some("t"), None)))
+    val err  = builder(List(src()), secs, _ => IO.pure(None)).build("td-1").attempt.unsafeRunSync()
+    err.left.toOption.map(_.getMessage).getOrElse("") should include("no tenant")
+  }
+
   "FederatedSourceRules.errors" should "delegate to the provider" in {
-    FederatedSourceRules.errors(src(readOnly = false), Set.empty) should contain(
+    FederatedSourceRules.errors(src(readOnly = false), "acme", Set.empty) should contain(
       "test_connector sources are read-only"
     )
-    FederatedSourceRules.errors(src(), Set.empty) shouldBe Nil
+    FederatedSourceRules.errors(src(), "acme", Set.empty) shouldBe Nil
   }
 
   it should "refuse a source whose provider is not loaded" in {
     val orphan = src().copy(sourceType = FederatedSourceType.Plugin("unloaded_plugin"))
-    val msg    = FederatedSourceRules.errors(orphan, Set.empty).mkString
+    val msg    = FederatedSourceRules.errors(orphan, "acme", Set.empty).mkString
     msg should include("unknown sourceType 'unloaded_plugin' (expected one of: sql, ")
     msg should include("test_connector")
     msg should include("or its module is not loaded")
@@ -41,7 +71,7 @@ class PluginSourceRenderingSpec extends AnyFlatSpec with Matchers with OptionVal
 
   it should "reserve the provider's secret prefixes from sql sources" in {
     val sql = FederatedSource("s", "td-1", "s", "CREATE SECRET qod_tc_x (TYPE s3);")
-    FederatedSourceRules.errors(sql, Set.empty).mkString should include("qod_tc_")
+    FederatedSourceRules.errors(sql, "acme", Set.empty).mkString should include("qod_tc_")
   }
 
   "FederatedSourceRules.sameConfig" should "compare normalized plugin config" in {

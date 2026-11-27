@@ -117,6 +117,7 @@ final class FederatedSourceHandlers(
   private def toSource(
       id: String,
       tenantDbId: String,
+      tenant: String,
       req: FederatedSourceCreateRequest,
       existing: Option[FederatedSource]
   ): Either[(StatusCode, ErrorResponse), FederatedSource] =
@@ -248,7 +249,7 @@ final class FederatedSourceHandlers(
             val all =
               if sourceType.rdbms && req.connection.isEmpty then
                 fieldErrors :+ s"connection is required for sourceType '${sourceType.wire}'"
-              else (fieldErrors ++ FederatedSourceRules.errors(source, reserved)).distinct
+              else (fieldErrors ++ FederatedSourceRules.errors(source, tenant, reserved)).distinct
             if all.nonEmpty then Left(badRequest(all.mkString("; "))) else Right(source)
       }
     }
@@ -378,7 +379,7 @@ final class FederatedSourceHandlers(
                 )
               val id =
                 existing.map(_.id).getOrElse(Names.newSurrogateId("fs"))
-              toSource(id, tenantDbId, req, existing) match
+              toSource(id, tenantDbId, tenantIdResolver(tenantName).getOrElse(tenantName), req, existing) match
                 case Left(e) => Left(e)
                 case Right(source)
                     if superuserDenied(apiKey) &&

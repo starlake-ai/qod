@@ -62,10 +62,11 @@ class SecretPlaceholderScanSpec extends AnyFlatSpec with Matchers with OptionVal
 
   it should "refuse it at save, naming the placeholder, for every writer" in {
     val sql  = FederatedSource("s1", "td", "fed", "ATTACH 'x' AS fed (PORT {{secret.PORT}});")
-    val errs = FederatedSourceRules.errors(sql, Set.empty)
+    val errs = FederatedSourceRules.errors(sql, "t1", Set.empty)
     errs.exists(_.contains("{{secret.PORT}} outside a single-quoted literal")) shouldBe true
     FederatedSourceRules.errors(
       sql.copy(setupSql = "ATTACH '{{secret.PORT}}' AS fed;"),
+      "t1",
       Set.empty
     ) shouldBe
       Nil
@@ -78,7 +79,8 @@ class SecretPlaceholderScanSpec extends AnyFlatSpec with Matchers with OptionVal
       loadSecrets = id =>
         IO.pure(secrets.toList.map((n, v) => FederatedSecret(s"sec-$id-$n", id, n, Some(v), None))),
       resolver = new PostgresSecretResolver(),
-      catalogAliasOf = _ => IO.pure(None)
+      catalogAliasOf = _ => IO.pure(None),
+      tenantOf = _ => IO.pure(Some("t1"))
     )
 
   private val Legacy =
