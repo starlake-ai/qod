@@ -130,6 +130,21 @@ who may write sources can create one. A provider must refuse in `errors()` any c
 ATTACH would use the node's ambient credentials (environment, instance role, credential
 chain, local files) instead of the source's own secrets.
 
+Editing a source that holds secrets: by default only a superuser changes the connection or config
+of a source holding secrets, or makes a read-only one writable. A provider lifts that rule for its
+type by overriding both `editsHeldSources = true` and `connectionOf(raw)`, which names what the
+source's secrets are bound to (an endpoint and the secret name the config uses, for example) for a
+config that parses, and None otherwise. For a source of such a type whose secrets are all held as
+values, a write whose config names the same connection keeps the secrets and is open to anyone who
+may write the source. A write naming another connection is refused `409
+connection_change_requires_disabled` unless it saves the source disabled, for every caller,
+superusers included; that disabled write deletes every secret of the source in the same
+transaction, audited `federation.source.upsert` `ok` with detail `cleared` (`secrets: <n>`). A
+read-only source still stays read-only for a non-superuser. A held `externalRef` secret, a config
+`connectionOf` cannot name, or a provider that is not loaded keeps the superuser rule. Accepted
+risk: whoever edits such a source may point it at anything the stored secret reaches on the same
+connection, so return in the identity everything a secret is bound to.
+
 Quoting: core refuses a plugin source whose rendered template has a `{{secret.NAME}}`
 placeholder outside a single-quoted literal. There is no plain-token fallback as for legacy
 `sql` sources; the source is skipped with a `PluginSecretUnquoted` error and the tenant-db's

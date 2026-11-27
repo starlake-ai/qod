@@ -1832,6 +1832,14 @@ Then recycle the pool's nodes, as for any new source.
   superuser_required`, nothing written. A superuser changes it, or delete the
   source and create it again with its secrets. The same values sent again are no
   change, and `--description`, `--disabled` and `--read-only` itself stay open.
+- A module source type may lift that rule (its provider sets
+  `editsHeldSources`). For such a source whose secrets are all values, a
+  tenant admin changes its config while its connection stays, and the secrets
+  stay. A change of connection is refused `409
+  connection_change_requires_disabled`, superusers included, unless it is saved
+  `--disabled`; that save deletes every secret of the source. Then set the
+  secrets again (`qod federation secret set`) and re-run `create` without
+  `--disabled`.
 - `create` upserts, so re-running it edits the source, and every field it
   leaves out is RESET (see "Register a federated source"). A re-run that
   repeats only the required flags puts `--port`, `--schema`, `--ssl-mode` and

@@ -317,7 +317,12 @@ class HandlerAuditSpec extends AnyFlatSpec with Matchers with OptionValues:
     private val sources = scala.collection.mutable.Map.empty[String, FederatedSource]
     private val secrets = scala.collection.mutable.Map.empty[String, FederatedSecret]
 
-    def upsertSource(s: FederatedSource): Unit                                = sources(s.id) = s
+    def upsertSource(s: FederatedSource): Unit               = sources(s.id) = s
+    def upsertSourceClearingSecrets(s: FederatedSource): Int =
+      val cleared = secrets.values.count(_.federatedSourceId == s.id)
+      secrets.filterInPlace((_, sec) => sec.federatedSourceId != s.id)
+      sources(s.id) = s
+      cleared
     def deleteSource(id: String): Unit                                        = sources -= id
     def getSource(tenantDbId: String, alias: String): Option[FederatedSource] =
       sources.values.find(s => s.tenantDbId == tenantDbId && s.alias == alias)
