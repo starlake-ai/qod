@@ -22,7 +22,13 @@ export interface PluginSaveInput {
   sourceType: string;
   pluginConfig: unknown;
   secrets: SourceEditorSecret[];
+  /** The editor says the connection changes (ctx.save's third argument); false when omitted. */
+  connectionChanged?: boolean;
 }
+
+/** savePluginSource's answer to a connection change with no secret handed to it. */
+export const CONNECTION_CHANGE_NEEDS_SECRETS =
+  'changing the connection clears the stored secrets: type them again';
 
 /** ctx.save: the source `{alias, description, sourceType, readOnly: true, pluginConfig}`, then each
  *  secret, through the sequence the form uses for a Postgres password, for a list of secrets:
@@ -32,6 +38,10 @@ export interface PluginSaveInput {
  *  - an existing source holding some is saved first and its secrets after, so a refusal writes nothing; secrets
  *    new to a source already holding others go first, so their placeholders resolve at every
  *    instant, and are deleted again on a refusal;
+ *  - a connection change (`connectionChanged`) of an existing source holding secrets takes the
+ *    disabled-first path too: the manager deletes the stored secrets when it writes the source
+ *    disabled, so every secret is written again before it is enabled; with no secret handed to it
+ *    nothing is saved;
  *  - a secret held through an externalRef is never overwritten with a value.
  *  Never throws: every failure comes back as `{ok: false, errors}`. */
 export async function savePluginSource(api: PluginSaveApi, input: PluginSaveInput): Promise<SaveResult> {
@@ -46,6 +56,8 @@ export async function savePluginSource(api: PluginSaveApi, input: PluginSaveInpu
     pluginConfig: input.pluginConfig,
   };
   const targets = input.secrets;
+  if (input.connectionChanged && targets.length === 0)
+    return { ok: false, errors: [CONNECTION_CHANGE_NEEDS_SECRETS] };
   try {
     if (targets.length === 0) {
       await api.createFederatedSource(tenant, tenantDb, request);
@@ -66,6 +78,7 @@ export async function savePluginSource(api: PluginSaveApi, input: PluginSaveInpu
           errors: [`secret ${s.name} is resolved from ${ref}; change it under Secrets instead of saving a value here`],
         };
     }
+    if (input.connectionChanged) return await saveDisabledFirst(api, input, alias, request);
     const fresh = targets.filter(s => !stored.some(x => x.name === s.name));
     const held = targets.filter(s => stored.some(x => x.name === s.name));
     const written: string[] = [];

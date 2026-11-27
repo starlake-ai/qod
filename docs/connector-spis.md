@@ -178,8 +178,10 @@ rest of the form works on. Core keeps the alias, description, read-only flag, li
 secrets panel; the editor replaces only the type's own fields. `ctx` holds `contract: 1`,
 `apiBase: '/api'`, `tenant`, `tenantDb`, `user` (`username`, `superuser`, `permissions`),
 `source` (the stored source when editing, null when creating), `readOnly` (true when the source
-holds secrets and the caller is not a superuser, so the manager would refuse a change),
-`save(pluginConfig, secrets)`, `cancel()` and `theme: 'dark'`. `save` stores
+holds secrets, the caller is not a superuser, and either the type does not set `editsHeldSources`
+or a secret is held through an `externalRef`, so the manager would refuse a change),
+`heldSecrets` (the names of the source's stored secrets, empty when creating),
+`save(pluginConfig, secrets, options?)`, `cancel()` and `theme: 'dark'`. `save` stores
 `{alias, description, sourceType, readOnly: true, pluginConfig}` and then each `{name, value}`
 secret, and resolves to `{ok: true}` or `{ok: false, errors}`. Keep secret values out of
 `pluginConfig`: reference them as `{{secret.NAME}}` placeholders and hand the values to `save`.
@@ -191,6 +193,14 @@ the secret to set; if the final save is refused, the error ends with "the source
 disabled". An existing source that already holds secrets is saved first and its secrets after;
 secrets new to it are written first and deleted again if the source is refused. A secret held
 through an `externalRef` is never overwritten with a value.
+
+`save(pluginConfig, secrets, {connectionChanged: true})` says the edit changes what the source's
+secrets are bound to (the provider's `connectionOf`). For an existing source holding secrets the
+sequence is then the disabled-first one: the source is saved disabled, which deletes its stored
+secrets, every secret handed to `save` is written, then the source is saved as asked. The editor
+must hand again every secret the source needs; with none, `save` answers `{ok: false, errors:
+['changing the connection clears the stored secrets: type them again']}` and saves nothing. The
+third argument is optional (false when omitted), so an editor that passes two saves as before.
 
 `errors` carries each failure whole. The manager answers a refused source with one
 `invalid_federated_source` message that joins its errors with "; ", and a provider error may itself
@@ -210,7 +220,10 @@ wants per-field errors validates through its own module endpoint before saving.
 - `ctx.source.pluginConfig` holds secret placeholders (`{{secret.NAME}}`), never values.
 - Every module source is saved `readOnly: true`: core cannot judge what a plugin's writes do, so it
   never offers them. The `ctx.readOnly` rule is conservative: it is true
-  for a non-superuser editing a source that holds any secret, whether or not the edit would touch it.
+  for a non-superuser editing a source that holds any secret, whether or not the edit would touch it,
+  unless the type sets `editsHeldSources` and no secret is held through an `externalRef`.
+- Contract 1 grows only additively: `heldSecrets` and the third `save` argument are new, and an
+  older console sends neither, so check `Array.isArray(ctx.heldSecrets)` before relying on them.
 - Saving an existing source that holds no secret, with new secrets, disables it until those
   secrets are written, then saves it as asked.
 

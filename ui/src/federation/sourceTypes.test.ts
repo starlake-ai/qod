@@ -5,8 +5,8 @@ import {
 } from './sourceTypes';
 
 const plugins: FederatedSourceTypeView[] = [
-  { module: 'test-module', sourceType: 'test_connector', label: 'Test connector', editorBundle: '/test-module/editor.js' },
-  { module: 'test-module', sourceType: 'plain_connector', label: 'plain_connector', editorBundle: null },
+  { module: 'test-module', sourceType: 'test_connector', label: 'Test connector', editorBundle: '/test-module/editor.js', editsHeldSources: true },
+  { module: 'test-module', sourceType: 'plain_connector', label: 'plain_connector', editorBundle: null, editsHeldSources: false },
 ];
 
 /** The picker as the form offered it before module types existed, copied from FederationSection. */
