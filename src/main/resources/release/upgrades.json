@@ -182,6 +182,15 @@
           "text": "Watch pools whose cohort slots were refilled before the upgrade: such a node's cohort now comes from its id, so when it restarts it may go pending with none_match or take a server of another cohort, for as long as the id lives."
         }
       ]
+    },
+    {
+      "version": "0.15.3",
+      "changesets": [],
+      "min_from_version": "0.10.0",
+      "rollback_without_restore": true,
+      "rollback_blocked_by": [],
+      "notes": "https://github.com/starlake-ai/quack-on-demand/blob/v0.15.3/CHANGELOG.md",
+      "steps": []
     }
   ]
 }
