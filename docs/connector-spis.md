@@ -221,6 +221,14 @@ that every non-public `/api` route passes, plus
 gets the guard; the module makes the call itself. The guard reads no tenant from a module's path,
 so that call is what confines the caller to the tenant.
 
+Reading a stored source from a module route: `ctx.ownSources` answers `source(tenantDbId, alias)`,
+the stored source when its type is one of the module's own provider wires (None for any other
+type or an unknown alias), and `secretValue(tenantDbId, alias, name)`, the value of its secret
+when it is held as a value (None for an `externalRef` secret or a missing one). Both read the
+control-plane database: call them inside `IO.blocking`, once the route has authorized its caller
+as above. Take the endpoint from the stored config, never from the request, never log the value,
+and send it only to that endpoint.
+
 ## Refusal messages
 
 All start with `QoD: ` and never include policy SQL, literals, identity values or backend

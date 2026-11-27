@@ -51,5 +51,9 @@ final case class ManagerContext(
       * statements, never for SQL a user supplied. See [[SystemSql]] for the trust model. Required:
       * every context is built with a module's own instance (Main builds one context per module).
       */
-    systemSql: SystemSql
+    systemSql: SystemSql,
+    /** The stored sources of this module's own source types, and their secret values. Stable SPI.
+      * Required: Main builds one per module, over the wires of that module's providers.
+      */
+    ownSources: OwnSources
 )
