@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Changed
+
+- **A module-provided source's form ends with its editor's Cancel and Save.** The federation form
+  left its own Cancel, and a disabled, always checked "Read-only catalog" box, under a module's
+  source editor, so the editor's Save (the only Save of such a source, which also saves its alias
+  and description) sat mid-form and read as a save for the editor's fields alone. While an editor is
+  mounted the form now shows no actions of its own, and states above the editor that the source is
+  always saved read-only. An editor that fails to load shows a Cancel with its error. Built-in types,
+  a module type without an editor and the loading state keep the form's Cancel.
+
 ### Fixed
 
 - **A table's snapshot list holds all of its commits** (#313). `GET

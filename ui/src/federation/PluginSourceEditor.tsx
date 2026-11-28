@@ -19,7 +19,8 @@ export function editorMountDeps(p: {
  *  fields. It remounts only when the source type, the bundle, the module, the tenant-db, the source or the read-only
  *  state changes; `save` and `cancel` always reach the form's current handlers, so the alias and
  *  description typed after the mount are the ones saved. An editor that fails shows an error
- *  naming its module, and the rest of the form works on. */
+ *  naming its module and a Cancel (the form shows no actions of its own while an editor is
+ *  mounted), and the rest of the form works on. */
 export default function PluginSourceEditor(props: {
   sourceType: string;
   module: string;
@@ -74,7 +75,15 @@ export default function PluginSourceEditor(props: {
   // The host container is always rendered, so the mount effect finds it whatever the state.
   return (
     <div className="qod-source-editor">
-      {error && <div className="login-err">{error}</div>}
+      {error && (
+        <>
+          <div className="login-err">{error}</div>
+          {/* The form leaves its actions to a mounted editor: one that failed cannot offer them. */}
+          <div className="row" style={{ gap: 8, marginTop: '1rem', justifyContent: 'flex-end' }}>
+            <button type="button" className="cancel-button" style={{ minWidth: '7rem' }} onClick={() => cancelRef.current()}>Cancel</button>
+          </div>
+        </>
+      )}
       <div ref={host} />
     </div>
   );

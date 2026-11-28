@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { FederatedSourceTypeView } from '../api/types';
 import {
-  BUILT_IN_SOURCE_TYPES, formKindOf, isBuiltInSourceType, NO_EDITOR_MESSAGE, sourceTypeOptions,
+  BUILT_IN_SOURCE_TYPES, editorOwnsActions, formKindOf, isBuiltInSourceType, NO_EDITOR_MESSAGE,
+  sourceTypeOptions,
 } from './sourceTypes';
 
 const plugins: FederatedSourceTypeView[] = [
@@ -34,6 +35,19 @@ describe('the type picker', () => {
   it('keeps the type of a stored source that no module lists', () => {
     expect(sourceTypeOptions([], 'unloaded_connector'))
       .toEqual([...builtIns, { value: 'unloaded_connector', label: 'unloaded_connector' }]);
+  });
+});
+
+describe('editorOwnsActions', () => {
+  it('leaves the actions to a mounted module editor', () => {
+    expect(editorOwnsActions('plugin-editor', false)).toBe(true);
+    expect(editorOwnsActions('plugin-editor', true)).toBe(true);
+  });
+
+  it('keeps the form actions while the editor loads, without an editor, and for built-in types', () => {
+    expect(editorOwnsActions('plugin-editor', null)).toBe(false);
+    expect(editorOwnsActions('plugin-no-editor', false)).toBe(false);
+    for (const kind of ['sql', 'iceberg', 'rdbms'] as const) expect(editorOwnsActions(kind, false)).toBe(false);
   });
 });
 

@@ -17,7 +17,7 @@ import PluginSourceEditor from '../federation/PluginSourceEditor';
 import { editorReadOnly, type SaveOptions, type SourceEditorSecret } from '../federation/sourceEditorContract';
 import { savePluginSource } from '../federation/pluginSourceSave';
 import {
-  formKindOf, isBuiltInSourceType, NO_EDITOR_MESSAGE, sourceTypeOptions,
+  editorOwnsActions, formKindOf, isBuiltInSourceType, NO_EDITOR_MESSAGE, sourceTypeOptions,
 } from '../federation/sourceTypes';
 import { useFederatedSourceTypes } from '../federation/useFederatedSourceTypes';
 
@@ -937,6 +937,7 @@ export default function FederationSection({
   const formKind   = formKindOf(sourceType, pluginTypes);
   const isPlugin   = formKind === 'plugin-editor' || formKind === 'plugin-no-editor';
   const pluginType = pluginTypes.find(t => t.sourceType === sourceType);
+  const editorActions = editorOwnsActions(formKind, pluginReadOnly);
   const setIcebergField = (key: keyof IcebergFields, value: string) =>
     setIceberg(prev => ({ ...prev, [key]: value }));
   const setRdbmsField = (key: keyof RdbmsFields, value: string) =>
@@ -1555,13 +1556,18 @@ export default function FederationSection({
               </>
             )}
 
+            {isPlugin && (
+              <div style={{ fontSize: '.75em', color: 'var(--text-mute)' }}>
+                A module-provided source is always saved read-only.
+              </div>
+            )}
             {formKind === 'plugin-no-editor' && (
               <div className="subtle" style={{ margin: '.5rem 0' }}>{NO_EDITOR_MESSAGE}</div>
             )}
             {formKind === 'plugin-editor' && pluginReadOnly == null && (
               <div className="loading">Loading editor...</div>
             )}
-            {formKind === 'plugin-editor' && pluginType?.editorBundle && pluginReadOnly != null && (
+            {editorActions && pluginType?.editorBundle && pluginReadOnly != null && (
               <PluginSourceEditor
                 key={sourceType}
                 sourceType={sourceType}
@@ -1621,32 +1627,37 @@ export default function FederationSection({
             </label>
             )}
 
-            <label className="checkbox-label">
-              <input
-                type="checkbox"
-                checked={isPlugin || readOnly}
-                disabled={isPlugin}
-                onChange={ev => setReadOnly(ev.target.checked)}
-              />
-              {' '}Read-only catalog
-            </label>
-            <div style={{ fontSize: '.75em', color: 'var(--text-mute)' }}>
-              {isPlugin
-                ? 'A module-provided source is always saved read-only.'
-                : isIceberg || isRdbms
-                ? 'Renders a READ_ONLY ATTACH option and denies writes at the edge. Takes effect on an already-running node only after the pool recycles.'
-                  + (isRdbms
-                    ? ' The edge also refuses raw-SQL passthrough calls (postgres_execute, postgres_query, query with computed SQL, ...) aimed at it, but cannot see a macro or view that already wraps one. Connect as a database user without write privileges: that is the complete guarantee.'
-                    : '')
-                : 'Denies writes to this catalog at the edge. The ATTACH text itself is yours, so this screen is the only enforcement for a sql source.'}
-            </div>
+            {!isPlugin && (
+              <>
+                <label className="checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={readOnly}
+                    onChange={ev => setReadOnly(ev.target.checked)}
+                  />
+                  {' '}Read-only catalog
+                </label>
+                <div style={{ fontSize: '.75em', color: 'var(--text-mute)' }}>
+                  {isIceberg || isRdbms
+                    ? 'Renders a READ_ONLY ATTACH option and denies writes at the edge. Takes effect on an already-running node only after the pool recycles.'
+                      + (isRdbms
+                        ? ' The edge also refuses raw-SQL passthrough calls (postgres_execute, postgres_query, query with computed SQL, ...) aimed at it, but cannot see a macro or view that already wraps one. Connect as a database user without write privileges: that is the complete guarantee.'
+                        : '')
+                    : 'Denies writes to this catalog at the edge. The ATTACH text itself is yours, so this screen is the only enforcement for a sql source.'}
+                </div>
+              </>
+            )}
               </div>
-              <div className="row" style={{ gap: 8, marginTop: '1rem', justifyContent: 'flex-end' }}>
-                <button type="button" className="cancel-button" style={{ minWidth: '7rem' }} onClick={closeForm}>Cancel</button>
-                {!isPlugin && (
-                  <button type="submit" style={{ minWidth: '7rem' }} disabled={!credentialsOk}>{editingAlias ? 'Save' : 'Create'}</button>
-                )}
-              </div>
+              {/* A mounted module editor ends the form with its own Cancel and Save, the only Save of
+                  a module-provided source: a second Cancel under it would read as a second form. */}
+              {!editorActions && (
+                <div className="row" style={{ gap: 8, marginTop: '1rem', justifyContent: 'flex-end' }}>
+                  <button type="button" className="cancel-button" style={{ minWidth: '7rem' }} onClick={closeForm}>Cancel</button>
+                  {!isPlugin && (
+                    <button type="submit" style={{ minWidth: '7rem' }} disabled={!credentialsOk}>{editingAlias ? 'Save' : 'Create'}</button>
+                  )}
+                </div>
+              )}
             </form>
         </Modal>
       )}
