@@ -38,3 +38,12 @@ export function formKindOf(sourceType: string, plugins: FederatedSourceTypeView[
   }
   return plugins.find(p => p.sourceType === sourceType)?.editorBundle ? 'plugin-editor' : 'plugin-no-editor';
 }
+
+/** Whether a mounted module editor renders the form's actions: the form of a module type with an
+ *  editor, once the source's read-only state is known (null while it loads). The editor's Cancel
+ *  and Save then end the form, the only Save of a module-provided source, and the form shows no
+ *  Cancel or read-only checkbox of its own. A type without an editor, and the loading state, keep
+ *  the form's Cancel. */
+export function editorOwnsActions(kind: FormKind, editorReadOnly: boolean | null): boolean {
+  return kind === 'plugin-editor' && editorReadOnly != null;
+}
