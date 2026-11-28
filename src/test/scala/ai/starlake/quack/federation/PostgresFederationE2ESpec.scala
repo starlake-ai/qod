@@ -120,7 +120,8 @@ class PostgresFederationE2ESpec extends AnyFlatSpec with Matchers with OptionVal
       resolver = new PostgresSecretResolver(),
       // No tenant-db catalog alias reserved: these cases assert federation SQL round-trips
       // through the real store, and none of them collides with its own tenant-db's alias.
-      catalogAliasOf = _ => IO.pure(None)
+      catalogAliasOf = _ => IO.pure(None),
+      tenantOf = _ => IO.pure(Some("t1"))
     )
 
   // -----------------------------------------------------------------------

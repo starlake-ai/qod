@@ -47,7 +47,8 @@ private[runtime] final class RdbmsFederationLiveNode(tempDir: Path):
       loadEnabled = _ => IO.pure(sources),
       loadSecrets = id => IO.pure(secrets.filter(_.federatedSourceId == id)),
       resolver = new PostgresSecretResolver(),
-      catalogAliasOf = _ => IO.pure(None)
+      catalogAliasOf = _ => IO.pure(None),
+      tenantOf = _ => IO.pure(Some("t1"))
     ).build("td-live").unsafeRunSync().getOrElse("")
 
   def start(extraSetupSql: String): Unit =

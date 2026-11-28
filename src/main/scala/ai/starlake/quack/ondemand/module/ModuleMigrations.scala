@@ -2,6 +2,7 @@ package ai.starlake.quack.ondemand.module
 
 import ai.starlake.quack.ondemand.state.LiquibaseRunner
 import ai.starlake.quack.spi.ManagerModule
+import cats.effect.unsafe.implicits.global
 import com.typesafe.scalalogging.LazyLogging
 
 /** Applies each module's Liquibase changelog against the control-plane database, after the core
@@ -21,4 +22,19 @@ object ModuleMigrations extends LazyLogging:
         logger.info(s"module ${m.name}: applying changelog $path")
         runnerFor(defaultMetastore, path)()
       }
+    }
+
+  /** Runs every module's [[ManagerModule.prepare]] in module order, after [[run]] and before pool
+    * restore. A failing one stops the boot, naming the module.
+    */
+  def prepare(
+      modules: List[ManagerModule],
+      controlPlane: javax.sql.DataSource,
+      config: com.typesafe.config.Config
+  ): Unit =
+    modules.foreach { m =>
+      try m.prepare(controlPlane, config).unsafeRunSync()
+      catch
+        case e: Exception =>
+          throw new RuntimeException(s"module ${m.name}: prepare failed: ${e.getMessage}", e)
     }

@@ -150,7 +150,7 @@ object FederatedSourceRules:
   /** Empty when `source` may be stored. `reserved` is the tenant-db's own catalog alias plus every
     * OTHER source's alias in it, as the blob builder reserves them at spawn.
     */
-  def errors(source: FederatedSource, reserved: Set[String]): List[String] =
+  def errors(source: FederatedSource, tenant: String, reserved: Set[String]): List[String] =
     val t            = source.sourceType
     val setupOnTyped =
       Option.when(t.rendered && source.setupSql.trim.nonEmpty)(
@@ -188,5 +188,5 @@ object FederatedSourceRules:
               s"unknown sourceType '$w' (expected one of: ${FederatedSourceType.wireList}), " +
                 "or its module is not loaded"
             )
-          case Some(p) => p.errors(source, reserved)
+          case Some(p) => p.errors(source, tenant, reserved)
     (setupOnTyped.toList ++ source.validate ++ typed).distinct
