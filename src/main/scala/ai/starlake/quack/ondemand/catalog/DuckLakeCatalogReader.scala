@@ -580,21 +580,25 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource)
 
   /** All snapshots, newest first. Counts are computed from `ducklake_data_file`: a file "added at"
     * snapshot n has begin_snapshot = n, "removed at" n has end_snapshot = n. `affectedTables`
-    * resolves the table ids referenced by `changes_made` to (schema, table) names visible at that
-    * snapshot. `author` / `commitMessage` are the P1 stamping columns - they live on
-    * `ducklake_snapshot_changes`, not `ducklake_snapshot` (verified against a live DuckLake 0.3
-    * catalog; `information_schema.columns` for `ducklake_snapshot` carries only
+    * resolves the tables `changes_made` references to (schema, table) names visible at that
+    * snapshot, for every verb that names a table (`DuckLakeCatalogReader.SnapshotTableVerbs`), so
+    * inlined writes and maintenance name their table too (#313). `author` / `commitMessage` are the
+    * P1 stamping columns - they live on `ducklake_snapshot_changes`, not `ducklake_snapshot`
+    * (verified against a live DuckLake 0.3 catalog; `information_schema.columns` for
+    * `ducklake_snapshot` carries only
     * `snapshot_id/snapshot_time/schema_version/next_catalog_id/next_file_id`). Both are SQL NULL
     * (not empty string) on an unstamped snapshot, so `Option(rs.getString(...))` maps them to None
     * directly.
     *
     * `limit` is the page size (caller is responsible for clamping). `before` is the exclusive
     * keyset cursor: only snapshots with snapshot_id strictly less than `before` are returned.
-    * `table` is an optional (schema, table) filter: only snapshots whose `affectedTables` include
-    * it survive. Filtering happens after resolving `affectedTables` (same in-memory parse
-    * `affectedTables` already does - no second SQL-level parser for `changes_made`), and `limit` is
-    * applied AFTER the filter so a caller asking for the last 20 snapshots touching one table
-    * actually gets 20, not up to 20 after truncating the unfiltered page.
+    * `table` is an optional (schema, table) filter. A live table is followed by its id, as
+    * `listTableHistory` follows it, so its commits from before a rename are listed too and a
+    * `CREATE OR REPLACE` starts its list; a table that is no longer live is matched by name in
+    * `affectedTables`. Filtering happens after resolving the tables (the same in-memory parse, no
+    * second SQL-level parser for `changes_made`), and `limit` is applied AFTER the filter so a
+    * caller asking for the last 20 snapshots touching one table actually gets 20, not up to 20
+    * after truncating the unfiltered page.
     *
     * The SQL-side `LIMIT` is `limit` exactly when `table` is None (the UI panel's hot path stays a
     * bounded read, identical to the pre-filter behavior). When `table` is set, the SQL window is
@@ -611,24 +615,36 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource)
     val fetchLimit = table match
       case None    => limit
       case Some(_) => math.min(limit.toLong * 50L, Int.MaxValue.toLong).toInt
-    val entries =
-      snapshotPage(before, None, fetchLimit, TableChangeVerbs, member = false).map(_.entry)
+    val entries = snapshotPageWithIds(
+      before,
+      None,
+      fetchLimit,
+      DuckLakeCatalogReader.SnapshotTableVerbs,
+      member = false
+    ).map((m, ids) => (m.entry, ids))
     val filtered = table match
-      case None                    => entries
+      case None                    => entries.map(_._1)
       case Some((schema, tblName)) =>
-        entries.filter(_.affectedTables.exists(t => t.schema == schema && t.name == tblName))
+        currentTableId(schema, tblName) match
+          case Some(id) => entries.collect { case (e, ids) if ids.contains(id) => e }
+          case None     =>
+            entries.collect {
+              case (e, _)
+                  if e.affectedTables.exists(t => t.schema == schema && t.name == tblName) =>
+                e
+            }
     filtered.take(limit)
 
-  /** The newest `limit` snapshots for a plain member's MCP `list_snapshots`, newest first. Unlike
-    * [[listSnapshots]], `affectedTables` also names the tables of inlined writes and of maintenance
+  /** The newest `limit` snapshots for a plain member's MCP `list_snapshots`, newest first. As in
+    * [[listSnapshots]], `affectedTables` names the tables of inlined writes and of maintenance
     * (`DuckLakeCatalogReader.SnapshotTableVerbs`, the vocabulary `table_history` reads), so a
-    * member's own inlined commits are not lost. Each table is named as it is today, the table its
-    * stable id names (the node's rule for a read at any snapshot): a table that was dropped is left
-    * out. With `underPolicy` (the member holds a column or a row policy, the node's condition for
-    * checking a time-travel read) a table whose name history is not stable ([[nameHistoryStable]])
-    * is left out too. Each snapshot says whether every entry of its `changes_made` named a table it
-    * resolved. The counts are the whole snapshot's, so an entry left out may hide a table the
-    * member cannot see.
+    * member's own inlined commits are not lost. Unlike it, each table is named as it is today, the
+    * table its stable id names (the node's rule for a read at any snapshot): a table that was
+    * dropped is left out. With `underPolicy` (the member holds a column or a row policy, the node's
+    * condition for checking a time-travel read) a table whose name history is not stable
+    * ([[nameHistoryStable]]) is left out too. Each snapshot says whether every entry of its
+    * `changes_made` named a table it resolved. The counts are the whole snapshot's, so an entry
+    * left out may hide a table the member cannot see.
     */
   def listSnapshotsForMember(limit: Int): List[DuckLakeCatalogReader.MemberSnapshot] =
     snapshotPage(None, None, limit, DuckLakeCatalogReader.SnapshotTableVerbs, member = true)
@@ -691,6 +707,17 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource)
       member: Boolean,
       underPolicy: Boolean = false
   ): List[DuckLakeCatalogReader.MemberSnapshot] =
+    snapshotPageWithIds(before, ids, fetchLimit, verbs, member, underPolicy).map(_._1)
+
+  /** [[snapshotPage]], each snapshot with the ids of the tables its entries resolved to. */
+  private def snapshotPageWithIds(
+      before: Option[Long],
+      ids: Option[Set[Long]],
+      fetchLimit: Int,
+      verbs: Set[String],
+      member: Boolean,
+      underPolicy: Boolean = false
+  ): List[(DuckLakeCatalogReader.MemberSnapshot, Set[Long])] =
     // One array parameter, so the number of ids does not meet the JDBC limit on bind parameters.
     val (whereClause, whereParams) = (before, ids) match
       case (Some(n), _) => ("\n WHERE s.snapshot_id < ?", List(n))
@@ -771,8 +798,8 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource)
         }
     rows.map {
       case (sid, at, ver, changes, author, commitMessage, rowsAdded, filesAdded, filesRemoved) =>
-        val (tables, accounted) = tableRefs(sid, changes, history, verbs, current)
-        DuckLakeCatalogReader.MemberSnapshot(
+        val (tables, accounted, tableIds) = tableRefs(sid, changes, history, verbs, current)
+        val snapshot                      = DuckLakeCatalogReader.MemberSnapshot(
           CatalogSnapshotEntry(
             snapshotId = sid,
             committedAt = at,
@@ -787,6 +814,7 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource)
           ),
           accounted
         )
+        (snapshot, tableIds)
     }
 
   /** Every `ducklake_table` row (all versions of every table, live or dropped), the raw material
@@ -865,21 +893,12 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource)
       _.getString("schema_name")
     ).toSet
 
-  /** Verbs in changes_made whose payload references a table. */
-  private val TableChangeVerbs = Set(
-    "created_table",
-    "dropped_table",
-    "altered_table",
-    "inserted_into_table",
-    "deleted_from_table",
-    "compacted_table"
-  )
-
   /** Parses changes_made (comma-separated `verb:payload` entries) and resolves the table references
     * of `verbs` to names. Payloads are numeric table ids in older DuckLake versions and quoted
     * qualified names ("schema"."table") in newer ones; both are handled. Unresolvable ids and other
     * verbs are skipped (the raw string still shows them); the flag says whether every entry was
-    * either a resolved table reference or a schema-only verb (`SchemaOnlyVerbs`).
+    * either a resolved table reference or a schema-only verb (`SchemaOnlyVerbs`), and the set holds
+    * the ids of the tables the entries resolved to.
     *
     * `current` None names a table as it was at `sid` (the REST and admin listing). `current` Some
     * brings the table to the id its stable name stands for and names it as today (a member's
@@ -892,7 +911,7 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource)
       history: List[TableVersion],
       verbs: Set[String],
       current: Option[Long => Option[CatalogTableRef]]
-  ): (List[CatalogTableRef], Boolean) =
+  ): (List[CatalogTableRef], Boolean, Set[Long]) =
     val raw     = DuckLakeCatalogReader.splitChanges(changes)
     val entries = raw.getOrElse(List("")).map { entry =>
       val sep = entry.indexOf(':')
@@ -911,16 +930,19 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource)
     val accounted = raw.isDefined && entries.forall((verb, ref) =>
       ref.isDefined || DuckLakeCatalogReader.SchemaOnlyVerbs.contains(verb)
     )
-    (entries.flatMap(_._2).distinct, accounted)
+    val resolved = entries.flatMap(_._2)
+    (resolved.map(_._2).distinct, accounted, resolved.flatMap(_._1).toSet)
 
-  /** The table an entry names: by id, or by the name it carried at `sid`. */
+  /** The table an entry names, by id or by the name it carried at `sid`, with its id when it
+    * resolves to one.
+    */
   private def refOf(
       verb: String,
       sid: Long,
       history: List[TableVersion],
       current: Option[Long => Option[CatalogTableRef]],
       target: Either[Long, (String, String)]
-  ): Option[CatalogTableRef] =
+  ): Option[(Option[Long], CatalogTableRef)] =
     // Visible at sid; `end >= sid` (not `>`) so a table dropped AT sid still resolves for its own
     // drop entry. At a rename both versions of the id match: the one that begins at sid, except
     // for `dropped_table`, which names the one that ends there. The order of `history` plays no
@@ -933,8 +955,15 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource)
     current match
       case None =>
         target match
-          case Left(id)      => versionOf(id).map(v => CatalogTableRef(v.schema, v.name))
-          case Right((s, t)) => Some(CatalogTableRef(s, t))
+          case Left(id) =>
+            versionOf(id).map(v => (Some(v.tableId), CatalogTableRef(v.schema, v.name)))
+          case Right((s, t)) =>
+            // A create names the version it begins (a DuckDB 2.0 rename commits as
+            // `created_table` under the new name); a CREATE OR REPLACE also ends the replaced
+            // one, under the same name, at the same snapshot, so the one beginning there wins.
+            val holds = history.filter(v => v.schema == s && v.name == t && v.coversChangeAt(sid))
+            val id    = holds.find(_.begin == sid).orElse(holds.maxByOption(_.begin)).map(_.tableId)
+            Some((id, CatalogTableRef(s, t)))
       case Some(nameOf) =>
         val id = target match
           case Left(id)      => Some(id)
@@ -946,7 +975,7 @@ class DuckLakeCatalogReader(private val ds: HikariDataSource)
               .distinct match
               case one :: Nil => Some(one)
               case _          => None
-        id.flatMap(nameOf)
+        id.flatMap(i => nameOf(i).map(ref => (Some(i), ref)))
 
   /** table_id of `(schema, table)` in the CURRENT catalog state. History identity: all history
     * predicates key on this id, so the timeline survives renames (a rename inserts a new

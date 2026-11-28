@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **A table's snapshot list holds all of its commits** (#313). `GET
+  /api/catalog/tenant/<t>/database/<db>/snapshots?table=<schema>.<table>` left out every snapshot
+  of an inlined write (`inlined_insert`, `inlined_delete`, which DuckDB 2.0 uses for small writes)
+  and of maintenance (`inline_flush`, `merge_adjacent`, `rewrite_delete`), and every commit from
+  before the table's last rename; those snapshots showed no table in the console's snapshot panel
+  and in an admin's MCP `list_snapshots` (a plain member's already named them). Every snapshot now
+  names the tables it touched, and `?table=` follows a live table by its id, as `table_history`
+  does, so its list spans renames and starts at a `CREATE OR REPLACE`; a table no longer live is
+  still matched by name.
+
 ## 0.15.2
 
 ### Upgrading
